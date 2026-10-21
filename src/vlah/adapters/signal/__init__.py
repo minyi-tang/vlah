@@ -1,0 +1,1 @@
+"""SignalSource adapters."""

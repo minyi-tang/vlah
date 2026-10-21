@@ -1,0 +1,31 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+build/
+dist/
+.pytest_cache/
+.ruff_cache/
+.hypothesis/
+.coverage
+htmlcov/
+
+# Editors and OS
+.DS_Store
+.idea/
+.vscode/
+
+# Run state: per-run blackboards, KV dumps, sandboxes, traces
+.herd/
+*.ptr.local
+
+# Never commit judge internals or hidden data (v2.2 D10, D63; issue #10).
+# Generate them on the slow-eval machine or keep them under private/.
+private/
+**/hidden/
+**/holdout/
+**/planted/
+problems/**/probes/
+problems/**/reference/
+**/test_hidden.py
