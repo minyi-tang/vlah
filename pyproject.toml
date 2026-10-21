@@ -6,7 +6,7 @@ readme = "README.md"
 license = "MIT"
 requires-python = ">=3.11"
 dependencies = [
-    "pydantic>=2.7",
+    "pydantic>=2.11",
     "pyyaml>=6.0",
 ]
 
@@ -37,7 +37,7 @@ packages = ["vlah"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-addopts = ["--strict-markers", "-ra", "-m", "not slow"]
+addopts = ["--strict-markers", "--import-mode=importlib", "-ra", "-m", "not slow"]
 timeout = 60
 markers = [
     "l0: one of the 20 L0 plumbing assertions (v2.2 section 14.1)",
