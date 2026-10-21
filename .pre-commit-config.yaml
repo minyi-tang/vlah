@@ -1,0 +1,67 @@
+default_stages: [pre-commit, pre-push, manual]
+
+repos:
+  - repo: https://github.com/PyCQA/autoflake
+    rev: v2.3.1
+    hooks:
+      - id: autoflake
+        args: [--remove-all-unused-imports, --in-place]
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v5.0.0
+    hooks:
+      - id: check-symlinks
+      - id: destroyed-symlinks
+      - id: trailing-whitespace
+      - id: end-of-file-fixer
+      - id: check-yaml
+        args: [--allow-multiple-documents]
+      - id: check-toml
+      - id: check-ast
+      - id: check-added-large-files
+      - id: check-merge-conflict
+      - id: check-shebang-scripts-are-executable
+      - id: detect-private-key
+      - id: debug-statements
+      - id: no-commit-to-branch
+  - repo: https://github.com/PyCQA/isort
+    rev: 5.13.2
+    hooks:
+      - id: isort
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.11.10
+    hooks:
+      - id: ruff-check
+  - repo: https://github.com/psf/black
+    rev: 24.10.0
+    hooks:
+      - id: black-jupyter
+  - repo: local
+    hooks:
+      # Matches every new/existing file under vlah/ and tests/. Check only.
+      # Do not pass --fix: it renames within one file and misses cross-file
+      # callers, fixtures, and string references.
+      - id: leading-underscore-names
+        name: leading-underscore class, function, and attribute names
+        entry: python3 scripts/check_leading_underscore.py
+        language: system
+        types: [python]
+        files: ^(vlah|tests)/
+        exclude: ^vlah/vendor/
+      # Check only. Do not pass --fix: else: pass is a last resort, not the
+      # rewrite this hook should apply on commit.
+      - id: if-else-required
+        name: if statements must have else
+        entry: python3 scripts/check_if_else.py
+        language: system
+        types: [python]
+        files: ^vlah/
+        exclude: ^vlah/vendor/
+      # Check only. Each doc must have exactly one H1 and may not go deeper
+      # than H3 (#### is rejected). Headings inside fenced code blocks are
+      # ignored.
+      - id: doc-heading-structure
+        name: document heading structure (one H1, max H3)
+        entry: python3 scripts/check_doc_headings.py
+        language: system
+        types: [markdown]
+        files: ^docs/
