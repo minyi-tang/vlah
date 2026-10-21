@@ -1,323 +1,325 @@
-# Research Herd 设计文档
+# Research Herd Design (v2.2)
 
-大规模 agent 协作研究系统 · Oct 17, 2026 · @Minyi
+A large-scale agent collaboration system for research · Oct 17, 2026 · @Minyi
 
-## 0. 读法与状态标签
+*English translation of the Chinese original (`zh/research-herd-design-v2.2.md`). IDs, numbers and section numbers are unchanged.*
 
-这份文档的目标不是一步到位，是让第一轮 PoC 能快速建起来、跑起来、坏掉的时候知道改哪里。为此每个设计决定都带一个状态标签，说明它能不能改、怎么改；第 15 节的决策登记表把所有决定按编号列齐，是实现和复盘时的唯一检查清单。
+## 0. How to read this document, and status tags
 
-| 标签 | 含义 | PoC 失败时怎么办 |
+The goal of this document is not to get everything right in one step. It is to let the first PoC round get built quickly and start running, and, when it breaks, to make clear what to change. To that end, every design decision carries a status tag that says whether it can change and how. The decision register in §15 lists every decision by number. It is the single checklist for implementation and for retrospectives.
+
+| Tag | Meaning | What to do when the PoC fails |
 | --- | --- | --- |
-| \[约束\] | 环境或问题强加的，改它等于换问题 | 不改设计，改问题定义或环境 |
-| \[推论 P#\] | 从第 2 节某条原则推出来的。原则成立它就成立 | 先质疑原则；原则不倒，推论不动 |
-| \[假设 H#\] | 我们的猜测，第 3 节登记，第 11 节有验证实验，第 15 节有 fallback | 切到登记表里的 fallback，不重新设计 |
-| \[默认\] | 参数初值，附取值理由，随意调 | 调 |
+| \[Constraint\] | Imposed by the environment or the problem; changing it means changing the problem | Don't change the design; change the problem definition or the environment |
+| \[Derived P#\] | Derived from one of the principles in §2. If the principle holds, it holds | Question the principle first; if the principle stands, the derived decision stays |
+| \[Hypothesis H#\] | Our guess. Registered in §3, with a validation experiment in §11 and a fallback in §15 | Switch to the fallback in the register; don't redesign |
+| \[Default\] | An initial parameter value, with the reason for choosing it; tune freely | Tune it |
 
-没有标签的句子是解释，不是决定。读者分两种：要实现它的 agent 先看 0.1 节的讨论轨迹对齐思路，再看第 14 节的最小落地版和第 15 节的登记表，再按需回看各节；要判断它对不对的人先看第 1 到 3 节，那里是全部前提。
+Sentences without a tag are explanation, not decisions. There are two kinds of readers. An agent that will implement this should first read the discussion trail in §0.1 to align on the thinking, then the minimum viable version in §14 and the register in §15, and then go back to other sections as needed. A person who wants to judge whether it is right should first read §1 to §3; all the premises are there.
 
-本文的 v1 经过一次独立审稿，记录在附录 A；v2 在 v1 基础上重写，审稿指出的问题都已并入正文，附录 A 保留是为了让人知道第一稿错在哪。附录 B 是一个假想 case 的逐事件走查。v2.2（2026-10-18）：coding agent 在 v2 上自审出一版 v3，经独立审稿后决定不采纳它的转向（按杠杆拆任务、静态分工的对照组），只把与转向无关的改进并入本文：D72 到 D77，第 7 节 hook 表里的重启路径，第 8 节规则 6，第 14.1 节的测试台改动，H1 和 H3 的判定标准。审稿记录在《Research Herd v3 审稿》。第 29 轮又去掉了所有为省 token 而设的机制（P10，D47 撤销）。第 30 轮按 Opus 的审稿（文件 Research-Herd-v2.2-fixes-zh.md）修了两处统计错误（抽查规则、相互作用阈值），把合并器改为各臂相同，推迟 D78，并把 D72 到 D78 接进 schema、组件表、臂开关表、L0 测试和附录 C。
+The v1 of this document went through one independent review, recorded in Appendix A. v2 is a rewrite on top of v1, and every problem the review raised has been folded into the main text. Appendix A is kept so people can see where the first draft went wrong. Appendix B is an event-by-event walkthrough of a hypothetical case. v2.2 (2026-10-18): a coding agent self-reviewed v2 and produced a v3. After an independent review, we decided not to adopt its change of direction (splitting tasks by lever, a control group with static division of labor). We folded into this document only the improvements unrelated to that change of direction: D72 to D77, the restart path in the hook table in §7, §8 rule 6, the testbed changes in §14.1, and the verdict criteria for H1 and H3. The review is recorded in *Research Herd v3 Review* (not in the repo). Round 29 then removed every mechanism that existed to save tokens (P10; D47 withdrawn). Round 30, following Opus's review (file: *v2.2 Fixes Review*, `research-herd-v2.2-fixes.md`), fixed two statistical errors (the spot-check rule and the interaction threshold), made the merger the same across arms, deferred D78, and wired D72 to D78 into the schema, the component table, the arm-switch table, the L0 tests and Appendix C.
 
-## 0.1 讨论轨迹：这份设计是怎么来的
+## 0.1 Discussion trail: how this design came about
 
-读这一节的目的不是了解历史，是知道每个设计回答的是哪个问题。要改一个决定时，先找到它对应的那一行，确认改完之后那个问题仍然有答案。设计是两天里一轮轮追问出来的，每一轮都是一个具体的痛点或一个约束收紧，把前一轮的答案推翻了一半。
+The point of this section is not to learn the history. It is to know which question each design answers. When you want to change a decision, first find the row it corresponds to, and confirm that the question still has an answer after your change. The design came out of two days of probing questions, round after round. Each round was a specific pain point or a tightened constraint, and each overturned half of the previous round's answer.
 
-| # | 这一轮问的是 | 转折或洞察 | 落到文档 |
+| # | What this round asked | Turn or insight | Where it landed in the document |
 | --- | --- | --- | --- |
-| 1 | 100 台机器、50 个 agent 解一个难题，有没有现成的 orchestration 框架？10,000 个 agent 解千禧年问题你会怎么做？不要简单 divide & conquer，要大量通信 | 现成框架解的是"每个 agent 跑得快不快"，而这个问题的本质是共享认知状态：黑板、验证器做信任层、按功能分工不按子问题分工、注意力是真正的瓶颈、多样性要显式管理 | P3、P7；角色表（§4） |
-| 2 | 我要解的问题绝大部分有外部 eval | 从"研究所"变成"搜索"：AlphaEvolve 一系的 archive 可以借；reward hacking 是必然不是风险，共享会放大它；best-of-N 是必须跑的对照 | 反 hacking（§9）、B1 基线（§11） |
-| 3 | eval 很贵很慢，支持不了高并发 | 稀缺资源不是 agent 也不是 token，是 eval 名额；agent 的工作从生成变成预测；分层保真度、提交前同行评审、带预测提交 | C1、D37、D40；阶梯（§9） |
-| 4 | 核心是信息共享，但我以前做的时候 handoff 总是丢信息：A 看到一条线索，交出去就没了，别人也恢复不了 | 病根是压缩发生在价值已知之前。agent 比人多一个能力：上下文可以复制。fork 代替 handoff、回头问、摘要只做索引、推转拉、线索做成可执行 artifact | P2；D4 到 D8 |
-| 5 | 黑板可以，但每个 agent 多久读一次？ | 按事件和状态读，不按时间：固定频率没有正确值。硬中断、软注入、按需检索；卡住了就多读 | P5；D17 到 D19 |
-| 6 | 那黑板是不是需要一个很强的 agent 来管？ | 一半对：需要强的判断，但不能让它坐在读路径上，否则它就是新的有损压缩器和单点偏见源。判断什么重要和控制谁能看见什么，必须是两个东西 | P4；D13 到 D16 |
-| 7 | 黑板其实可以直接用 git repo | 是，而且概念几乎一一对应；git 缺的是通知、语义检索、结构化查询、大文件，各补一层薄的；append-only 是必须的约定 | D30 到 D33 |
-| 8 | 我用过 kanban 式的 dispatcher，单个强 agent 能解的问题拆开反而变差：一个读 email、一个读 Slack，合并后信息全损，没有那个 click | 这是对多 agent 最根本的反驳，而且它是对的。click 只在单个上下文里发生；并行的应该是尝试，不是材料；join 由一个脑子做；任务是目标不是指令 | P1；D1 到 D3 |
-| 9 | 那研究问题上大规模 agent 怎么规避这个？ | 规模用在尝试数上不用在切问题上；不预先分解；层级按抽象分不按材料分；跨方向的 click 没人持有，要排进日程 | P8；D27、Scout |
-| 10 | 我还没把这些原则 map 到可落地的工程实践 | 第一次写成系统：仓库布局、五个服务、worker 循环和 hook、baseline、指标、建造顺序 | §5 到 §8、§11、§14 的骨架 |
-| 11 | 我不想让 herd 只做单一优化，我要一个能和它细致讨论、对齐了再开始的地方 | 人是密度最高也最容易被压缩丢掉的信息源。PI agent、charter、teach-back、讨论全文入库、首波从 PI fork、escalation；跨问题持久的是 PI 不是 herd | P6；D20 到 D23；§10 |
-| 12 | 这是不是需要最强的模型来细化每个 agent 的 goal？ | 一半对：强模型细化的是问题，不是每个 agent 的指令，否则又是 dispatcher 陷阱；worker 也不能弱，因为 click 在 worker 里 | 模型分级（§12）、D47 |
-| 13 | 写 design doc，self review，走一个假想 case | v1 写完，独立审稿指出的最大漏洞是闭环断裂：eval 结果回来没人接。从原则往下推时最容易犯的错：没有从一个 worker 的一天从头走到尾 | P9、D28；附录 A、B |
-| 14 | 不是所有问题都有固定 eval：优化 harness 代码库有，抽象问题只有 topline 而且不固定 | 三种形态；形态 B 里改尺子是工作的一部分；只有 topline 能动预算是反 Goodhart 的硬规则 | D12；metric claim；§9 三种形态 |
-| 15 | eval 可能是外部工具、本地 dataset、Kusto、flight 信号，要有自由度 | eval 不是一个组件，是一组 signal source 的插件接口；声明属性，阶梯、标定、预算从声明推导；exposure 归因 | C6、D39 |
-| 16 | 最后修订一版：逻辑要 coherent，每个设计说清是强制约束、猜的、还是从原则来的，PoC 失败后另一个 agent 不用猜；不追求一步到位，要快速落地可改进 | v2 重写：状态标签、硬约束表、带证伪条件的原则表、假设登记、决策登记表、最小落地版 | §0、§1 到 §3、§14、§15 |
-| 17 | eval 机器给多了，它通常是外部的；不明确的是怎么保证探索又广又深，发现好方向怎么动态加机器加 agent | eval 外部化后集群的本质是注意力容量。分配单位是 slot；快反应和永久化分开（surge）；深度来自 fork 不来自人数；广度靠硬底线；第一版分配是确定性规则 | §9.1；D49 到 D51 |
-| 18 | 这个思考合理吗？类似的我还没想到的有哪些？ | 成功情形之外要答失败情形：什么时候停、人的注意力怎么分、硬约束做门不做分；其余列为开放问题 | §9.2；D52 到 D54 |
-| 19 | 还有什么问题？够不够交给 agent 开始 PoC？ | 实现者视角的审稿：任务队列、事件 schema、eval\_request 语义、H1 的臂都没闭合。给 agent 的不是"去实现设计"，是"去验证 H1"，第一个交付物是落地计划不是代码 | D55 到 D58；附录 C |
-| 20 | 我有现成的 k8s / Terraform 集群仓库——但应该分层，agent 拿什么起、每个 agent 怎么实现都不该管；把有效的部分实现在一起，不 glue 到某个集群仓库或 agent 实现上 | 要建的是一个独立的 runtime + orchestration：四层、六个端口；herd 工具以 MCP server 暴露让 harness 可替换；每端口一个真适配器加一个内存适配器；内存版是迭代速度的来源 | §4.1；D59 到 D61；H12 |
-| 21 | 外部审稿：H1 的分数不可信；worker 能读到隐藏材料；hook 漏掉内建工具；fork 解不了上下文满；D51 和 D12 矛盾 | 五条都是关于 git 和 harness 的事实，不是设计偏好：判定改为 holdout 重评自选候选；私有存储；hook 三层；上下文满是压缩不是 fork；分配只吃顶层 | D62、D63；D60、D5、D51 改写 |
-| 22 | optimization 不是只找一条最优路径，不同路径在不同地方各有优化，你自己的例子就是组合，为什么设计里说 best-of-N？ | 名字从对照臂渗进了判定。产出是组合不是单点：候选多父、组合任务、interaction claim；对照臂结束后也合并，H1 检验的是运行中共享的增量；方向是 portfolio 不是 bandit arm。同轮并入外部审稿：两份 holdout、臂的物理隔离、push 凭证、候选格式 | D64 到 D69；D62、D58、D51 改写；H13 |
-| 23 | 我要开始实现 backbone 了，但不能只有 unit test；需要几个好问题和一个简单、不费时间的 case 来确定它 work，比直接 hook 到大项目跑两天才发现问题好 | 单元测试和 H1 之间缺一层。三级验收：L0 插头断言，L1 专门设计的合成问题 Knobs（每组 knob 针对一个机制，作为 backbone 的正对照）和 10 个自动判的问题，L2 真问题；上一级不全绿不进下一级 | D70；§14.1 |
-| 24 | 测试问题不能简单到一个 agent 就能做完；外部 eval harness 上要有 disclosure；先建这些 test guardrails——这本身不亚于一个单独的 design | Knobs 改为材料超过单个上下文，B0 作控制臂。Eval 的可信度独立成一份设计《Ledger》：威胁模型作脖柱、十二条不变量、信任边界、账本、Vault、断路器、判定引擎、攻击脚本作为验收；Critic 搬进信任区；Ledger 先于 Knobs 先于 herd | 当时写成《Ledger：Eval 信任层设计》；第 25 轮推翻，重写为《Herd 测试台》 |
-| 25 | 这不是 eval 信任层，是我们自己 design 的 guardrail，用便宜的方式模拟一个问题来 benchmark 我们的行为；文档写得不是人话；有没有简单的开源能复用 | Ledger 砍成测试台：五个零件（问题目录、快档、慢档、记录器、记分卡 + 对照组），防作弊只留三条；文档改为人话版在前、给实现者的部分在后；开源：SimPy、FastAPI + Redis、Inspect AI 可选，Gas Town 借概念不整个用 | 《Herd 测试台》全文重写；本文 §6、§14、§14.1、附录 C、D63 改引用 |
-| 26 | 之前的 use case 只是 context 大，agent 用 bash 或抽样也能做到；4 可以，其实就是策略多、单个 agent 没法同时 explore 很多方向；5 也可以；暂时就用这两个 | 选题标准改为：要迭代的方向数 × 每轮等待时间 > 墙钟时间，且改进可组合、有陷阱、有配额压力；材料多不算，Knobs 和另外两个候选淘汰；定 A（仿真器调度策略，埋 5 配料 1 陷阱 1 冲突）和 B（harness 埋 5 个坑），先 A 后 B；herd 要赢的不是广，是拼、不重撞、配额倾斜 | 《Herd 测试台》§1、§3、§4；本文 §14.1 L1 改写，D71 |
-| 27 | 让 coding agent 自审 v2 出了 v3，请验证它；我并没有理解，有多个方面的 research 和在每一个方面深度优化会冲突吗；你这个中英结合我看不懂 | v3 是换方向不是修订：任务按杠杆拆分、加 Mapper、对照组改成静态分工，它自己的模拟不支持这些结论。宽和深不冲突，v3 真正押的是"开局就按杠杆分人"，输掉的是多条路同攻一个方向。v3 带来几样与方向无关的好东西：判定协议、配对测量、合并流程棘轮、不靠 checkpoint 的重启路径、出网白名单；它对测试台的三处挑错成立 | 《Research Herd v3 审稿》；本节 |
-| 28 | 我觉得 v2 更好；可以（并入改进，出 v2.2） | v2 为主干，任务形态不变（每人拿一个 approach 攻整个问题，D1、D24），不按杠杆派活，不要 Mapper，不要 B2 臂。只并入与转向无关的改进，全部文字用中文写清楚 | D72–D77；第 7 节 hook 表；第 8 节规则 6；第 14.1 节；H1、H3 行；《Herd 测试台》改三处 |
-| 29 | token 不限量；我的点在于不要因为模型和 token 影响开发效率或者增加工程复杂度 | 设计里真正在省的一直是 eval 名额、墙钟、上下文窗口和人的注意力，不是 token；但有几处是为省 token 或省钱加的，全部去掉：模型分级和 H6（所有角色同一个最强模型）、Librarian 的分批参数、Budget meter 和 constraints.md 里的 token 预算、记分卡的成本项、测试台的 token 上限。反过来，只花模型调用不花 eval 的事都可以做冗余。剩下唯一要核对的是 API 的并发和速率上限 | P10；D47 撤销；D78；第 6、12 节；《Herd 测试台》第 6、7、11 节 |
-| 30 | Opus review 了 v2.2，出了一份修改清单，你自查一下，valid 的就修；四件需人定的事拍板：合并器各臂相同、预审推迟、S1 收得到基线前进和地图、周计划不顺延只是示意 | 清单全部成立，三个模拟重跑一致。两个统计错误：抽查规则拿被选中的测量去比（赢家诅咒），没人作弊也 58% 到 99% 误报，改成对同一段做两次新测量比差；相互作用的 70% 规则误报过半，改成差值超 2σ√2。一个混淆：合并器只给了 S2，改为四臂同配置运行中都跑，共享只指 worker 能否看到基线前进。一个泄露：预审的否决理由会把为什么得分泄给 worker，推迟。一个落地漏洞：D72 到 D78 没接进 schema、组件表、臂开关表、L0 和附录 C，补齐。运行次数不再写死 3，收尾顺序写死，地图的第一批脚本由人写。连带后果：合并器提前到测试台第 1 步 | D62、D65、D69、D72–D79；第 5、6、8、14 节；附录 C；《Herd 测试台》和《一页对齐》同步；审稿文件 Research-Herd-v2.2-fixes-zh.md |
+| 1 | 100 machines and 50 agents solving one hard problem: is there an off-the-shelf orchestration framework? How would you get 10,000 agents to solve a Millennium Prize problem? Not simple divide & conquer; there must be a lot of communication | Off-the-shelf frameworks solve "how fast does each agent run", but the essence of this problem is shared cognitive state: a blackboard, verifiers as the trust layer, division of labor by function rather than by subproblem, attention as the real bottleneck, diversity managed explicitly | P3, P7; role table (§4) |
+| 2 | Most of the problems I want to solve have an external eval | It shifts from "research institute" to "search": the archive from the AlphaEvolve line of work can be borrowed; reward hacking is a certainty, not a risk, and sharing amplifies it; best-of-N is a control that must be run | Anti-hacking (§9), B1 baseline (§11) |
+| 3 | Evals are expensive and slow, and can't support high concurrency | The scarce resource is neither agents nor tokens; it is eval slots. The agent's job shifts from generating to predicting; tiered fidelity, peer review before submission, submissions that carry predictions | C1, D37, D40; ladder (§9) |
+| 4 | Information sharing is the core, but when I did this before, handoffs always lost information: A sees a lead, hands it off, and it is gone, and nobody else can recover it | The root cause is that compression happens before the value is known. Agents have one capability humans lack: context can be copied. Fork instead of handoff, ask back, summaries only as an index, push turned into pull, leads made into executable artifacts | P2; D4 to D8 |
+| 5 | A blackboard works, but how often does each agent read it? | Read by event and state, not by time: a fixed frequency has no correct value. Hard interrupt, soft injection, on-demand search; read more when stuck | P5; D17 to D19 |
+| 6 | Then does the blackboard need a very strong agent to manage it? | Half right: it needs strong judgment, but that judgment can't sit on the read path, or it becomes a new lossy compressor and a single source of bias. Judging what matters and controlling who can see what must be two separate things | P4; D13 to D16 |
+| 7 | The blackboard could actually just be a git repo | Yes, and the concepts map almost one to one. What git lacks is notification, semantic search, structured queries and large files; add a thin layer for each. Append-only is a mandatory convention | D30 to D33 |
+| 8 | I've used kanban-style dispatchers. A problem that a single strong agent can solve gets worse when it is split up: one agent reads email, one reads Slack, and after merging, the information is all lost; the click never happens | This is the most fundamental objection to multi-agent systems, and it is right. The click only happens inside a single context. What runs in parallel should be attempts, not materials; the join is done by one mind; a task is a goal, not an instruction | P1; D1 to D3 |
+| 9 | Then how do large numbers of agents avoid this on research problems? | Spend scale on the number of attempts, not on slicing up the problem; no up-front decomposition; layers split by abstraction, not by material; nobody owns the cross-approach click, so it has to be put on the schedule | P8; D27, Scout |
+| 10 | I still haven't mapped these principles onto engineering practice that can actually be built | Written up as a system for the first time: repo layout, five services, the worker loop and hooks, baseline, metrics, build order | Skeleton of §5 to §8, §11, §14 |
+| 11 | I don't want the herd to do only single-objective optimization. I want a place where I can discuss things with it in detail and get aligned before it starts | Humans are the densest information source, and also the easiest to lose through compression. PI agent, charter, teach-back, full discussion text stored in the repo, first wave forked from the PI, escalation; what persists across problems is the PI, not the herd | P6; D20 to D23; §10 |
+| 12 | Does this need the strongest model to refine each agent's goal? | Half right: the strong model refines the problem, not each agent's instructions; otherwise it is the dispatcher trap again. Workers can't be weak either, because the click happens in the worker | Model tiers (§12), D47 |
+| 13 | Write the design doc, self-review it, walk through a hypothetical case | v1 was written. The biggest hole the independent review found was a broken loop: when eval results came back, nobody picked them up. The easiest mistake to make when deriving downward from principles: not walking through one worker's day from start to finish | P9, D28; Appendices A, B |
+| 14 | Not every problem has a fixed eval: optimizing a harness codebase has one; abstract problems only have a topline, and it isn't fixed | Three forms; in form B, changing the ruler is part of the work; only the topline can move budget, a hard anti-Goodhart rule | D12; metric claim; the three forms in §9 |
+| 15 | The eval might be an external tool, a local dataset, Kusto, or flight signals; there has to be flexibility | The eval is not one component; it is a plugin interface for a set of signal sources. Sources declare their properties, and the ladder, calibration and budget are derived from the declarations; exposure attribution | C6, D39 |
+| 16 | One final revision: the logic has to be coherent; every design must say clearly whether it is a hard constraint, a guess, or derived from a principle, so that after a PoC failure another agent doesn't have to guess; don't aim to get it all right in one step; land it quickly and keep it improvable | v2 rewrite: status tags, hard-constraint table, principle table with falsification conditions, hypothesis register, decision register, minimum viable version | §0, §1 to §3, §14, §15 |
+| 17 | Too many machines were given to eval; eval is usually external. What is unclear is how to keep exploration both broad and deep, and how to add machines and agents dynamically when a good direction is found | Once eval is external, the cluster is essentially attention capacity. The unit of allocation is the slot; quick reaction is kept separate from making it permanent (surge); depth comes from fork, not from headcount; breadth relies on a hard floor; the first version's allocation is a deterministic rule | §9.1; D49 to D51 |
+| 18 | Is this thinking reasonable? What similar things haven't I thought of yet? | Besides the success case, the failure case also needs an answer: when to stop, how to allocate human attention, hard constraints as gates, not as scores; the rest are listed as open questions | §9.2; D52 to D54 |
+| 19 | What other problems are there? Is it enough to hand to an agent to start the PoC? | A review from the implementer's point of view: the task queue, the event schema, the semantics of eval\_request, and the arms of H1 were all left open. What you give the agent is not "go implement the design"; it is "go validate H1", and the first deliverable is an implementation plan, not code | D55 to D58; Appendix C |
+| 20 | I have an existing k8s / Terraform cluster repo — but this should be layered: what the agents are launched with and how each agent is implemented should not be its concern; implement the effective parts together, without gluing them to a particular cluster repo or agent implementation | What we need to build is a standalone runtime + orchestration: four layers, six ports; herd tools are exposed as an MCP server so the harness is replaceable; one real adapter plus one in-memory adapter per port; the in-memory version is where iteration speed comes from | §4.1; D59 to D61; H12 |
+| 21 | External review: H1's scores aren't trustworthy; workers can read hidden material; hooks miss built-in tools; fork doesn't solve a full context; D51 contradicts D12 | All five are facts about git and the harness, not design preferences: the verdict now re-scores self-selected candidates on a holdout; private store; three layers of hooks; a full context calls for compaction, not fork; allocation consumes only the top level | D62, D63; D60, D5, D51 rewritten |
+| 22 | Optimization isn't just finding one optimal path. Different paths each improve different places, and your own example is a combination. Why does the design say best-of-N? | The name leaked from the control arm into the verdict. The output is a combination, not a single point: candidates with multiple parents, composition tasks, interaction claims; the control arm also merges after it finishes, and H1 tests the increment from sharing during the run; approaches are a portfolio, not bandit arms. Folded in during the same round from the external review: two holdouts, physical isolation of arms, push credentials, candidate format | D64 to D69; D62, D58, D51 rewritten; H13 |
+| 23 | I'm about to start implementing the backbone, but it can't be just unit tests. I need a few good problems and a simple case that doesn't take much time, to confirm it works; that beats hooking it straight into a big project and running for two days before finding problems | A layer is missing between unit tests and H1. Three-level acceptance: L0 plumbing assertions; L1 a purpose-built synthetic problem, Knobs (each group of knobs targets one mechanism and serves as the positive control for the backbone), plus 10 auto-judged problems; L2 real problems. Don't move to the next level until the previous one is all green | D70; §14.1 |
+| 24 | The test problems can't be so easy that one agent can finish them; the external eval harness needs disclosure; build these test guardrails first — this is a design in its own right, no smaller than a separate one | Knobs was changed so the material exceeds a single context, with B0 as the control arm. Eval trustworthiness was split out into its own design, *Ledger*: the threat model as the spine, twelve invariants, trust boundaries, the ledger, Vault, circuit breakers, a verdict engine, attack scripts as acceptance; Critic moved into the trust zone; Ledger before Knobs before the herd | Written at the time as *Ledger: Eval Trust Layer Design* (superseded, not in the repo); overturned in round 25 and rewritten as *Herd Testbed* (`herd-testbed.md`) |
+| 25 | This isn't an eval trust layer; it is a guardrail we design ourselves, simulating a problem cheaply to benchmark our own behavior. The document isn't written in plain language. Is there simple open source we can reuse? | Ledger cut down to a testbed: five parts (problem catalog, fast tier, slow tier, recorder, scorecard + control groups); only three anti-cheating rules kept. The document restructured with the plain-language version first and the part for implementers after. Open source: SimPy, FastAPI + Redis, Inspect AI optional; Gas Town borrowed for concepts but not used wholesale | *Herd Testbed* rewritten in full; in this document, §6, §14, §14.1, Appendix C and D63 updated to cite it |
+| 26 | The earlier use cases only had a large context; an agent could also handle them with bash or sampling. 4 works; it is really that there are many strategies and a single agent can't explore many directions at once. 5 works too. Use just these two for now | The selection criterion becomes: number of directions to iterate on × wait time per round > wall-clock time, and the improvements are composable, there are traps, and there is quota pressure; lots of material doesn't count. Knobs and the two other candidates were eliminated. Settled on A (a simulator scheduling policy, with 5 ingredients, 1 trap and 1 conflict planted) and B (a harness with 5 planted bugs), A first, then B. What the herd has to win on is not breadth; it is combining, not re-hitting, and quota tilt | *Herd Testbed* §1, §3, §4; in this document, §14.1 L1 rewritten, D71 |
+| 27 | Had a coding agent self-review v2, and it produced v3; please verify it. I don't actually understand: do research across multiple aspects and deep optimization in each aspect conflict? I can't follow your mix of Chinese and English | v3 is a change of direction, not a revision: tasks split by lever, a Mapper added, the control group changed to static division of labor; its own simulations don't support these conclusions. Breadth and depth don't conflict. What v3 really bets on is "assign people by lever from the start", and what it loses is multiple paths attacking the same direction. v3 brings a few good things that are independent of the change of direction: a verdict protocol, paired measurement, a ratchet in the merge process, a restart path that doesn't depend on checkpoints, an egress allowlist; its three criticisms of the testbed hold | *Research Herd v3 Review*; this section |
+| 28 | I think v2 is better; OK (fold in the improvements, produce v2.2) | v2 is the trunk; the task form is unchanged (each worker takes one approach and attacks the whole problem, D1, D24); no assigning work by lever, no Mapper, no B2 arm. Only the improvements unrelated to the change of direction are folded in, with all text written out clearly in Chinese | D72–D77; the hook table in §7; §8 rule 6; §14.1; the H1 and H3 rows; three changes in *Herd Testbed* |
+| 29 | Tokens are unlimited; my point is that models and tokens should not hurt development efficiency or add engineering complexity | What the design has really been saving all along is eval slots, wall-clock time, context windows and human attention, not tokens. But a few things were added to save tokens or money, and all of them are removed: model tiers and H6 (all roles use the same strongest model), the Librarian's batching parameters, the token budget in the Budget meter and in constraints.md, the cost item in the scorecard, the testbed's token cap. Conversely, anything that costs only model calls and no eval can be done redundantly. The only thing left to check is the API's concurrency and rate limits | P10; D47 withdrawn; D78; §6, §12; *Herd Testbed* §6, §7, §11 |
+| 30 | Opus reviewed v2.2 and produced a revision list; check it yourself and fix whatever is valid. Decisions on four items that needed a human decision: the merger is the same across arms; pre-screening is deferred; S1 receives baseline advances and the map; the weekly plan does not roll over and is only illustrative | Every item on the list holds, and three simulations were rerun with consistent results. Two statistical errors: the spot-check rule compared against the measurement that had been selected (winner's curse), giving 58% to 99% false alarms even when nobody cheats; changed to taking two new measurements of the same segment and comparing the difference. The 70% rule for interactions gave false alarms more than half the time; changed to the difference exceeding 2σ√2. One confound: the merger had been given only to S2; changed so that all four arms run it during the run with the same configuration, and "sharing" refers only to whether workers can see baseline advances. One leak: pre-screening's veto reasons would leak to workers why something scores, so pre-screening is deferred. One implementation gap: D72 to D78 had not been wired into the schema, the component table, the arm-switch table, L0 and Appendix C; now filled in. The number of runs is no longer hard-coded at 3; the closeout order is fixed; the map's first batch of scripts is written by humans. Knock-on effect: the merger moves up to step 1 of the testbed | D62, D65, D69, D72–D79; §5, §6, §8, §14; Appendix C; *Herd Testbed* and *One-page Alignment* (`one-page-alignment.md`) synced; review file *v2.2 Fixes Review* (`research-herd-v2.2-fixes.md`) |
 
-**贯穿全程的三条线**
+**Three threads that run through the whole process**
 
-1. 问题的定义从"调度"移到了"信息与注意力"。第 1 轮把它从调度问题改成共享认知状态问题，第 4 轮把共享的障碍定位到压缩时机，第 8 轮把分工的错误定位到按材料切分，第 17 轮把集群的本质定位到注意力容量。每一步都是把一个看似工程的问题还原成一个认知的问题。
-2. 每次约束收紧都反转了设计重心。有 eval → 搜索；eval 稀缺 → 预测；eval 外部 → 分配；eval 不固定 → 改尺子也是工作。读者拿到一个新的约束时，应该预期同样的反转，而不是在现有设计上打补丁。
-3. 从原则到工程再到抽象再到最小版，每一次外部审稿都找到了上一步没走完的闭环。这是设计的工作方式本身的结论：原则对不保证系统对，要从一个 worker 的一天、一个实现者的第一天从头走到尾。所以本文的完成标准不是完美，是可以交给一个 agent 开工、失败了知道改哪里。
+1. The definition of the problem moved from "scheduling" to "information and attention". Round 1 changed it from a scheduling problem into a shared-cognitive-state problem. Round 4 traced the obstacle to sharing to the timing of compression. Round 8 traced the error in division of labor to slicing by material. Round 17 identified the essence of the cluster as attention capacity. Each step reduced a problem that looked like engineering back to a cognitive problem.
+2. Each time a constraint tightened, it reversed the design's center of gravity. Eval exists → search; eval is scarce → prediction; eval is external → allocation; eval isn't fixed → changing the ruler is also work. When readers get a new constraint, they should expect the same kind of reversal, rather than patching the existing design.
+3. From principles to engineering, to abstraction, to the minimum version: every external review found a loop that the previous step had not closed. This is a conclusion about how the design itself works: correct principles don't guarantee a correct system. You have to walk through one worker's day, and one implementer's first day, from start to finish. So the completion criterion for this document is not perfection. It is that it can be handed to an agent to start work, and that when it fails, you know what to change.
 
-**两条没有改过的信念**，它们是其他一切的前提：多 agent 的价值在于独立尝试的数量，不在于把一个脑子的工作切给多个脑子；任何不能在同预算下赢过 best-of-N 的协作机制都不值得保留。如果你要改这两条，改的不是这份设计，是问题。
+**Two beliefs that never changed**, and that are the premise of everything else: the value of multiple agents lies in the number of independent attempts, not in splitting one mind's work across several minds; and any collaboration mechanism that cannot beat best-of-N under the same budget is not worth keeping. If you want to change these two, what you are changing is not this design; it is the problem.
 
-## 1. 问题与硬约束
+## 1. Problem and hard constraints
 
-**问题**：给定一个有外部 eval 信号的研究或工程问题、一个 100 台机器的集群、几十个带完整 harness 的 LLM agent，设计一个系统让它们协作，在同样的 eval 预算下，交付的最终组合稳定超过 best-of-N（各跑各的、同一合并器下互不共享）。注意交付物通常是多个方向改进的组合，不是一条路径的单点（D64）。同时给人一个持久的对齐入口：先讨论清楚再启动，运行中随时介入。
+**Problem**: Given a research or engineering problem with an external eval signal, a cluster of 100 machines, and a few dozen LLM agents each with a full harness, design a system that lets them collaborate so that, under the same eval budget, the final combination they deliver consistently beats best-of-N (each running on its own, merged by the same merger, with no sharing). Note that the deliverable is usually a combination of improvements from multiple approaches, not a single point on one path (D64). At the same time, give humans a persistent entry point for alignment: discuss things fully before launch, and step in at any time during the run.
 
-下面八条是环境强加的，不是设计选择。每条后面是它逼出来的设计方向，正文里的决定都能追溯到这里或第 2 节。
+The eight items below are imposed by the environment; they are not design choices. After each one is the design direction it forces. Every decision in the main text can be traced back either to here or to §2.
 
-| # | 约束 | 它逼出来的设计 |
+| # | Constraint | The design it forces |
 | --- | --- | --- |
-| C1 \[约束\] | Eval 昂贵、慢、并发有限，而且通常是外部系统：提交、等待、收结果，集群不跑它。典型值：小时到天级，每天几十次 | Eval 是稀缺资源，系统围绕"每次 eval 花在哪"设计，agent 的工作是预测而不只是生成（第 9 节） |
-| C2 \[约束\] | 单个 agent 的上下文有限 | 不能让每个 agent 看全部产出，必须有过滤、分层、按需检索（第 8 节） |
-| C3 \[约束\] | LLM 输出有方差，并且会利用 eval 的漏洞 | 任何分数都带 n 和区间；eval 的定义对 worker 不可读；共享会放大 hacking，防线在 eval 侧（第 9 节） |
-| C4 \[约束\] | Agent 会死，上下文会满，任务会被打断 | 状态不能只存在 agent 里；worker 无状态，状态在仓库和 checkpoint（第 5、7 节） |
-| C5 \[约束\] | 人的时间是最稀缺也最高密度的信号 | 人的介入要排队、要预算、要无损保留；herd 不读人，读 charter（第 10 节） |
-| C6 \[约束\] | 不同问题的 eval 形态不同：外部工具、本地数据集、Kusto 查询、flight 信号、人 | Eval 是插件接口，阶梯和配额从声明推导（第 9 节） |
-| C7 \[约束\] | 100 台机器主要给 worker 和它们的 sandbox（本地代理跑在这里）；worker 是 API-bound，瞬时 token 速率受 API 配额限制 | 机器分配和退避策略（第 12 节） |
-| C8 \[约束\] | 第一版规模 50 个 agent，设计目标到几百，不到几千 | 单 git 仓库作黑板是可行范围内最简单的选择（第 5 节） |
+| C1 \[Constraint\] | Evals are expensive and slow, have limited concurrency, and are usually an external system: submit, wait, collect results; the cluster does not run them. Typical values: hours to days per eval, a few dozen per day | Eval is the scarce resource. The system is designed around "where each eval is spent", and the agent's job is to predict, not only to generate (§9) |
+| C2 \[Constraint\] | A single agent's context is limited | Agents can't each see all output; there must be filtering, layering and on-demand search (§8) |
+| C3 \[Constraint\] | LLM output has variance, and LLMs exploit holes in the eval | Every score carries n and an interval; the eval definition is unreadable to workers; sharing amplifies hacking, and the defense lives on the eval side (§9) |
+| C4 \[Constraint\] | Agents die, contexts fill up, tasks get interrupted | State can't live only inside agents; workers are stateless, and state lives in the repo and in checkpoints (§5, §7) |
+| C5 \[Constraint\] | Human time is the scarcest and densest signal | Human interventions are queued, budgeted and kept losslessly; the herd doesn't read humans, it reads the charter (§10) |
+| C6 \[Constraint\] | Different problems have different eval forms: external tools, local datasets, Kusto queries, flight signals, humans | Eval is a plugin interface; the ladder and quotas are derived from declarations (§9) |
+| C7 \[Constraint\] | The 100 machines are mainly for workers and their sandboxes (local proxies run here); workers are API-bound, and the instantaneous token rate is limited by API quota | Machine allocation and backoff strategy (§12) |
+| C8 \[Constraint\] | The first version runs 50 agents; the design target is a few hundred, not a few thousand | A single git repo as the blackboard is the simplest choice within the feasible range (§5) |
 
-**非目标**
+**Non-goals**
 
-- 不是通用 workflow 引擎，不做 kanban 式任务 DAG 分发。
-- 不做模型训练。差异只来自 harness、角色和上下文。
-- 不以没有任何信号的问题为设计目标。第 9 节的形态 C（只有人的判断）能跑，但价值保证最弱。
-- 第一版不做 UI，人机入口是一个长期会话。
-- 第一版不追求 1,000 个以上 agent。
+- Not a general workflow engine. No kanban-style task-DAG dispatch.
+- No model training. Differences come only from the harness, the roles and the context.
+- Problems with no signal at all are not a design target. Form C in §9 (human judgment only) can run, but its value guarantee is the weakest.
+- No UI in the first version. The human–machine entry point is a long-running session.
+- The first version does not aim for more than 1,000 agents.
 
-## 2. 原则
+## 2. Principles
 
-十条原则。每条写清来源（我们为什么信）、它推出了哪些决定（第 15 节的 D 编号）、以及它错了会看到什么。原则不是教条：最后一列就是推翻它的证据。
+Ten principles. Each states its source (why we believe it), the decisions it derives (the D numbers in §15), and what you would see if it were wrong. Principles are not dogma: the last column is the evidence that would overturn each one.
 
-| # | 原则 | 来源 | 推出的决定 | 它错了会看到什么 |
+| # | Principle | Source | Decisions derived | What you would see if it is wrong |
 | --- | --- | --- | --- | --- |
-| P1 | 并行的是尝试，不是材料。Click 发生在单个上下文里，按来源或子任务切分会把需要 join 的信息分到两个脑子 | 实践经验：一个 agent 读 email、一个读 Slack，合并后信息全损；kanban 式 dispatcher 在研究问题上效果差 | D1 任务形态唯一；D2 不预先分解；D3 join 由单个 agent 做 | 按材料切分的对照组不比全材料组差 |
-| P2 | 压缩只在价值已知后发生。线索的价值滞后显现，提前摘要是盲目投影 | 实践经验：handoff 中线索丢失且不可恢复 | D4 轨迹全量保留；D5 fork 代替 handoff；D6 摘要只做索引；D7 检索由接收方拉；D8 surprise 单独记录 | handoff 实验里摘要组和 fork 组没有差距 |
-| P3 | 验证器是信任层，eval 是稀缺资源 | DeepMind 100 agent 实验：一个 agent 找到 exploit，几分钟内被其他 agent 复用；幻觉随 agent 数放大 | D9 按 claim 类型的状态机；D10 eval 定义对 worker 不可读；D11 Critic 审计；D12 只有最高 trust 的信号能动预算 | 不隔离 eval 的对照组没有出现 hacking 传播 |
-| P4 | 判断什么重要的 agent，和控制谁能看见什么的机制，是两个东西 | 推理：一个强 agent 管黑板会变成新的有损压缩器和单点偏见源 | D13 第 0 层纯代码；D14 Librarian 是编辑不是守门人；D15 Planner 只写 decisions；D16 Scout 独立 | 单个强 agent 管黑板的对照组做废功更少 |
-| P5 | 读黑板按事件和状态触发，不按时间 | 推理：定时轮询要么污染上下文要么错过关键信息，而且没有正确的频率 | D17 三通道；D18 游标 diff 截断；D19 卡住时多读 | 固定频率的对照组做废功和中断成本都不差 |
-| P6 | 人是密度最高的信息源，对齐先于启动 | 实践经验：两小时讨论压成一页 problem.md 是全系统最大的一次 handoff 损失 | D20 charter 协商与签字；D21 讨论全文入库可检索；D22 首波 worker 从 PI 上下文 fork；D23 人的洞察写成 claim | 读 spec 的首波 worker 不比 fork 的差（H10） |
-| P7 | 多样性要显式管理 | 文献：swarm 规模的边际递减一部分来自重复；实践：agent 趋同到同一想法 | D24 approach portfolio 与 lease；D25 dead\_end 是一等公民；D26 提交 eval 前强制检索 | 候选多样性不下降，dead\_end 不被重走 |
-| P8 | 层级按抽象分，不按材料分 | 推理：横切材料的层级让跨方向的 click 无人持有 | D16 Scout；D27 每层一个 agent 持有该层全貌 | Scout 产出的跨方向 insight 复用率为零（H9） |
-| P9 | Eval 结果必须有接收者 | v1 审稿发现的漏洞：异步 eval 回来时提交者已释放任务，闭环断裂 | D28 result\_ready 绑定提交者 checkpoint 并生成后续任务 | 不绑定的对照组里 eval 结果仍被及时消化 |
-| P10 | 模型和 token 不是约束。不为省 token 加任何机制，不为省钱用弱模型，不给 token 设预算。要省的只有四样：eval 名额、墙钟、每个 agent 的上下文窗口、人的注意力。反过来，只花模型调用不花 eval 的事都可以做冗余 | 第 29 轮：token 不限量，不要让模型和 token 影响开发效率或增加工程复杂度 | D47 模型分级和 H6 撤销；Budget meter 不计 token；Librarian 不分批；记分卡的成本只计 eval；D78 用 token 换 eval | API 的并发或速率上限成了瓶颈（那时要省的也不是 token，是并发） |
+| P1 | Attempts run in parallel, not materials. The click happens inside a single context; slicing by source or subtask splits information that needs to be joined across two minds | Practical experience: one agent reads email, one reads Slack, and after merging, the information is all lost; kanban-style dispatchers work poorly on research problems | D1 a single task form; D2 no up-front decomposition; D3 the join is done by a single agent | A control group sliced by material does no worse than the full-material group |
+| P2 | Compress only after the value is known. A lead's value shows up late; summarizing early is a blind projection | Practical experience: leads get lost in handoffs and can't be recovered | D4 traces kept in full; D5 fork instead of handoff; D6 summaries only as an index; D7 search is pulled by the receiver; D8 surprises recorded separately | In the handoff experiment, there is no gap between the summary group and the fork group |
+| P3 | Verifiers are the trust layer; eval is the scarce resource | DeepMind's 100-agent experiment: one agent found an exploit, and within minutes other agents were reusing it; hallucination amplifies with the number of agents | D9 a state machine per claim type; D10 eval definition unreadable to workers; D11 Critic audits; D12 only the highest-trust signal can move budget | A control group that doesn't isolate eval shows no spread of hacking |
+| P4 | The agent that judges what matters and the mechanism that controls who can see what are two separate things | Reasoning: a strong agent managing the blackboard becomes a new lossy compressor and a single source of bias | D13 layer 0 is pure code; D14 the Librarian is an editor, not a gatekeeper; D15 the Planner only writes decisions; D16 the Scout is independent | A control group in which a single strong agent manages the blackboard does less wasted work |
+| P5 | Reading the blackboard is triggered by events and state, not by time | Reasoning: timed polling either pollutes the context or misses key information, and there is no correct frequency | D17 three channels; D18 cursor diff truncation; D19 read more when stuck | A fixed-frequency control group is no worse on wasted work or on interruption cost |
+| P6 | Humans are the densest information source; alignment comes before launch | Practical experience: compressing a two-hour discussion into a one-page problem.md is the single biggest handoff loss in the whole system | D20 charter negotiation and signing; D21 full discussion text stored in the repo and searchable; D22 first-wave workers forked from the PI's context; D23 human insights written as claims | First-wave workers that read the spec do no worse than forked ones (H10) |
+| P7 | Diversity has to be managed explicitly | Literature: part of the diminishing returns of swarm scale comes from duplication; practice: agents converge on the same idea | D24 approach portfolio and leases; D25 dead\_end is a first-class citizen; D26 mandatory search before submitting an eval | Candidate diversity doesn't drop, and dead\_ends are not re-walked |
+| P8 | Layers split by abstraction, not by material | Reasoning: layers that cut across material leave nobody owning the cross-approach click | D16 Scout; D27 one agent per layer holds the full picture of that layer | The reuse rate of the cross-approach insights the Scout produces is zero (H9) |
+| P9 | Eval results must have a receiver | A hole found in the v1 review: when an async eval comes back, the submitter has already released the task, and the loop is broken | D28 result\_ready is bound to the submitter's checkpoint and generates a follow-up task | In a control group without the binding, eval results are still digested promptly |
+| P10 | Models and tokens are not constraints. Add no mechanism to save tokens, use no weak model to save money, set no budget on tokens. There are only four things to save: eval slots, wall-clock time, each agent's context window, and human attention. Conversely, anything that costs only model calls and no eval can be done redundantly | Round 29: tokens are unlimited; don't let models and tokens hurt development efficiency or add engineering complexity | D47 model tiers and H6 withdrawn; the Budget meter does not count tokens; the Librarian does not batch; the scorecard's cost counts only eval; D78 trades tokens for eval | The API's concurrency or rate limit becomes the bottleneck (even then, what needs saving is concurrency, not tokens) |
 
-## 3. 假设登记
+## 3. Hypothesis register
 
-这些是我们猜的。每条写清为什么信、哪个实验验证（第 11 节）、失败了退到哪（第 15 节对应决定的 fallback）。PoC 的目的就是把这张表逐条变成已验证或已推翻。
+These are our guesses. Each states why we believe it, which experiment validates it (§11), and where we fall back if it fails (the fallback of the corresponding decision in §15). The purpose of the PoC is to turn this table, row by row, into validated or refuted.
 
-| # | 假设 | 为什么信 | 验证实验 | 失败的 fallback |
+| # | Hypothesis | Why we believe it | Validation experiment | Fallback on failure |
 | --- | --- | --- | --- | --- |
-| H1 | 同等 eval 预算下，运行中共享 insight 和 dead\_end 的 herd，其最终组合稳定胜过孤立运行、由同一个 Integrator 合并但 worker 看不见基线前进的 best-of-N | 人类研究组的经验；dead\_end 共享直接省掉重复 | S2（Planner 关）vs B1 @ 5 到 10 个 worker，运行次数按 D72 试点算，预注册效应量；S1 作中间臂定位通信内容的价值 | 系统退化为 best-of-N + 去重 + 分层 eval，仍比裸 best-of-N 省 eval |
-| H2 | fork 的 handoff 保真度远高于摘要 | LLM 的上下文可以复制，人脑不能 | handoff 保真度实验 | 退到轨迹指针 + 回头问，放弃 fork |
-| H3 | tool call 边界的轮询足以替代推送式硬中断 | 任务 20 分钟到 2 小时，事件率低，一个 tool call 的间隔远小于任务长度。前提是 harness 有 tool hook，否则粒度只是 herd 工具调用（D60） | 中断时延和做废功诊断 | 加 NATS 推送 |
-| H4 | 单个 git 仓库撑到几百个 agent | 300 commit/小时远低于 git 的上限 | merge queue 积压指标 | 按方向分仓，或 source of truth 换数据库 |
-| H5 | 本地代理和 T1 能和顶层 eval 标定出可用的相关性 | FunSearch、AlphaEvolve 一类工作都靠便宜代理驱动搜索 | 相关性记录 | 退到只用 T0 加顶层 eval，减少 worker 数，让 worker 更多做推理少做试验 |
-| H7 | 单个 Planner 可接受到几百个 agent | 决策低频，读的是 digest 不是轨迹 | Planner 单次运行时长随方向数的曲线 | 按方向分片 |
-| H8 | 预测记录能标定 agent 的判断力，并且值得据此加权 | 校准文献 | 预测误差与后续候选成功率的相关性 | 取消加权，只记录 |
-| H9 | Scout 能产生有复用价值的跨方向 insight | 附录 B 的走查；人类实验室的 group meeting | cross\_approach insight 的复用率 | 取消 Scout，跨方向连接靠人 |
-| H10 | 首波 worker 从 PI agent 的上下文 fork 优于只读 spec | 对话记录继承了隐性的品味和边界 | 首波一半 fork、一半读 spec 的对照 | 全部读 spec，PI 的对话只作为可检索材料 |
-| H11 | 跨机 fork 含 sandbox 状态在工程上可行且成本可接受 | 对话是文本，sandbox 可快照 | 第 0 周 spike：迁移时间和快照大小 | 对话 + 命令日志重放，接受保真度打折 |
-| H12 | 六个端口的边界是对的：换 Executor 和 Harness 的适配器不改变 S2 对 B1 的结论 | 设计里 L2 只依赖 L1；herd 工具的 hook 住在服务端，harness 相关的能力是端口上的显式字段 | 第 4 周换 k8s Executor，第 5 周换第二个 Harness，重跑 S2 vs B1 @ 5 | 结论变了就说明有泄漏，把泄漏的能力提成端口的显式字段，不回退到 glue |
-| H13 | 在可组合的问题上，按"对当前最优组合的边际增量"分配优于按方向自身最优分分配 | 方向互补时，自身分高的方向可能和组合重叠 | 第 5 周起 A/B 两种 improvement\_rate | 保留方向自身分 |
+| H1 | Under the same eval budget, a herd that shares insights and dead\_ends during the run delivers a final combination that consistently beats best-of-N, which runs in isolation and is merged by the same Integrator, but whose workers cannot see baseline advances | The experience of human research groups; sharing dead\_ends directly saves duplicated work | S2 (Planner off) vs B1 @ 5 to 10 workers, with the number of runs computed from the D72 pilot and a preregistered effect size; S1 as an intermediate arm to locate the value of what is communicated | The system degrades to best-of-N + dedup + tiered eval, which still saves eval compared with bare best-of-N |
+| H2 | Handoff fidelity with fork is far higher than with summaries | LLM context can be copied; human brains can't | Handoff fidelity experiment | Fall back to trace pointers + ask back; give up fork |
+| H3 | Polling at tool call boundaries is enough to replace push-style hard interrupts | Tasks last 20 minutes to 2 hours, the event rate is low, and the interval between tool calls is far shorter than a task. This assumes the harness has tool hooks; otherwise the granularity is only herd tool calls (D60) | Interrupt latency and wasted-work diagnostics | Add NATS push |
+| H4 | A single git repo holds up to a few hundred agents | 300 commits/hour is far below git's limit | Merge queue backlog metric | Split into repos by approach, or switch the source of truth to a database |
+| H5 | Local proxies and T1 can be calibrated against the top-level eval to a usable correlation | Work like FunSearch and AlphaEvolve relies on cheap proxies to drive search | Correlation records | Fall back to only T0 plus the top-level eval; reduce the number of workers, and have workers do more reasoning and fewer experiments |
+| H7 | A single Planner is acceptable up to a few hundred agents | Decisions are low-frequency, and it reads digests, not traces | Curve of the Planner's single-run duration against the number of approaches | Shard by approach |
+| H8 | Prediction records can calibrate agents' judgment, and are worth weighting by | The calibration literature | Correlation between prediction error and the success rate of later candidates | Drop the weighting; only record |
+| H9 | The Scout can produce cross-approach insights with reuse value | The walkthrough in Appendix B; group meetings in human labs | Reuse rate of cross\_approach insights | Remove the Scout; cross-approach connections rely on humans |
+| H10 | First-wave workers forked from the PI agent's context do better than ones that only read the spec | The conversation record carries over implicit taste and boundaries | A control with half of the first wave forked and half reading the spec | All read the spec; the PI's conversation serves only as searchable material |
+| H11 | Cross-machine fork, including sandbox state, is feasible in engineering terms at an acceptable cost | The conversation is text; the sandbox can be snapshotted | Week 0 spike: migration time and snapshot size | Replay the conversation + command log, accepting reduced fidelity |
+| H12 | The boundaries of the six ports are right: swapping the Executor and Harness adapters does not change the S2-vs-B1 conclusion | In the design, L2 depends only on L1; herd tool hooks live on the server side, and harness-specific capabilities are explicit fields on the port | Swap in the k8s Executor in week 4 and a second Harness in week 5; rerun S2 vs B1 @ 5 | If the conclusion changes, there is a leak; promote the leaking capability to an explicit field on the port; don't fall back to glue |
+| H13 | On composable problems, allocating by "marginal gain over the current best combination" beats allocating by each approach's own best score | When approaches are complementary, an approach with a high score of its own may overlap with the combination | From week 5, A/B the two kinds of improvement\_rate | Keep each approach's own score |
 
-## 4. 系统概览
+## 4. System overview
 
-五层。每层的存在都能追溯到一条原则或约束：判断层存在是因为 P4（判断和可见性分离），共享状态层存在是因为 C4 和 P2（状态在 agent 之外、无损），机制层存在是因为 P4 的另一半（可见性由纯代码控制）和 C2（必须过滤），执行层是 worker，人机层是 P6。Worker 只和仓库与机制层打交道，从不直接给其他 agent 发消息；判断层只读 digest、写决定，不在 worker 的读路径上。
+Five layers. The existence of each layer traces back to a principle or a constraint. The judgment layer exists because of P4 (separating judgment from visibility). The shared-state layer exists because of C4 and P2 (state outside the agents, lossless). The mechanism layer exists because of the other half of P4 (visibility controlled by pure code) and C2 (filtering is required). The execution layer is the workers. The human–machine layer is P6. Workers deal only with the repo and the mechanism layer, and never send messages directly to other agents. The judgment layer only reads digests and writes decisions; it is not on the workers' read path.
 
-&#91;embedded content: 系统架构 · 五层，worker 只通过机制层和仓库交互\]
+&#91;embedded content: System architecture · five layers; workers interact only through the mechanism layer and the repo\]
 
-读法：向下的箭头是信息流向 worker 的三条通道（diff、检索、硬中断），向上的箭头是 worker 的贡献经 merge queue 进仓库。Eval 结果写回仓库，再经 hook 变成事件。图里的 Router 在第一版是 harness 内的一次检查，不是独立服务（D29）。
+How to read it: the downward arrows are the three channels through which information flows to workers (diff, search, hard interrupt). The upward arrows are workers' contributions entering the repo through the merge queue. Eval results are written back to the repo and then turned into events by hooks. The Router in the diagram is, in the first version, a check inside the harness, not a standalone service (D29).
 
-| 角色 | 数量 | 模型 | 触发 | 读 | 写 | 来源 |
+| Role | Count | Model | Trigger | Reads | Writes | Source |
 | --- | --- | --- | --- | --- | --- | --- |
-| PI agent | 1，跨问题持久 | 最强 | 人的消息；Planner 的升级请求 | charter、digest、decisions、任意轨迹 | charter、author=human 的 claim、首波 fork | P6 |
-| Planner | 1 | 最强 | 每个名额窗口的顶层 eval 结果到齐后 | 全部 digest、eval 统计 | 只写 decisions | P4、D15 |
-| Scout | 1，第 5 周起 | 最强 | 每 K 小时 | 全部 digest、surprise、高分 diff | 跨方向 insight；从自身上下文 fork worker | P8、H9 |
-| Critic | 1 到 3 | 最强 | 候选进 top-k 或分数跳升，限速 | 候选、eval 明细、eval 代码、holdout | audit，分公开结论和不公开理由 | P3 |
-| Librarian | 第一版 1 个 | 最强 | 连续跑 | 新 claim、高分 diff、轨迹 | digest、insight、标签 | P4 |
-| Worker | 50 | 尽量强 | 领任务 | spec、charter、digest、diff、检索 | claim、candidate、轨迹、checkpoint | P1 |
-| Indexer、Router 检查、Merge queue、Eval service、Budget meter、Integrator | 各 1 | 无 | 仓库事件、队列、tool call 边界 | 仓库、KV | 索引、中断、main、result、计量 | P4 第 0 层 |
+| PI agent | 1, persistent across problems | Strongest | Human messages; escalation requests from the Planner | charter, digest, decisions, any trace | charter, claims with author=human, first-wave forks | P6 |
+| Planner | 1 | Strongest | When the top-level eval results for each quota window are all in | all digests, eval statistics | decisions only | P4, D15 |
+| Scout | 1, from week 5 | Strongest | Every K hours | all digests, surprises, high-score diffs | cross-approach insights; forks workers from its own context | P8, H9 |
+| Critic | 1 to 3 | Strongest | A candidate enters the top-k or its score jumps; rate-limited | candidates, eval details, eval code, holdout | audits, split into public conclusions and non-public reasons | P3 |
+| Librarian | 1 in the first version | Strongest | Runs continuously | new claims, high-score diffs, traces | digests, insights, tags | P4 |
+| Worker | 50 | As strong as possible | Picks up a task | spec, charter, digest, diff, search | claims, candidates, traces, checkpoints | P1 |
+| Indexer, Router check, Merge queue, Eval service, Budget meter, Integrator | 1 each | None | Repo events, queues, tool call boundaries | repo, KV | indexes, interrupts, main, results, metering | P4 layer 0 |
 
-## 4.1 架构分层与端口
+## 4.1 Architecture layers and ports
 
-**D59 \[推论；约束 C8 的反面\] herd 是一个独立的 runtime + orchestration，通过端口接外部世界，不绑定任何集群管理或 agent 实现。** 理由：本文讨论出的有效部分（黑板、状态机、eval 阶梯、分配、通信规则、对齐协议）和"agent 用什么起、每个 agent 具体怎么实现"是正交的；绑在一起，换一个 harness 或换一个集群就要重写，PoC 的结论也没法迁移。
+**D59 \[Derived; the flip side of constraint C8\] The herd is a standalone runtime + orchestration. It connects to the outside world through ports and is not bound to any cluster management system or agent implementation.** Rationale: the effective parts worked out in this document (blackboard, state machine, eval ladder, allocation, communication rules, alignment protocol) are orthogonal to "what the agents are launched with, and how each agent is implemented in detail". If the two are bound together, swapping a harness or a cluster means a rewrite, and the PoC's conclusions can't be carried over either.
 
 ```
-L3  问题实例      charter/、spec.md、eval/sources/、approaches/          每个问题一份
-L2  herd runtime  黑板约定、状态机、事件、Indexer、任务队列、Eval service、
-                  分配、路由规则、停止规则、Budget meter、Integrator、
-                  角色程序（PI、Planner、Critic、Librarian、Scout）      要建的东西
-L1  端口          Executor、Harness、SignalSource、Store、Human、Model     接口；L2 只依赖这一层
-L0  适配器        k8s / 本地进程 / Ray；Claude Code / Agent SDK / OpenHands；
-                  git / Redis / S3 / sqlite-vec；CLI / Slack             可替换；集群仓库在这里
+L3  Problem instance  charter/, spec.md, eval/sources/, approaches/                  one per problem
+L2  herd runtime      blackboard conventions, state machine, events, Indexer, task queue, Eval service,
+                      allocation, routing rules, stop rules, Budget meter, Integrator,
+                      role programs (PI, Planner, Critic, Librarian, Scout)           what we build
+L1  Ports             Executor, Harness, SignalSource, Store, Human, Model            interfaces; L2 depends only on this layer
+L0  Adapters          k8s / local process / Ray; Claude Code / Agent SDK / OpenHands;
+                      git / Redis / S3 / sqlite-vec; CLI / Slack                      replaceable; the cluster repo lives here
 ```
 
-**六个端口**
+**The six ports**
 
-| 端口 | L2 需要它做什么 | 第一版适配器 | 之后 |
+| Port | What L2 needs it to do | First-version adapter | Later |
 | --- | --- | --- | --- |
-| Executor | `start(agent_spec, task, ctx) → handle`；`checkpoint(handle) → blob`；`restore(blob) → handle`；`kill`；心跳 | 本地子进程 | k8s pod（接集群仓库）、Ray |
-| Harness | build(task, ctx, tool\_endpoint, hooks) → agent\_spec，交给 Executor 起；进程通过 herd 的工具服务调工具，结束时留下 claim；export\_state(handle) → blob / import\_state(blob)（有 supports\_checkpoint 才有）。能力声明：supports\_tool\_hooks 和 `supports_checkpoint` | Claude Code headless | Agent SDK、OpenHands、自写循环 |
-| SignalSource | 第 9 节的声明；`submit(candidate)` / `poll` / push 回调 | PoC 阶段由测试台的慢档服务实现（另一份文档《Herd 测试台》）；herd 侧只有一个 HTTP 客户端 | Kusto、flight、人 |
-| Store | VersionedStore（git 语义：append、merge 序号、hook）、KV、ObjectStore、VectorIndex | 内存版（测试用）+ 真 git / Redis / S3 / sqlite-vec | 换实现不改 L2 |
-| Human | PI agent 和人之间的消息通道 | CLI 长期会话 | Slack、Web |
-| Model | `complete(role, messages, tools)`；embed(texts) → vectors（Indexer、去重、diff 排序都要；内存适配器用词袋或 hash） | 一张按角色的模型路由表 | 按角色换模型，A/B |
+| Executor | `start(agent_spec, task, ctx) → handle`; `checkpoint(handle) → blob`; `restore(blob) → handle`; `kill`; heartbeat | Local subprocess | k8s pod (connects to the cluster repo), Ray |
+| Harness | build(task, ctx, tool\_endpoint, hooks) → agent\_spec, which is handed to the Executor to start; the process calls tools through the herd's tool service and leaves a claim when it finishes; export\_state(handle) → blob / import\_state(blob) (only with supports\_checkpoint). Capability declarations: supports\_tool\_hooks and `supports_checkpoint` | Claude Code headless | Agent SDK, OpenHands, a hand-written loop |
+| SignalSource | The declaration from §9; `submit(candidate)` / `poll` / push callback | In the PoC phase, implemented by the testbed's slow-tier service (a separate document, *Herd Testbed* (`herd-testbed.md`)); the herd side has only an HTTP client | Kusto, flight, humans |
+| Store | VersionedStore (git semantics: append, merge sequence numbers, hooks), KV, ObjectStore, VectorIndex | In-memory version (for tests) + real git / Redis / S3 / sqlite-vec | Swapping implementations does not change L2 |
+| Human | The message channel between the PI agent and humans | CLI long-running session | Slack, Web |
+| Model | `complete(role, messages, tools)`; embed(texts) → vectors (needed by the Indexer, dedup and diff ranking; the in-memory adapter uses bag-of-words or hashing) | A per-role model routing table | Swap models per role, A/B |
 
-**D60 \[推论 P4\] hook 分三层，按它关心的事放。** 第一层，herd 工具的 hook 住在 MCP 工具服务端：repo\_write 的前缀检查、eval\_request 前的检索和 gate、立即 push、surprise 落盘。这些只关心 herd 工具，服务端就够，任何会说 MCP 的 harness 不改一行就能当 worker。第二层，中断检查需要看到 harness 的全部 tool call，而 Claude Code 内建的 Bash、Read、Edit 不经过 MCP server，所以它用 harness 自己的 tool hook（Claude Code 的 PreToolUse）；Harness 端口为此有可选能力 `supports_tool_hooks`，没有的 harness 只在 herd 工具调用时查，粒度更粗。第三层，Executor 兜底：心跳由 Executor 的 sidecar 按时间打，不依赖任何 tool call；Router 命中后 5 分钟 \[默认\] 没被确认，Executor 发 SIGTERM 触发 checkpoint 并带中断内容重启；进程退出时没有 claim 就带提示重启一次。v2 初稿说"hook 全在服务端"是错的，它漏了 harness 的内建工具。
+**D60 \[Derived P4\] Hooks come in three layers, each placed according to what it cares about.** Layer one: the hooks for herd tools live on the MCP tool server: the prefix check for repo\_write, the search and gate before eval\_request, immediate push, writing surprises to disk. These concern only herd tools, so the server side is enough, and any harness that speaks MCP can serve as a worker without changing a line. Layer two: the interrupt check needs to see all of the harness's tool calls, and Claude Code's built-in Bash, Read and Edit don't go through the MCP server, so this check uses the harness's own tool hook (Claude Code's PreToolUse). For this, the Harness port has an optional capability, `supports_tool_hooks`; a harness without it checks only on herd tool calls, at a coarser granularity. Layer three: the Executor as the backstop. The heartbeat is sent on a timer by the Executor's sidecar and does not depend on any tool call. If a Router hit is not acknowledged within 5 minutes \[Default\], the Executor sends SIGTERM to trigger a checkpoint and restarts the worker with the interrupt content. If the process exits without a claim, it is restarted once with a reminder. The v2 first draft said "hooks are all on the server side". That was wrong: it missed the harness's built-in tools.
 
-**Harness 端口会泄漏的地方，写明不藏。** fork 的保真度取决于 harness 能不能导出和导入对话状态。端口上这是可选能力：`supports_checkpoint` 为 true 的 harness 支持真 fork；为 false 的退化到"从轨迹指针重启"，H2 的收益打折。Store 端口的 VersionedStore 也有一点泄漏：L2 依赖"merge 序号全局单调"这个语义，适配器必须保证。
+**Where the Harness port leaks, stated openly rather than hidden.** Fork fidelity depends on whether the harness can export and import conversation state. On the port, this is an optional capability: a harness with `supports_checkpoint` set to true supports real fork; one with false degrades to "restart from a trace pointer", and the gain from H2 is discounted. The Store port's VersionedStore also leaks a little: L2 depends on the semantics "merge sequence numbers are globally monotonic", and adapters must guarantee it.
 
-**角色程序不是端口。** PI、Planner、Critic、Librarian、Scout 是 herd 自己的代码，用 Model 端口调模型、用 Store 端口读写。换模型是配置，换角色逻辑是改 herd 本身。
+**Role programs are not ports.** PI, Planner, Critic, Librarian and Scout are the herd's own code. They call models through the Model port and read and write through the Store port. Swapping models is configuration; changing role logic is changing the herd itself.
 
-**D61 \[假设 H12\] 抽象的验证方法与节制。** 端口对不对，用换适配器来验：同一个问题、同一份 charter，Executor 从本地进程换成 k8s，Harness 从 Claude Code 换成 Agent SDK，S2 对 B1 的结论不该变。节制三条：第一版每个端口只做一个真实适配器加一个内存适配器；第二个真实适配器放到 H1 之后，从第二个的差异里提炼接口，不要在只有一个实现的时候设计通用性；内存适配器不是可选项，它让整个 herd 能在一个进程里几秒钟跑完一个微型问题，是迭代速度的来源，也是每次改动的回归测试。
+**D61 \[Hypothesis H12\] How to validate the abstraction, and restraint.** Whether the ports are right is tested by swapping adapters: with the same problem and the same charter, switch the Executor from a local process to k8s and the Harness from Claude Code to Agent SDK; the S2-vs-B1 conclusion should not change. Three rules of restraint. First, in the first version each port gets only one real adapter plus one in-memory adapter. Second, the second real adapter comes after H1, and the interface is distilled from the differences the second one reveals; don't design for generality while there is only one implementation. Third, the in-memory adapter is not optional: it lets the whole herd run a tiny problem in one process in a few seconds. It is where iteration speed comes from, and it is also the regression test for every change.
 
-**仓库形态**
+**Repo layout**
 
 ```
 herd/
-  core/        L2：blackboard, queue, eval, allocation, rules, stop, budget
-  roles/       L2：pi, planner, critic, librarian, scout（prompt + 程序）
-  tools/       L2：MCP 工具服务，herd 工具的 hook 在这里（D60 第一层）
-  ports/       L1：executor, harness, signal_source, store, human, model
-  adapters/    L0：executor/{local,k8s}, harness/{claude_code,sdk},
+  core/        L2: blackboard, queue, eval, allocation, rules, stop, budget
+  roles/       L2: pi, planner, critic, librarian, scout (prompt + program)
+  tools/       L2: MCP tool service; the hooks for herd tools live here (D60 layer one)
+  ports/       L1: executor, harness, signal_source, store, human, model
+  adapters/    L0: executor/{local,k8s}, harness/{claude_code,sdk},
                    store/{memory,git,redis,s3,sqlite_vec}, human/{cli}, model/{router}
-  problems/    L3：每个问题一个目录
-  tests/       用 memory 适配器跑的端到端
+  problems/    L3: one directory per problem
+  tests/       end-to-end tests run with the memory adapters
 ```
 
-集群仓库不并进来，它是 `adapters/executor/k8s` 的依赖。
+The cluster repo is not merged in; it is a dependency of `adapters/executor/k8s`.
 
-## 5. 数据模型
+## 5. Data model
 
-**D30 \[推论 P2、P4；假设 H4\] 一个 git 仓库是唯一的 source of truth。** 所有派生状态（SQLite 索引、embedding、当前状态）都能从它重建。选 git 不是省事：commit history 是 append-only 日志（P2 要求无损），branch 是 fork，merge conflict 是免费的冲突检测，blame 是 credit assignment，CI 是验证器门禁（P3），PR 是提交前评审，bisect 能找出哪次改动让分数掉了。Claude Code 这类 harness 对 git 的熟练程度也远超任何自定义 API。规模上限是 H4。
+**D30 \[Derived P2, P4; Hypothesis H4\] One git repository is the single source of truth.** All derived state (the SQLite index, embeddings, current state) can be rebuilt from it. Git was not chosen to save effort. Commit history is an append-only log (P2 requires losslessness). A branch is a fork. A merge conflict is free conflict detection. Blame is credit assignment. CI is the verifier gate (P3). A PR is pre-submission review. Bisect can find which change made the score drop. Harnesses like Claude Code are also far more fluent with git than with any custom API. The scale limit is H4.
 
-**目录布局**
+**Directory layout**
 
 ```
-charter/                     第 10 节。status 不是 aligned，herd 不启动
-  params.yaml                机器可读参数：截断值、surge 的 k、底线、注意力分钟、预算上限
-spec.md                      问题陈述 + eval 接口，charter 签字后由 PI agent 生成（H1 阶段人手写）
-approaches/<id>.md           方向。frontmatter: status, parent。不存份额，份额在 allocation/
-allocation/<local_id>.json   当前分配（生效顺序按合入的 seq，同事件）：每方向 target_slots 和 eval_share；分配规则或 Planner 覆盖写入
-claims/<agent>/<id>.md       一条贡献，按作者分目录
+charter/                     §10. If status is not aligned, the herd does not start
+  params.yaml                Machine-readable parameters: truncation cutoff, surge k, floor, attention minutes, budget caps
+spec.md                      Problem statement + eval interface; generated by the PI agent after the charter is signed (hand-written by a human in the H1 phase)
+approaches/<id>.md           Approaches. frontmatter: status, parent. No shares stored here; shares live in allocation/
+allocation/<local_id>.json   Current allocation (takes effect in merged seq order, same as events): target_slots and eval_share per approach; written by the allocation rule or a Planner override
+claims/<agent>/<id>.md       One contribution, in per-author directories
 candidates/<hash>/
-  candidate.*                候选本体，首创者写；CI 按首创者判权
-  prediction.json            首创者写
-  local.json                 首创者的本地代理 eval 记录
-  result.json                只有 Eval service 能写
-  lineage.json               parents: […]，可多父（组合候选，D64）；Eval service 校验父 hash 后写
-digests/<approach>.md        Librarian 维护，硬上限 2,000 token [默认]
-decisions/<ts>.md            Planner 写，可被申诉
-events/<agent>/<local_id>.json  状态变更事件，按发起者分目录，永不改原文件；写者不知道 seq
-events/_seq/<seq>             只有 merge queue 能写：指向被合入的事件文件，seq 在合入时才分配（D56）
-traces/<agent>/<task>.ptr    指向对象存储的指针 + 摘要 + surprise 标记
-checkpoints/<agent>/<ts>.ptr 对话 + sandbox 状态的 checkpoint 指针
-eval/sources/<id>.yaml       source 的公开元数据；定义本体在私有存储（D10、D63）
+  candidate.*                The candidate itself, written by the originator; CI decides write rights by originator
+  prediction.json            Written by the originator
+  local.json                 The originator's local proxy eval record
+  result.json                Only the Eval service can write it
+  lineage.json               parents: […], can have multiple parents (combined candidates, D64); written by the Eval service after it checks the parent hashes
+digests/<approach>.md        Maintained by the Librarian, hard cap 2,000 tokens [Default]
+decisions/<ts>.md            Written by the Planner, can be appealed
+events/<agent>/<local_id>.json  State-change events, in per-initiator directories; original files are never modified; the writer does not know the seq
+events/_seq/<seq>             Only the merge queue can write it: points to the merged event file; seq is assigned only at merge time (D56)
+traces/<agent>/<task>.ptr    Pointer into object storage + summary + surprise flag
+checkpoints/<agent>/<ts>.ptr Checkpoint pointer for the conversation + sandbox state
+eval/sources/<id>.yaml       Public metadata of the source; the definition itself lives in the private store (D10, D63)
 ```
 
-**D76 \[推论 P2、P4；来自 v3 审稿\] v2.2 新增三个目录。** `map/` 是机会地图：把差距按原因拆开的测量脚本，和它们在每一版基线上的输出（map/gap.md、map/measurements/\<id>/），每次 baseline\_advanced 后由 Integrator 重跑，人和 agent 都能读、能引用、能重跑。第一批测量脚本由人在建问题时手写，和 spec.md、首批 approaches 并列进门槛前清单，首批 approaches 对照 map/gap.md 来写；测试台的两个问题由问题包自带。S2 的 worker 可以往 map/measurements/ 加新脚本，走 repo\_write 和 CI 的 schema 检查；S1 收得到更新后的地图，但不能加脚本。它是共享信息，不是派活依据：任务形态不变（D1），方向仍由 PI 和 Planner 按 approach portfolio 管（D24）；地图告诉大家差距在哪、哪部分还没人解释得了，PI 可以据此开一个探索方向。共享的是能重跑的测量而不是摘要，这正是 P2。`baseline/<k>.json`：每一版基线含哪些候选、配对结果、gate 结果（D74）。`report/`：运行结束生成的归因报告和合并日志。事件类型相应补齐：baseline\_advanced、integration\_failed、interaction\_found、map\_updated、audit\_checked、baseline\_reverted、dedup\_hit；claim 状态加 quarantined。
+**D76 \[Derived P2, P4; from the v3 review\] v2.2 adds three directories.** `map/` is the opportunity map: measurement scripts that break the gap down by cause, and their output on every baseline version (map/gap.md, map/measurements/\<id>/). The Integrator reruns them after every baseline\_advanced. Humans and agents can all read, cite and rerun them. A human hand-writes the first batch of measurement scripts when setting up the problem. They go on the before-the-gate checklist alongside spec.md and the first approaches, and the first approaches are written against map/gap.md. For the two testbed problems, the problem packs ship them. S2 workers can add new scripts to map/measurements/, through repo\_write and CI's schema check. S1 receives the updated map but cannot add scripts. The map is shared information, not a basis for assigning work: the task shape does not change (D1), and the PI and Planner still manage approaches as an approach portfolio (D24). The map tells everyone where the gap is and which part nobody can explain yet, and the PI can open an exploration approach based on it. What is shared is rerunnable measurements, not summaries; this is exactly P2. `baseline/<k>.json`: which candidates each baseline version contains, the paired results, and the gate results (D74). `report/`: the attribution report and merge log generated at the end of a run. Event types are filled out to match: baseline\_advanced, integration\_failed, interaction\_found, map\_updated, audit\_checked, baseline\_reverted, dedup\_hit. Claim status adds quarantined.
 
-**不在 git 里、在 KV 里的三样**：lease（D32）、任务队列、eval 队列状态。它们的变化频率比 commit 高两个量级。
+**Three things that live in KV, not in git**: leases (D32), the task queue, and eval queue state. They change two orders of magnitude more often than commits.
 
-**D63 \[约束：git 没有按路径的读权限\] 不在黑板仓库里、在私有存储里的东西**：eval 定义与数据、holdout、audit 的理由区、Critic 的笔记。黑板仓库对 worker 是全量可 clone 的（P1 要求 worker 看全部材料），所以"仓库里某个目录 worker 不可读"在 git 上做不到；任何 worker 不该看的东西都不能进黑板，只能放一个 worker pod 没有凭证的独立存储（另一个仓库或对象存储 bucket）。黑板里只放 source 的公开元数据和 audit 的公开结论。PoC 阶段隐藏数据和打分代码只在测试台慢档服务的机器上，worker 机器上没有。只有 Eval service、Critic 和人有私有存储的凭证。PI agent 没有：首波 worker 从它的上下文 fork（D22），它读过的东西会被继承，所以它只能看 audit 的公开结论。
+**D63 \[Constraint: git has no per-path read permissions\] Things that live in the private store, not in the blackboard repo**: eval definitions and data, holdouts, the rationale section of audits, and the Critic's notes. Workers can clone the whole blackboard repo (P1 requires workers to see all the material), so "a directory in the repo that workers cannot read" is impossible in git. Anything a worker should not see cannot go into the blackboard. It can only go into a separate store that worker pods have no credentials for (another repo or an object storage bucket). The blackboard holds only the public metadata of sources and the public conclusions of audits. In the PoC phase, hidden data and scoring code exist only on the machine that runs the testbed's slow-tier service, not on worker machines. Only the Eval service, the Critic and humans have credentials for the private store. The PI agent does not: the first wave of workers is forked from its context (D22), and whatever it has read is inherited, so it can see only the public conclusions of audits.
 
-**D31 \[推论 C4、P2\] append-only。** 每条贡献是一个新文件，任何 agent 不改别人的文件；状态变化只能通过 events 表达；worker 只能写自己前缀下的路径，CI 检查。这三条让 50 个 agent 并发 push 几乎不冲突，也让历史不可篡改。按作者分目录是为了让 CI 的路径检查可执行（v1 审稿）。
+**D31 \[Derived C4, P2\] Append-only.** Every contribution is a new file, and no agent modifies another agent's files. State changes can be expressed only through events. A worker can write only paths under its own prefix, and CI checks this. These three rules let 50 agents push concurrently with almost no conflicts, and they make history tamper-proof. Directories are split by author so that CI's path check can be enforced (v1 review).
 
-**D32 \[约束：心跳频率\] lease 不进 git。** lease 是派生状态，放 KV（Redis 或 NATS KV）：`{agent, approach, target_claims, depends_on, task_id, heartbeat, files_touched}`。心跳由 Executor 的 sidecar 每 30 秒 \[默认\] 打一次，与 tool call 无关（D60），每次心跳同时对沙箱跑 git diff --name-only，把 files\_touched 写进 lease（第 8 节规则 6 和 D74 用它）；TTL 2 小时 \[默认\]，超时由 Indexer 的清理任务回收，回收前先问 Executor 该 handle 是否还活着。原因：心跳频率和 commit 频率差两个量级，放 git 里会把仓库刷爆。
+**D32 \[Constraint: heartbeat frequency\] Leases do not go into git.** A lease is derived state and lives in KV (Redis or NATS KV): `{agent, approach, target_claims, depends_on, task_id, heartbeat, files_touched}`. The Executor's sidecar sends a heartbeat every 30 seconds \[Default\], independent of tool calls (D60). On each heartbeat it also runs git diff --name-only against the sandbox and writes files\_touched into the lease (§8 rule 6 and D74 use it). The TTL is 2 hours \[Default\]. On timeout, the Indexer's cleanup job reclaims the lease, after first asking the Executor whether that handle is still alive. Reason: heartbeat frequency and commit frequency differ by two orders of magnitude, and putting leases in git would flood the repo.
 
-**D33 \[推论 P2\] 轨迹和 checkpoint 在对象存储，只归档不删除。** 仓库里只有指针。evidence 指针必须永远可解析，CI 在合入时验证。30 天后压缩到冷存储 \[默认\]。
+**D33 \[Derived P2\] Traces and checkpoints live in object storage; they are archived, never deleted.** The repo holds only pointers. Evidence pointers must always resolve, and CI verifies this at merge time. After 30 days they are compressed into cold storage \[Default\].
 
-**claim 的 frontmatter**
+**Claim frontmatter**
 
 ```yaml
 id: c-2026-10-17-0412
 type: result | insight | dead_end | metric | question | audit
-status: proposed            # 初始状态；当前状态由 events 算出
+status: proposed            # Initial status; the current status is computed from events
 approach: a-03
 author: worker-17 | librarian-1 | critic-1 | scout | eval_service | human
-tags: [low_signal, new_approach, cross_approach]   # 可选；Librarian 或作者写
-blamed_constraint: constraints.md#…                # 可选；dead_end 把原因归到某条约束时填（D52）
-depends_on: [c-…]           # 可以依赖 proposed 的 claim，但必须标注其当前状态
-evidence:                    # 至少一条，否则 CI 拒绝
+tags: [low_signal, new_approach, cross_approach]   # Optional; written by the Librarian or the author
+blamed_constraint: constraints.md#…                # Optional; filled in when a dead_end attributes its cause to a constraint (D52)
+depends_on: [c-…]           # May depend on proposed claims, but must note their current status
+evidence:                    # At least one, otherwise CI rejects
   - trace: traces/worker-17/t-0391.ptr#L120-L188
   - candidate: candidates/9f3a…/result.json
-surprise: true | false       # 作者标记"和预期不一样"（D8）
-reuse_count: 0               # Indexer 维护，不由作者写
+surprise: true | false       # The author flags "not what I expected" (D8)
+reuse_count: 0               # Maintained by the Indexer, not written by the author
 ```
 
-**D9 \[推论 P3\] 每类 claim 有自己的状态机，不共用一个 verified。** v1 只有一个 verified，CI 只能验证 result，insight 永远停在 proposed，P3 又禁止 build on 未验证的东西，等于封死了共享。改成按类型分：
+**D9 \[Derived P3\] Each claim type has its own state machine instead of sharing a single verified.** v1 had only one verified. CI could verify only results, so insights stayed at proposed forever, and P3 forbids building on unverified things. Together this sealed off sharing. It is now split by type:
 
-| claim type | 状态 | 谁能推进 |
+| claim type | Status | Who can advance it |
 | --- | --- | --- |
-| result | proposed → 按 source 阶梯逐级 verified，任一步可 → refuted；verified → quarantined → verified \| refuted（抽查二分出的肇事者，D72） | Eval service 按层级；Critic 可 refuted；Integrator 可置 quarantined，只有人能解除；人可任意 |
-| insight | proposed → corroborated（被 ≥ 2 个顶层 verified 的 result 引用，或 Critic 确认）；可 → refuted | Indexer 按复用自动；Critic；人 |
-| dead\_end | proposed → confirmed（Critic 确认，或第二个独立 worker 复现）；可 → reinstated | Critic；worker 复现；人 |
-| metric | proposed → calibrated（与上一层 trust 更高的 source 相关性 ≥ 阈值、样本 ≥ N）→ deprecated | Eval service 自动；Critic；人 |
-| question | open → answered | 任何角色 |
-| audit | 终态 | Critic 写，分公开结论和 worker 不可读的理由 |
-| approach | active → frozen → dead\_end；可 → reinstated | Planner（预算份额超 30% 的要升级给人）；人 |
+| result | proposed → verified level by level up the source ladder, and any step can → refuted; verified → quarantined → verified \| refuted (the culprit found by bisecting after a spot check, D72) | Eval service, level by level; the Critic can set refuted; the Integrator can set quarantined, and only a human can lift it; a human can make any change |
+| insight | proposed → corroborated (cited by ≥ 2 results verified at the top level, or confirmed by the Critic); can → refuted | Indexer, automatically by reuse; Critic; human |
+| dead\_end | proposed → confirmed (confirmed by the Critic, or reproduced by a second independent worker); can → reinstated | Critic; worker reproduction; human |
+| metric | proposed → calibrated (correlation with the higher-trust source one level up ≥ threshold, with samples ≥ N) → deprecated | Eval service, automatically; Critic; human |
+| question | open → answered | Any role |
+| audit | Terminal state | Written by the Critic, split into a public conclusion and a rationale that workers cannot read |
+| approach | active → frozen → dead\_end; can → reinstated | Planner (an approach with more than 30% of the budget share must be escalated to a human); human |
 
-**D34 \[推论 P3；v1 审稿\] 事件的三条配套规则。** 优先级人 > Critic > Eval service / CI / Integrator > Planner > Indexer > Scout / Librarian / worker，冲突时高的覆盖；单一来源的 refuted 不级联，只有人或 Critic 发出、或被第二来源确认的 refuted 才触发第 8 节的硬中断，`reinstated` 事件撤销；事件顺序用 merge 序号，不用跨机时钟。
+**D34 \[Derived P3; v1 review\] Three companion rules for events.** Priority is human > Critic > Eval service / CI / Integrator > Planner > Indexer > Scout / Librarian / worker, and on conflict the higher one overrides. A single-source refuted does not cascade. Only a refuted issued by a human or the Critic, or confirmed by a second source, triggers the §8 hard interrupt, and a `reinstated` event revokes it. Event order uses the merge sequence number, not cross-machine clocks.
 
-**D67 \[约束：git 和 shell 都不能限制读；外部审稿 N7\] 臂和运行的隔离靠物理分开，不靠规则。** D58 说 B1 的 worker 只读自己的前缀，但 worker 有完整 clone 和 shell，规则挡不住。所以：每次运行一个 `run_id`，自己的仓库、KV 命名空间、eval 配额，12 次运行互不可见；B1 的每个 worker 用自己单独的仓库，结束后由 Eval service 汇总做合并；S1 的"只看候选和分数"是 Indexer 发布的一个过滤镜像仓库，worker clone 的是镜像不是原仓。
+**D67 \[Constraint: neither git nor the shell can restrict reads; external review N7\] Arms and runs are isolated by physical separation, not by rules.** D58 says B1 workers read only their own prefix, but workers have a full clone and a shell, so a rule cannot stop them. Therefore: each run gets a `run_id`, with its own repo, KV namespace and eval quota, and the 12 runs cannot see each other. Each B1 worker uses its own separate repo, and at the end the Eval service collects them and does the merge. S1's "sees only candidates and scores" is a filtered mirror repo published by the Indexer; workers clone the mirror, not the original repo.
 
-**D68 \[推论 D31；外部审稿 N8\] worker 的 clone 是只读的，push 凭证只在 MCP 工具服务手里。** 否则 worker 用 git push 绕过 repo\_write 的前缀检查和立即 push 的记账。repo\_write 在服务端 commit 并 push，worker 的本地 clone 只负责读，定期 fetch。CI 的路径检查仍保留，作为第二道门。
+**D68 \[Derived D31; external review N8\] The worker's clone is read-only, and only the MCP tool service holds push credentials.** Otherwise a worker could use git push to bypass repo\_write's prefix check and the bookkeeping of immediate push. repo\_write commits and pushes on the server side. The worker's local clone is for reading only and fetches periodically. CI's path check is kept as a second line of defense.
 
-**D69 \[外部审稿 C8；第 30 轮改哈希\] 候选的格式。** `candidates/<hash>/manifest.yaml`：`{kind: patch | config | artifact, target: <基线标识，不再允许目标仓库 sha>, parents: […], approach, author, created_at}`，加 payload：patch 是对 target 的 unified diff，config 是一个文件，artifact 是一个目录。hash = hash(基线标识 + 规范化后的 payload)（D73）：同一个 diff 打在不同基线上是不同的候选，否则 Integrator 的复测会撞上 dedup\_hit、静默地不跑，而那次复测本该抓出相互作用。去重按这个 hash；相似度检索（needs\_confirmation）仍只算 payload。组合候选的 payload 是合并后的完整 patch，不是父的引用。
+**D69 \[External review C8; hash changed in round 30\] Candidate format.** `candidates/<hash>/manifest.yaml`: `{kind: patch | config | artifact, target: <baseline identifier; a target-repo sha is no longer allowed>, parents: […], approach, author, created_at}`, plus a payload: for patch, a unified diff against target; for config, one file; for artifact, a directory. hash = hash(baseline identifier + normalized payload) (D73). The same diff applied to different baselines is a different candidate. Otherwise the Integrator's remeasure would hit dedup\_hit and silently not run, when that remeasure is exactly what should catch an interaction. Dedup uses this hash; similarity search (needs\_confirmation) still considers only the payload. A combined candidate's payload is the full merged patch, not references to its parents.
 
-**D55 \[推论 C4\] 任务队列的定义。** v1 和 v2 初稿都引用了 `claim_task()` 却没定义队列，这是实现第一天就会卡的地方。队列是 KV 里的一个按 priority 排序的集合：
+**D55 \[Derived C4\] Definition of the task queue.** Both v1 and the v2 first draft referred to `claim_task()` without defining the queue. This is where implementation would get stuck on day one. The queue is a set in KV, sorted by priority:
 
 ```yaml
 task:
   id: t-0391
   approach: a-03
-  goal: "用方法 Y 推进整个问题" | "根据候选 c-xxx 的结果决定下一步" | "给 dead_end c-yyy 找反例" | "组合候选 c-a 与 c-b"（D64）
-      | "把候选 c-x rebase 到 baseline@k 并解决冲突"（compose，D74；执行者是池外新开的 agent） | "integration_failed 后的后续"（D74）
-  seed_context: checkpoints/worker-17/…ptr | null   # 非空 = fork 式恢复
-  priority: 0 | 1 | 2                                # 0 最高
-  for_agent: worker-17 | null                        # 非空 = 优先给它，它没 lease 时进公共队列
+  goal: "Advance the whole problem with method Y" | "Decide the next step based on the result of candidate c-xxx" | "Find a counterexample to dead_end c-yyy" | "Combine candidates c-a and c-b" (D64)
+      | "Rebase candidate c-x onto baseline@k and resolve conflicts" (compose, D74; run by a new agent started outside the pool) | "Follow-up after integration_failed" (D74)
+  seed_context: checkpoints/worker-17/…ptr | null   # Non-empty = fork-style resume
+  priority: 0 | 1 | 2                                # 0 is highest
+  for_agent: worker-17 | null                        # Non-empty = offered to this agent first; when it holds no lease, the task enters the public queue
   created_by: indexer | human | scout | planner | integrator
 ```
 
-谁生成：Indexer 按每方向的 target\_slots 维持常规任务（goal 用方向模板），少了就补；result\_ready 到达时 Indexer 无条件生成后续任务，priority 0，for\_agent 是提交者；人、Scout、Planner 可以注入。队列空时 worker 领 exploration 模板任务（新方向、长尾方向、给 dead\_end 找反例）。H1 阶段还没有 checkpoint（第 4 周才接），所以 result\_ready 后续任务的 seed\_context 为空，ctx 里带 result claim 指针和该 worker 自己的 claims；submitter\_checkpoint 字段可空。`claim_task()` 的实现：先取 for\_agent 等于自己的，再按 priority，再按方向的 `target_slots - current_slots` 最大者。
+Who generates tasks: the Indexer maintains regular tasks according to each approach's target\_slots (the goal uses the approach template), and tops them up when they run low. When result\_ready arrives, the Indexer unconditionally generates a follow-up task, with priority 0 and for\_agent set to the submitter. Humans, the Scout and the Planner can inject tasks. When the queue is empty, workers take exploration-template tasks (new approaches, long-tail approaches, finding a counterexample to a dead\_end). The H1 phase has no checkpoints yet (they are wired in only in week 4), so the seed\_context of a result\_ready follow-up task is empty, and ctx carries the result claim pointer and that worker's own claims. The submitter\_checkpoint field can be empty. Implementation of `claim_task()`: first take tasks whose for\_agent is the caller itself, then go by priority, then by the approach with the largest `target_slots - current_slots`.
 
-**D56 \[推论 P3\] 事件 schema 与 merge 序号。** 所有状态由事件回放算出，所以事件必须有统一结构：
+**D56 \[Derived P3\] Event schema and merge sequence numbers.** All state is computed by replaying events, so events must have a uniform structure:
 
 ```yaml
 event:
-  seq: 10482            # 由 merge queue 在合入 main 时分配，全局单调；写者提交时这个字段为空
-  local_id: critic-1/00017   # 写者自己的序号，就是文件名
+  seq: 10482            # Assigned by the merge queue when it merges into main; globally monotonic; empty when the writer submits
+  local_id: critic-1/00017   # The writer's own sequence number, which is the file name
   ts: 2026-10-18T07:02:11Z
   actor: critic-1
   role: human | critic | eval_service | ci | indexer | planner | scout | librarian | integrator | worker
   type: claim_status | approach_status | result_ready | surge_start | surge_end
       | plateau | escalation | lease_stale | allocation | reinstated
       | baseline_advanced | baseline_reverted | integration_failed | interaction_found
-      | map_updated | audit_checked | dedup_hit                      # D74、D76 加的
+      | map_updated | audit_checked | dedup_hit                      # Added by D74, D76
   target: c-0211 | a-03 | t-0391
-  from: proposed        # 状态类事件用
+  from: proposed        # For status events
   to: refuted
-  source: bench_full    # result 类事件用
-  reason: "eval 解析器 bug"
+  source: bench_full    # For result events
+  reason: "eval parser bug"
   evidence: [claims/critic-1/audit-0211.md]
 
-# result_ready 的额外字段（D28、D57、D73）
+# Extra fields for result_ready (D28, D57, D73)
   candidate: 9f3a…
-  claim_id: c-…            # eval_request 时自动生成的 result claim
+  claim_id: c-…            # The result claim generated automatically at eval_request time
   submitter: worker-07
   submitter_checkpoint: checkpoints/worker-07/…ptr
-  baseline: 6              # 配对的那版基线
-  paired: {mean: 1.8, se: 0.6, n_items: 120, n_reps: 1}   # n_reps 只计 Eval service 自己跑的复测，缓存命中不算
-  per_item: eval/results/…/per_item.json                   # 指针；比例型指标另带 bootstrap 区间
-  score: 63.4              # 绝对分，只作诊断
+  baseline: 6              # The baseline version it was paired against
+  paired: {mean: 1.8, se: 0.6, n_items: 120, n_reps: 1}   # n_reps counts only remeasures the Eval service ran itself; cache hits do not count
+  per_item: eval/results/…/per_item.json                   # Pointer; proportion metrics also carry a bootstrap interval
+  score: 63.4              # Absolute score, for diagnostics only
 
-# Integrator 发的事件的字段（D74）
+# Fields of events emitted by the Integrator (D74)
 # baseline_advanced:   baseline: 7, parent_baseline: 6, candidate: <hash>, files_changed: [prompt_builder.py],
 #                      paired: {mean, se, n_items, n_reps}, guard_pending: true | false
-# baseline_reverted:   from_baseline: 9, new_baseline: 10, removed: [<hash>], reason: audit | guard:<name>   # 记录只追加
+# baseline_reverted:   from_baseline: 9, new_baseline: 10, removed: [<hash>], reason: audit | guard:<name>   # Records are append-only
 # integration_failed:  candidate, baseline, paired, reason: below_1se | gate:<name> | conflict_unresolved
 # interaction_found:   candidate, baseline, earlier: {mean, se}, remeasured: {mean, se}, overlaps_with: [<hash>]
 # audit_checked:       segment: [j, k], daily: {mean, se}, audit: {mean, se}, threshold, flagged
@@ -325,282 +327,282 @@ event:
 # dedup_hit:           candidate, original_claim
 ```
 
-seq 的分配：merge queue 是唯一写黑板仓库 main 的进程（被优化系统仓库的基线分支由 Integrator 写，D74；两个仓库、两个写者），每合入一个带事件的 commit 就写一个 \`events/\_seq/\<seq>\` 指向该事件文件，并把 seq 写进 merge commit 的 trailer。Store 端口的 \`merge(branch) → seq\` 就是这个语义。优先级冲突按 role 解决（D34）。Indexer 按 seq 回放，重建永远确定。
+Assigning seq: the merge queue is the only process that writes main of the blackboard repo (the baseline branch of the repo of the system being optimized is written by the Integrator, D74; two repos, two writers). Each time it merges a commit that carries an event, it writes an \`events/\_seq/\<seq>\` that points to that event file, and writes the seq into the merge commit's trailer. This is what the Store port's \`merge(branch) → seq\` means. Priority conflicts are resolved by role (D34). The Indexer replays in seq order, so rebuilds are always deterministic.
 
-## 6. 组件
+## 6. Components
 
-十一个组件，六个没有模型。**D13 \[推论 P4\]**：模型只出现在需要判断的地方，而且判断的 agent 从不坐在读路径上；控制谁能看见什么的全部是纯代码，因为纯代码不会总结、不会有偏见、能被审计。
+Eleven components, six of them without a model. **D13 \[Derived P4\]**: models appear only where judgment is needed, and the judging agents never sit on the read path. Everything that controls who can see what is pure code, because pure code does not summarize, has no bias, and can be audited.
 
-| 组件 | 模型 | 职责 | 触发 | 失败时 | 来源 |
+| Component | Model | Responsibilities | Trigger | On failure | Source |
 | --- | --- | --- | --- | --- | --- |
-| Indexer | 无 | 解析 frontmatter 进 SQLite；embedding 新 claim、digest、轨迹切片；按 events 重算当前状态；维护 reuse\_count；提供 `diff_since(cursor, working_set)` 和 `search(query, k)`；lease TTL 清理；为 result\_ready 生成后续任务（D28） | 仓库 post-receive hook | 可从仓库全量重建；重建期间 worker 只读 spec 和 digest | D13 |
-| Router 检查 | 无 | worker 用游标问 Indexer "有没有事件命中我的 lease"，命中按第 8 节规则处理。检查点：harness 有 tool hook 则每次 tool call，否则每次 herd 工具调用；Executor 按 D60 兜底。规则是数据 `router/rules.yaml` | tool call 边界 | 跳过，下一个同步点通过 diff 看到 | D29 \[假设 H3\]：第一版不做 NATS 推送 |
-| Merge queue | 无 | worker push 到自己 branch，按序 rebase 到 main。CI 两级：路径、schema、evidence 指针检查同步秒级；验证器异步，结果以事件回写 | push | 积压是 H4 的信号 | D31 |
-| Eval service | 无 | 外部 eval 的薄客户端：把 eval\_request 转成 submit，轮询 status，写 result.json 和 result\_ready。PoC 阶段对接的是测试台的慢档服务（另一份文档《Herd 测试台》），接口 submit / status / history 和真外部 eval 一致；配额、隐藏数据、多种子都在那边，不在这里 | eval\_request；push 型 source 的到达 | 队列持久化在 KV | 第 9 节 |
-| Budget meter | 无 | 按角色、方向、source 计量 eval 机器小时（token 只记录不设上限，P10），对照 charter/constraints.md，超额触发 escalation | 每次 API 调用和 eval 完成 | 计量滞后但不阻塞 | v1 审稿：没有它预算只是一句话 |
-| Librarian | 最强，同其他角色（P10） | 连续跑，每轮处理上次之后的新 commit，没有分批参数（P10）：给新 claim 打标签（含 low\_signal）；重写 digest（结构固定：当前最优、活跃假设、corroborated insight、proposed insight、dead end、open question；≤ 2,000 token）；从高分候选相对父代的 diff 提炼 insight。第一版 1 个，不分方向 | 有新 commit 就跑 | digest 过期，worker 可绕过直接检索 | D14：编辑不是守门人 |
-| Critic | 最强 | 解释高分候选为什么得分；对照 holdout；查与 dead\_end 的相似度；查是否利用 eval 漏洞。写 audit：公开结论 + worker 不可读的理由。唯一能读 eval 代码的 agent | 候选进 top-k 或跳升超 2 个历史标准差 \[默认\]；限速每小时 6 次 \[默认\] | 积压按跳升幅度排队 | D11 \[推论 P3\]；理由不公开是因为"为什么得分"就是 hacking 说明书 |
-| Planner | 最强 \[假设 H7\] | 读全部 digest 和 eval 统计，只写 decisions：各方向预算份额、冻结或撤资、队列重排、点名 Librarian 或 Critic。每个决定带理由。escalation 列表里的决定只能写 request 给 PI agent | 每个名额窗口的顶层 eval 结果到齐后；兜底每 N 小时 \[默认 顶层 eval 时长的一半\] | 上一份 decisions 继续生效；worker 自领任务不依赖它 | D15 \[推论 P4\]：不做全景、不 fork、不调通信参数 |
-| Scout | 最强 \[假设 H9\] | 每 K 小时 \[默认 6\] 读全部 digest，抽查 surprise 和高分 diff，专找跨方向连接；写 cross\_approach insight；值得追的直接从自身上下文 fork worker。不写 decisions、不碰预算 | 定时 | 跨方向连接靠人 | D16 \[推论 P4、P8\]：持有全貌的脑子和分配预算的脑子分开 |
-| PI agent | 最强 | 只和人对话。协商 charter，签字后生成 spec.md 和 approaches/，fork 首波 worker。运行期做控制台。跨问题持久 | 人的消息；Planner 的升级请求 | 人直接改 charter | P6，第 10 节 |
-| Integrator | 无 | 唯一能写被优化系统仓库基线分支的进程。verified 候选先进先出：rebase；有冲突就发 compose 任务（池外新 agent 执行）；基线动过就 remeasure 一次配对；按接收规则合入，发 baseline\_advanced 等事件。每 3 次合入批量跑贵 gate，检出问题就二分、写排除肇事者的新基线。每 2 次合入触发抽查（两次新测量）。baseline\_advanced 后重跑 map/ 的测量脚本。运行结束执行收尾顺序和归因。四个臂同配置 | result claim 到 verified；预算用完 | 队列在 KV，从 baseline/\<k>.json 恢复 | D74 \[推论 P1、D64\]；第 30 轮 |
+| Indexer | None | Parses frontmatter into SQLite; embeds new claims, digests and trace slices; recomputes current state from events; maintains reuse\_count; provides `diff_since(cursor, working_set)` and `search(query, k)`; cleans up leases past their TTL; generates follow-up tasks for result\_ready (D28) | Repo post-receive hook | Can be fully rebuilt from the repo; during a rebuild, workers read only the spec and digests | D13 |
+| Router check | None | A worker uses its cursor to ask the Indexer "has any event hit my lease?"; a hit is handled by the §8 rules. When it checks: every tool call if the harness has a tool hook, otherwise every herd tool call; the Executor backstops per D60. The rules are data: `router/rules.yaml` | Tool call boundary | Skipped; the change is seen through the diff at the next sync point | D29 \[Hypothesis H3\]: no NATS push in the first version |
+| Merge queue | None | Workers push to their own branch, and the queue rebases onto main in order. CI has two levels: path, schema and evidence-pointer checks run synchronously in seconds; verifiers run asynchronously, and their results are written back as events | push | A backlog is the H4 signal | D31 |
+| Eval service | None | A thin client for the external eval: turns eval\_request into submit, polls status, writes result.json and result\_ready. In the PoC phase it connects to the testbed's slow-tier service (a separate document: *Herd Testbed*, `herd-testbed.md`), whose submit / status / history interface matches the real external eval. Quotas, hidden data and multiple seeds all live on that side, not here | eval\_request; arrival from a push-type source | The queue is persisted in KV | §9 |
+| Budget meter | None | Meters eval machine-hours by role, approach and source (tokens are only recorded, with no cap, P10), checks them against charter/constraints.md, and triggers escalation on overrun | Every API call and every eval completion | Metering lags but does not block | v1 review: without it, the budget is just a sentence |
+| Librarian | Strongest, same as other roles (P10) | Runs continuously. Each round processes the new commits since the last round, with no batching parameter (P10): tags new claims (including low\_signal); rewrites digests (fixed structure: current best, active hypotheses, corroborated insights, proposed insights, dead ends, open questions; ≤ 2,000 tokens); distills insights from the diffs of high-scoring candidates against their parents. One instance in the first version, not split by approach | Runs whenever there is a new commit | Digests go stale; workers can bypass them and search directly | D14: an editor, not a gatekeeper |
+| Critic | Strongest | Explains why a high-scoring candidate scores well; checks it against the holdout; checks its similarity to dead\_ends; checks whether it exploits an eval loophole. Writes audits: a public conclusion + a rationale that workers cannot read. The only agent that can read eval code | A candidate enters the top-k or jumps by more than 2 historical standard deviations \[Default\]; rate-limited to 6 per hour \[Default\] | The backlog is queued by jump size | D11 \[Derived P3\]; the rationale is not public because "why it scores" is a hacking manual |
+| Planner | Strongest \[Hypothesis H7\] | Reads all digests and eval statistics, and writes only decisions: each approach's budget share, freezing or divesting, reordering the queue, calling on the Librarian or the Critic. Every decision carries a rationale. Decisions on the escalation list can be written only as a request to the PI agent | After all top-level eval results for each quota window are in; backstop every N hours \[Default: half the top-level eval duration\] | The previous decisions stay in effect; workers claiming tasks on their own does not depend on it | D15 \[Derived P4\]: no global view, no forking, no tuning of communication parameters |
+| Scout | Strongest \[Hypothesis H9\] | Every K hours \[Default: 6\], reads all digests, spot checks surprises and high-scoring diffs, and looks specifically for cross-approach connections. Writes cross\_approach insights. For anything worth pursuing, it forks a worker directly from its own context. Does not write decisions and does not touch the budget | Scheduled | Cross-approach connections rely on humans | D16 \[Derived P4, P8\]: the mind that holds the whole picture and the mind that allocates the budget are kept separate |
+| PI agent | Strongest | Talks only to the human. Negotiates the charter; after it is signed, generates spec.md and approaches/ and forks the first wave of workers. Acts as the console at runtime. Persists across problems | Messages from the human; escalation requests from the Planner | The human edits the charter directly | P6, §10 |
+| Integrator | None | The only process that can write the baseline branch of the repo of the system being optimized. Verified candidates go first-in, first-out: rebase; if there is a conflict, issue a compose task (run by a new agent outside the pool); if the baseline has moved, do one paired remeasure; merge according to the acceptance rule and emit baseline\_advanced and related events. Every 3 merges, run the expensive gates as a batch; if a problem is found, bisect and write a new baseline that excludes the culprit. Every 2 merges trigger a spot check (two new measurements). After baseline\_advanced, rerun the measurement scripts in map/. At the end of the run, execute the closeout order and attribution. Same configuration in all four arms | A result claim reaches verified; the budget runs out | The queue is in KV; recovers from baseline/\<k>.json | D74 \[Derived P1, D64\]; round 30 |
 
 ## 7. Worker harness
 
-**D35 \[推论 C4\] worker 无状态。** 它的所有状态要么在仓库，要么在对象存储的 checkpoint。死了就从 checkpoint 或任务队列重来。原则不靠 prompt 里的叮嘱，靠 hook：prompt 的行为在长任务里会漂移，hook 每次都执行，而且能被日志审计。Prompt 只负责说清楚目标和品味。
+**D35 \[Derived C4\] Workers are stateless.** All of a worker's state is either in the repo or in a checkpoint in object storage. If a worker dies, it starts over from the checkpoint or the task queue. Principles are enforced by hooks, not by reminders in the prompt: prompt-driven behavior drifts over long tasks, while hooks run every time and can be audited from logs. The prompt is only responsible for making the goal and the taste clear.
 
-**D1 \[推论 P1\] 任务形态只有一种**：`{approach, goal, seed_context?}`。goal 是"用方法 Y 推进整个问题"或"根据候选 c-xxx 的 eval 结果决定下一步"，从不是"读 X"或"看 Y 目录"。每个 worker 拿到全部材料。seed\_context 非空表示从该 checkpoint 恢复对话再追加 goal，fork、eval 结果后续、PI 首波都走这条路。
+**D1 \[Derived P1\] There is only one task shape**: `{approach, goal, seed_context?}`. A goal is "advance the whole problem with method Y" or "decide the next step based on the eval result of candidate c-xxx", never "read X" or "look at directory Y". Every worker gets all the material. A non-empty seed\_context means: resume the conversation from that checkpoint, then append the goal. Forks, eval-result follow-ups and the PI's first wave all take this path.
 
 ```
 loop:
   task = claim_task()
-  ctx = spec.md + charter 摘要 + digests/<approach> + diff_since(cursor, working_set)
-  acquire_lease(approach, goal, target_claims)   # KV，不进 git（D32）
-    # target_claims = goal 里解析出的 claim id；之后每次 repo_write 写 claim，
-    #   MCP 服务端把新 claim 加进 lease.target_claims，其 depends_on 并进 lease.depends_on
+  ctx = spec.md + charter summary + digests/<approach> + diff_since(cursor, working_set)
+  acquire_lease(approach, goal, target_claims)   # KV, not in git (D32)
+    # target_claims = the claim ids parsed from goal; after that, every time repo_write writes a claim,
+    #   the MCP server adds the new claim to lease.target_claims and merges its depends_on into lease.depends_on
   run_agent(ctx, tools, hooks)
-    # 每条 claim / surprise / eval_request 产生时立即 commit + push（D36）
+    # Each claim / surprise / eval_request is committed + pushed as soon as it is produced (D36)
   release_lease(); checkpoint(); push(branch)
 ```
 
-**工具**
+**Tools**
 
-| 工具 | 权限 | 来源 |
+| Tool | Permissions | Source |
 | --- | --- | --- |
-| repo\_read | 全仓库，含别人的 claim、decisions、charter 讨论全文 | P1：看全部材料 |
-| repo\_write | 只新增，只在自己前缀下，CI 二次检查 | D31 |
-| search(query, k) | 语义检索 claims、digests、轨迹切片、charter 讨论 | D7 推转拉 |
-| eval\_request(candidate, parents, predictions{source: score}, rationale, confirm\_token?, baseline?) → {request\_id, claim\_id, baseline, status: queued \| needs\_confirmation{similar: \[…\]} \| dedup\_hit \| gate\_failed \| invalid\_request, degraded\_sources: \[…\]}。两阶段：第一次调用若检索到相似候选或 dead\_end，返回 needs\_confirmation 和一个 confirm\_token，worker 带 token 再调一次才入队（D26）。baseline 缺省为当前基线；Integrator 的复测走内部接口 remeasure(candidate, baseline)，不经过 needs\_confirmation，也不经过去重（D74）。入队时服务自动生成一条 type=result 的 claim（evidence 指向候选）并返回 claim\_id，后续每级结果都是这条 claim 的状态事件；服务按声明自动逐级执行，worker 不自选层；parents 用于 lineage.json 的父 hash 校验，组合候选有多个（D57、D64） | 只能排队，不能直接跑，不能读 eval 定义 | D10 |
-| register\_exposure(candidate, tag, window) | push 型 source 用，登记后信号才归到候选 | 第 9 节 |
-| fork(reason, goal) | 保存 checkpoint 并起一个兄弟 worker | D5 \[假设 H2、H11\] |
-| ask\_checkpoint(agent, ts, question) | 恢复某 checkpoint 的只读副本回答问题，含问 PI agent 的对齐对话 | D5 |
-| surprise(note, pointer) | 写一条 type=question、surprise=true 的 claim，不要求有结论 | D8 |
-| sandbox | 本任务的隔离计算环境，本地代理 eval 跑在这里 | C1 |
+| repo\_read | The whole repo, including other agents' claims, decisions, and the full text of the charter discussion | P1: see all the material |
+| repo\_write | Add only, only under its own prefix; CI checks again | D31 |
+| search(query, k) | Semantic search over claims, digests, trace slices and the charter discussion | D7: pull instead of push |
+| eval\_request(candidate, parents, predictions{source: score}, rationale, confirm\_token?, baseline?) → {request\_id, claim\_id, baseline, status: queued \| needs\_confirmation{similar: \[…\]} \| dedup\_hit \| gate\_failed \| invalid\_request, degraded\_sources: \[…\]}. Two phases: if the first call's search finds similar candidates or dead\_ends, it returns needs\_confirmation and a confirm\_token, and the request is queued only when the worker calls again with the token (D26). baseline defaults to the current baseline. The Integrator's remeasures go through the internal interface remeasure(candidate, baseline), which skips needs\_confirmation and also skips dedup (D74). On enqueue, the service automatically creates a claim with type=result (its evidence points to the candidate) and returns claim\_id; the result at each later level is a status event on this claim. The service runs the levels automatically as declared, and the worker does not choose the level. parents is used to check parent hashes for lineage.json; a combined candidate has several (D57, D64) | Can only queue; cannot run evals directly; cannot read eval definitions | D10 |
+| register\_exposure(candidate, tag, window) | Used with push-type sources; signals are attributed to the candidate only after registration | §9 |
+| fork(reason, goal) | Saves a checkpoint and starts a sibling worker | D5 \[Hypothesis H2, H11\] |
+| ask\_checkpoint(agent, ts, question) | Restores a read-only copy of a checkpoint to answer a question, including questions to the PI agent's alignment conversation | D5 |
+| surprise(note, pointer) | Writes a claim with type=question and surprise=true; no conclusion required | D8 |
+| sandbox | This task's isolated compute environment; local proxy evals run here | C1 |
 
 **Hooks**
 
-| 时机 | 动作 | 来源 |
+| When | Action | Source |
 | --- | --- | --- |
-| 每次 tool call 前 | 查有无事件命中本 lease（第 8 节规则）。需要 harness 的 tool hook；没有的 harness 只在 herd 工具调用时查，Executor 按 D60 兜底 | D17、D32 |
-| 长 sandbox 调用期间 | 心跳由 Executor sidecar 按时间打（每 30 秒 \[默认\]），与 tool call 无关，长 sandbox 调用不会被误判 stale | D32 |
-| 每条 claim / surprise / eval\_request 产生时 | 立即 commit + push | D36 \[推论 P5\]：共享时延不能等于任务时长 |
-| eval\_request 前 | 自动检索相似候选和 confirmed 的 dead\_end，有命中则返回 needs\_confirmation，worker 带 confirm\_token 再调才入队 | D26 \[推论 P7\] |
-| eval\_request 时 | 必须带每层的预测分 predictions 和 rationale，缺一拒绝；gate（D54）在这里先跑；本地代理结果写 local.json | D37 \[假设 H8\] |
-| eval 结果到达 | Indexer 无条件生成后续任务，for\_agent 指向提交者；提交者持有 lease 时规则 1 的硬中断内容就是"去领它"，否则任务进公共队列前排（D55） | D28 \[推论 P9\] |
-| 连续 N 次失败 \[默认 3\] | 强制刷新 digest 和一次检索。失败 = 一次本地代理或便宜层结果未优于该 worker 当前最优，或一次 eval\_request 被 gate / 去重拒绝 | D19 \[推论 P5\] |
-| 发现异常 | 产出可执行的最小复现（失败测试、具体例子、notebook）作为 evidence | D8 \[推论 P2\]：artifact 不可压缩，散文会丢 |
-| 上下文接近上限 | 不是 fork：fork 复制整个对话，子进程起点就在上限。做法是写一条结构化 contribution claim（含未完成的线索和自己的 surprise），checkpoint，然后以压缩上下文（spec + digest + 自己的 claims + 轨迹指针）起一个继续任务；它可以 ask\_checkpoint 自己的过去。按 P2 这是有损的，所以要尽量早 checkpoint。v2.2 把这条路径写具体（来自 v3 审稿）：触发点是窗口的 70% \[默认\]；Harness 适配器关掉自动压缩，用量从会话记录的 usage 字段算；新会话的起始包 = 原起始包 + 自己本任务的 claims + 中断内容（若有）+ 工作目录 diff + 最后 20 次工具调用 \[默认\]；进程被杀时由 sidecar 代写一条指向轨迹的 stub claim。这条路径不依赖 checkpoint，gate 前就能用，所有臂相同；fork 仍是 gate 后的事（D5） | C4 |
-| 结束前 | 必须写 ≥ 1 条 claim 带 evidence；允许 dead\_end 含"本次无发现"，不允许空；上传轨迹；保存 checkpoint | D4、D25 |
+| Before every tool call | Check whether any event hits this lease (§8 rules). This needs the harness's tool hook; a harness without one checks only on herd tool calls, and the Executor backstops per D60 | D17, D32 |
+| During long sandbox calls | The Executor sidecar sends heartbeats on a timer (every 30 seconds \[Default\]), independent of tool calls, so long sandbox calls are not mistaken for stale | D32 |
+| When each claim / surprise / eval\_request is produced | Commit + push immediately | D36 \[Derived P5\]: sharing latency must not equal task duration |
+| Before eval\_request | Automatically search for similar candidates and confirmed dead\_ends. On a hit, return needs\_confirmation; the request is queued only when the worker calls again with the confirm\_token | D26 \[Derived P7\] |
+| At eval\_request | The request must carry the predicted score for each level (predictions) and a rationale, and is rejected if either is missing. The gate (D54) runs here first. The local proxy result is written to local.json | D37 \[Hypothesis H8\] |
+| When an eval result arrives | The Indexer unconditionally generates a follow-up task, with for\_agent pointing to the submitter. If the submitter holds a lease, the content of the rule 1 hard interrupt is "go claim it"; otherwise the task goes to the front of the public queue (D55) | D28 \[Derived P9\] |
+| N consecutive failures \[Default: 3\] | Force a refresh of the digest and one search. Failure = one local proxy or cheap-level result that does not beat that worker's current best, or one eval\_request rejected by the gate / dedup | D19 \[Derived P5\] |
+| On finding an anomaly | Produce an executable minimal reproduction (a failing test, a concrete example, a notebook) as evidence | D8 \[Derived P2\]: artifacts cannot be compressed; prose gets lost |
+| Context near its limit | Not a fork: a fork copies the whole conversation, so the child starts at the limit. Instead, write a structured contribution claim (including unfinished leads and its own surprises), checkpoint, and then start a continuation task with a compressed context (spec + digest + its own claims + trace pointers). The continuation can ask\_checkpoint its own past. Under P2 this is lossy, so checkpoint as early as possible. v2.2 makes this path concrete (from the v3 review). The trigger is 70% of the window \[Default\]. The Harness adapter turns off auto-compaction and computes usage from the usage field in the session record. The new session's start pack = the original start pack + its own claims from this task + the interrupt content (if any) + the working-directory diff + the last 20 tool calls \[Default\]. If the process is killed, the sidecar writes a stub claim on its behalf that points to the trace. This path does not depend on checkpoints, can be used before the gate, and is the same for all arms; fork is still for after the gate (D5) | C4 |
+| Before finishing | Must write ≥ 1 claim with evidence. A dead\_end that says "nothing found this time" is allowed; an empty result is not. Upload the trace; save a checkpoint | D4, D25 |
 
-**D5 \[推论 P2；假设 H2、H11\] fork 代替 handoff。** Checkpoint = 完整对话 + sandbox 状态（工作目录快照或可重放的命令日志）+ 工具状态指针。只存对话不存 sandbox 的 checkpoint 是半个：fork 出来的 worker 继承了想法，丢了工作目录。Fork = 用该记录在任意机器起新会话、恢复 sandbox、追加 goal；有 prompt cache 时对话部分是增量 token，sandbox 恢复成本是第 0 周 spike 要测的数字。回头问 = 只读副本，不恢复 sandbox，不写任何东西。fork 只用于在决策点分叉，不用于上下文解压：Executor 记录每个 checkpoint 的上下文用量，fork 优先选用量低于 60% \[默认\] 的 checkpoint，超过的先压缩再 fork。
+**D5 \[Derived P2; Hypothesis H2, H11\] Fork instead of handoff.** Checkpoint = the full conversation + sandbox state (a working-directory snapshot or a replayable command log) + tool state pointers. A checkpoint that stores the conversation but not the sandbox is only half a checkpoint: the forked worker inherits the ideas but loses the working directory. Fork = use that record to start a new session on any machine, restore the sandbox, and append the goal. With a prompt cache, the conversation part comes as incremental tokens; the cost of restoring the sandbox is a number the week 0 spike has to measure. Ask back = a read-only copy; it does not restore the sandbox and writes nothing. Fork is used only to branch at decision points, not to decompress context. The Executor records each checkpoint's context usage. Fork prefers checkpoints with usage below 60% \[Default\]; checkpoints above that are compressed first and then forked.
 
-## 8. 通信
+## 8. Communication
 
-**D38 \[推论 P1、P4\] agent 之间不互发消息。** 所有通信是对仓库的写和读。原因两个：点对点消息不可审计、不可回放，10,000 个 agent 的 P2P 是灾难；更重要的是，写进仓库的东西才会被索引、被检索、被 Librarian 看到，消息不会。
+**D38 \[Derived P1, P4\] Agents do not send messages to each other.** All communication is writes to and reads from the repo. There are two reasons. Point-to-point messages cannot be audited or replayed, and P2P among 10,000 agents is a disaster. More importantly, only what is written into the repo gets indexed, searched and seen by the Librarian; messages do not.
 
-**D17 \[推论 P5\] 读分三条通道，由事件和 agent 状态触发，不由时钟触发。**
+**D17 \[Derived P5\] Reading is split into three channels, triggered by events and agent state, not by the clock.**
 
-| 通道 | 触发 | 内容 | 成本 | 时效 |
+| Channel | Trigger | Content | Cost | Latency |
 | --- | --- | --- | --- | --- |
-| 硬中断 | Router 检查命中 lease | 当前任务失效，或本 agent 的 eval 结果到了 | 一次 KV 读（Indexer 命中后写 interrupt:\<agent>，Router 检查只读这个键），每次 tool hook 或 herd 工具调用 | 下一个检查点，秒到分钟级 \[假设 H3\]；Executor 5 分钟兜底 |
-| 软注入 | 到达同步点：领任务前、eval\_request 前、一次失败后、任务结束时、连续 N 次失败 | `diff_since(cursor, working_set)`，按相关性排序，截断 500 token \[默认\] | 500 token | 分钟到小时级 |
-| 按需检索 | 形成假设或撞到异常时自己调用，部分由 hook 强制 | search 返回 top-k claim 和轨迹切片 | 按次 | 即时 |
+| Hard interrupt | The Router check hits a lease | The current task is invalidated, or this agent's eval result has arrived | One KV read (after a hit, the Indexer writes interrupt:\<agent>, and the Router check reads only this key), on every tool hook or herd tool call | At the next check, seconds to minutes \[Hypothesis H3\]; Executor backstop at 5 minutes |
+| Soft injection | Reaching a sync point: before claiming a task, before eval\_request, after a failure, at task end, after N consecutive failures | `diff_since(cursor, working_set)`, sorted by relevance, truncated at 500 tokens \[Default\] | 500 tokens | Minutes to hours |
+| On-demand search | Called by the agent itself when it forms a hypothesis or hits an anomaly; partly forced by hooks | search returns the top-k claims and trace slices | Per call | Immediate |
 
-**路由规则（`router/rules.yaml`，改规则不改代码）**
+**Routing rules (`router/rules.yaml`; change the rules, not the code)**
 
-对每条活跃 lease `{agent, approach, target_claims, depends_on}`：
+For each active lease `{agent, approach, target_claims, depends_on}`:
 
-1. 本 agent 提交的候选 `result_ready` → 硬中断，内容是"去领 for\_agent 指向你的后续任务"（D28、D55）。
-2. `target_claims` 中任一条的状态推进或 refuted → 硬中断。
-3. `approach` 被 frozen、dead\_end 或预算归零 → 硬中断附 decision。
-4. `depends_on` 中任一条的 refuted，且由人或 Critic 发出、或被第二来源确认 → 硬中断。单一来源的 refuted 只进 diff（D34）。
-5. author=human 的 claim 标注了本 approach → 硬中断。人的介入优先级最高（P6）。
-6. 有候选合入基线（baseline\_advanced），且本 lease 的 files\_touched 和合入的文件有交集 → 硬中断，内容是"rebase 到新基线"；没有交集 → 软中断，等 diff（D74）。
-7. 其他 → 不推，等 diff。
+1. `result_ready` for a candidate this agent submitted → hard interrupt, with the content "go claim the follow-up task whose for\_agent points to you" (D28, D55).
+2. Any claim in `target_claims` advances in status or is refuted → hard interrupt.
+3. `approach` is frozen, dead\_end, or its budget drops to zero → hard interrupt with the decision attached.
+4. Any claim in `depends_on` is refuted, and the refuted was issued by a human or the Critic or confirmed by a second source → hard interrupt. A single-source refuted only goes into the diff (D34).
+5. A claim with author=human tags this approach → hard interrupt. Human intervention has the highest priority (P6).
+6. A candidate is merged into the baseline (baseline\_advanced), and this lease's files\_touched overlaps the merged files → hard interrupt, with the content "rebase onto the new baseline". No overlap → soft interrupt; wait for the diff (D74).
+7. Anything else → no push; wait for the diff.
 
-**D18 \[推论 C2\] diff 的相关性排序与截断。** `working_set` = lease 里的 approach + target\_claims + 最近检索过的 claim id。排序：同 approach 的 verified > 同 approach 的 dead\_end > 跨 approach 的 insight > 其他。截断后附一行"还有 N 条，用 search 查"。截断值是 charter 里的参数，PI agent 按人的意见改，不是 Planner 的决定（D15）。
+**D18 \[Derived C2\] Relevance ranking and truncation of the diff.** `working_set` = the approach in the lease + target\_claims + recently searched claim ids. Ranking: verified in the same approach > dead\_end in the same approach > cross-approach insight > everything else. After truncation, one line is appended: "N more; use search to find them". The truncation cutoff is a charter parameter. The PI agent changes it based on the human's input; it is not a Planner decision (D15).
 
-**D19 \[推论 P5\] 卡住时多读。** 连续失败越多，同步点越密；N 次失败后每次 tool call 都做一次 diff 检查直到有进展。理由：连续失败是"别人可能已经做过"的最强信号。
+**D19 \[Derived P5\] Read more when stuck.** The more consecutive failures, the denser the sync points. After N failures, every tool call does a diff check until there is progress. Reason: consecutive failures are the strongest signal that "someone else may have done this already".
 
-**D16 跨方向的 click 由 Scout 专职产生（第 6 节）**，因为没有任何 worker 同时持有两个方向的细节，不能指望自发出现；Scout 值得追的线索直接从自身上下文 fork，不写任务描述交给别人（D5）。
+**D16 Cross-approach clicks are the Scout's dedicated job (§6)**, because no worker holds the details of two approaches at once, so they cannot be expected to emerge on their own. For leads worth pursuing, the Scout forks directly from its own context instead of writing a task description and handing it to someone else (D5).
 
-**D23 \[推论 P6\] 人的洞察写成 claim。** PI agent 把人的话写成 author=human 的 claim，evidence 指向对话 checkpoint，规则 5 让它对点名的方向立即可见；worker 可以 ask\_checkpoint 回头问 PI agent 那段对话的细节。
+**D23 \[Derived P6\] Human insights are written as claims.** The PI agent writes the human's words as a claim with author=human, with evidence pointing to the conversation checkpoint. Rule 5 makes it immediately visible to the approaches it names. Workers can use ask\_checkpoint to ask back the PI agent about the details of that conversation.
 
 ## 9. Eval
 
-Eval 是稀缺资源（C1），所以系统的目标是让每一次昂贵的 eval 落在信息量最大的候选上，agent 的工作从"生成候选"变成"预测哪个候选值得一次 eval"。Eval 又是插件（C6），所以本节先定义接口，再定义从接口推出来的通用机制，最后说三种形态的差别。
+Eval is a scarce resource (C1). So the system's goal is to make every expensive eval land on the candidate that carries the most information, and the agent's job shifts from "generating candidates" to "predicting which candidate is worth an eval". Eval is also a plugin (C6). So this section first defines the interface, then the general mechanisms derived from the interface, and finally the differences among the three forms.
 
-**D39 \[约束 C6\] Eval 是一组 signal source，每个 source 自己声明属性，一切从声明推导。**
+**D39 \[Constraint C6\] Eval is a set of signal sources. Each source declares its own properties, and everything is derived from those declarations.**
 
 ```yaml
-# eval/sources/<id>.yaml   必填 7 个，其余可选，大多数外部 eval 只填必填
+# eval/sources/<id>.yaml   7 required fields, the rest optional; most external evals fill in only the required ones
 id: bench_full
-mode: pull | push            # 必填。pull 按候选提交；push 自己按节奏到达
-latency: 6h                  # 必填。提交到出结果
-budget: {per_day: 40, allocated_by: planner | human}   # 必填
-cost_machine_hours: 48       # 必填。一次执行的机器小时，外部系统就填它的计费折算；阶梯排序和 Budget meter 都按它算（D42）
-trust: 0.9                   # 必填。0 到 1，决定阶梯位置和能否动永久预算
-readable_by: [critic]        # 必填。决定定义存在哪：含 worker 则在黑板，否则在私有存储（D10、D63）
-kind: tool | dataset | query | flight | human          # 可选，默认 tool
-attribution: candidate | exposure                      # 可选，默认 candidate
-concurrency: 9               # 可选，默认不限（外部系统自己排队）
-noise: {n_for_ci: 3}         # 可选，默认 1；result 永远带 n（C3）
-drift: fixed | drifting      # 可选，默认 fixed
-escalate_on_request: false   # 可选；flight 为 true
-compare_against: concurrent_control | none             # 可选；观察型信号用
+mode: pull | push            # Required. pull: submitted per candidate; push: arrives on its own schedule
+latency: 6h                  # Required. From submission to result
+budget: {per_day: 40, allocated_by: planner | human}   # Required
+cost_machine_hours: 48       # Required. Machine hours for one run; for an external system, fill in its billing converted to machine hours; ladder ordering and the Budget meter both use it (D42)
+trust: 0.9                   # Required. 0 to 1; sets the ladder position and whether it can move permanent budget
+readable_by: [critic]        # Required. Decides where the definition lives: on the blackboard if it includes worker, otherwise in the private store (D10, D63)
+kind: tool | dataset | query | flight | human          # Optional, default tool
+attribution: candidate | exposure                      # Optional, default candidate
+concurrency: 9               # Optional, default unlimited (the external system does its own queueing)
+noise: {n_for_ci: 3}         # Optional, default 1; result always carries n (C3)
+drift: fixed | drifting      # Optional, default fixed
+escalate_on_request: false   # Optional; true for flight
+compare_against: concurrent_control | none             # Optional; for observational signals
 ```
 
-| source | 典型声明 | 它改变了什么 |
+| source | Typical declaration | What it changes |
 | --- | --- | --- |
-| 外部评测工具 | pull，candidate，小时级，trust 高，fixed | 基础设计 |
-| 本地 dataset | pull，candidate，分钟级，trust 中，fixed | 自动切子集成更便宜的一层；worker 可能过拟合它，readable\_by 收紧 |
-| Kusto 查询 | push，exposure，延迟等于数据管道滞后，trust 中高，drifting | 候选先登记 exposure；Critic 查混杂；只和同期对照比 |
-| Flight | push，exposure，天级，并发几个，trust 最高，drifting | 推上 flight 走 escalation；result 带显著性 |
-| 人 | pull，candidate，小时到天级，trust 高但噪声大 | 经 PI agent 排队；评审结果成为 metric 的标定样本 |
+| External eval tool | pull, candidate, hours, high trust, fixed | The base design |
+| Local dataset | pull, candidate, minutes, medium trust, fixed | Automatically cut into subsets that form a cheaper tier; workers may overfit to it, so readable\_by is tightened |
+| Kusto query | push, exposure, latency equals the data-pipeline lag, medium-high trust, drifting | Candidates register exposure first; the Critic checks for confounding; compare only against a concurrent control |
+| Flight | push, exposure, days, a few concurrent, highest trust, drifting | Pushing to a flight goes through escalation; result carries significance |
+| Human | pull, candidate, hours to days, high trust but noisy | Queued through the PI agent; the human's judgments become calibration samples for the metric |
 
-**从声明推导出来的通用机制**
+**General mechanisms derived from the declarations**
 
-- **阶梯 \[推论 C1\]**：按 cost\_machine\_hours 和 latency 排序，"过了便宜的才能上贵的"。T0 到 T3 只是某个问题里各 source 的位置标签，不是写死的层。
-- **标定 \[推论 P3\]**：每个非顶层 source 对上一层 trust 更高的 source 维护相关性记录，低于阈值 \[默认 0.3，样本 20\] 自动降级，worker 提交时被告知"此 source 当前不可信"。这就是 metric claim 的通用形式。
-- **D12 \[推论 P3\] 只有 trust 最高的那一层能改 Planner 的预算分配**，代理分只能决定队列内排序。这是反 Goodhart 的硬规则，Planner 不能覆盖。代价是 topline 稀疏时预算调整慢，这是有意选的保守。
-- **D40 \[约束 C1；假设 H5\] 配额与本地代理**：顶层 eval 每天几十次，对 50 个 worker 是每人一天不到一次，所以 worker 循环的主驱动是 T0 加 sandbox 里自建的本地代理。本地代理是一等机制：结果和配置写 local.json，Eval service 用它和上层标定，相关性好的推广成正式的一层。配额：每 worker 每天 T1 ≤ 20 次 \[默认\]，顶层名额由 Planner 按方向分。第一版队列就是配额加 FIFO，排序留到标定数据够了之后（D41 推迟）。
-- **D37 \[假设 H8\] 预测记录**：每次提交带每层的预测分 predictions 和 rationale，每层结果回来记录该层的误差。用途：训代理打分器（推迟）；标定 agent 判断力，加权只作用于 information 份额，不作用于 exploitation，否则奖励保守候选；让 agent 少提交低置信度的东西。
-- **D28 \[推论 P9\] 结果有接收者**：result\_ready 绑定提交者和它提交时的 checkpoint，Indexer 自动生成后续任务进队列前排。
-  - **D57 \[推论 C1、P3\] eval\_request 的闭合**：签名和返回值见第 7 节工具表。入队时自动生成一条 type=result 的 claim 并返回 claim\_id，后续每级结果是这条 claim 的状态事件，result\_ready 带 candidate、claim\_id、submitter、submitter\_checkpoint、baseline、paired{mean, se, n\_items, n\_reps}、per\_item 指针，绝对分只作诊断（D56、D73）；两阶段确认用 confirm\_token；parents 校验 lineage；分配状态只落在 allocation/；参数在 charter/params.yaml。
+- **Ladder \[Derived C1\]**: sources are ordered by cost\_machine\_hours and latency: "pass the cheap one before you get the expensive one". T0 to T3 are only position labels for the sources in a given problem, not hard-coded tiers.
+- **Calibration \[Derived P3\]**: every non-top source keeps a correlation record against the higher-trust source one tier up. Below the threshold \[Default 0.3, 20 samples\] it is demoted automatically, and workers are told on submission that "this source is currently untrusted". This is the general form of the metric claim.
+- **D12 \[Derived P3\] Only the highest-trust tier can change the Planner's budget allocation**; proxy scores can only set the ordering within the queue. This is a hard anti-Goodhart rule, and the Planner cannot override it. The cost is slow budget adjustment when the topline is sparse. This conservatism is a deliberate choice.
+- **D40 \[Constraint C1; Hypothesis H5\] Quota and local proxies**: the top-level eval runs a few dozen times a day. For 50 workers, that is less than once per worker per day. So the main driver of the worker loop is T0 plus local proxies that the worker builds in its own sandbox. Local proxies are a first-class mechanism: results and configuration are written to local.json, the Eval service uses it to calibrate against the tier above, and proxies that correlate well are promoted to a formal tier. Quota: T1 ≤ 20 per worker per day \[Default\]; the Planner divides the top-level eval slots among approaches. The first-version queue is just quota plus FIFO; ordering waits until there is enough calibration data (D41, Deferred).
+- **D37 \[Hypothesis H8\] Prediction records**: every submission carries predicted scores for each tier (predictions) and a rationale. When each tier's result comes back, that tier's error is recorded. Uses: training a proxy scorer (Deferred); calibrating agent judgment, where the weighting applies only to the information share and not to exploitation, since otherwise it rewards conservative candidates; and getting agents to submit fewer low-confidence things.
+- **D28 \[Derived P9\] Results have a recipient**: result\_ready is bound to the submitter and to the submitter's checkpoint at submission time. The Indexer automatically generates a follow-up task at the front of the queue.
+  - **D57 \[Derived C1, P3\] Closing the eval\_request loop**: see the tool table in §7 for the signature and return value. On enqueue, a claim with type=result is generated automatically and its claim\_id is returned. Each later tier's result is a status event on this claim. result\_ready carries candidate, claim\_id, submitter, submitter\_checkpoint, baseline, paired{mean, se, n\_items, n\_reps} and a per\_item pointer; absolute scores are diagnostic only (D56, D73). Two-phase confirmation uses confirm\_token; parents validates lineage; allocation state lives only in allocation/; parameters are in charter/params.yaml.
 
-**反 hacking \[推论 P3、C3\]**
+**Anti-hacking \[Derived P3, C3\]**
 
-- D10：eval 定义、数据、holdout、audit 理由区放在 worker 没有凭证的私有存储（D63），不在黑板仓库里；靠仓库路径做读隔离在 git 上做不到。worker 只有 eval\_request 和 register\_exposure。
-- D11：Critic 是唯一能读 eval 代码的角色；audit 的理由区 worker 不可读。
-- holdout 由人维护，agent 从未见过，定期复核 top-k；与上层分数差异超阈值自动 refuted 并告警。
-- 分数跳升超 2 个历史标准差 \[默认\] 是告警不是庆祝，自动触发 Critic。
-- refuted 的候选及其子代全部标记。
-- 出网白名单（D75）：worker 沙箱只通模型 API、herd 工具服务、声明过的上下文源和包镜像，各臂相同。否则 worker 可以去拿公开 benchmark 的答案。
+- D10: eval definitions, data, the holdout and the audit rationale area live in a private store that workers have no credentials for (D63), not in the blackboard repo. Read isolation by repo path cannot be done on git. Workers have only eval\_request and register\_exposure.
+- D11: the Critic is the only role that can read eval code; workers cannot read the audit rationale area.
+- The holdout is maintained by humans and no agent has ever seen it. It periodically rechecks the top-k; a difference from the upper-tier score beyond the threshold means automatic refuted plus an alert.
+- A score jump of more than 2 historical standard deviations \[Default\] is an alert, not a celebration, and it automatically triggers the Critic.
+- Refuted candidates and all their descendants are flagged.
+- Egress allowlist (D75): the worker sandbox can reach only the model API, the herd tool service, declared context sources and package mirrors, the same in every arm. Otherwise workers could go and fetch the answers to public benchmarks.
 
-**D66 \[约束 C3；外部审稿 N1\] 两份 holdout。** 运行中的复核（Critic 查 top-k、跳升告警）和最终判定如果用同一份 holdout，共享臂触碰 holdout 的次数更多，判定就偏向它。所以分两份：`holdout_run` 给运行中的 Critic 用，有次数上限 \[默认每臂每运行 10 次\]，各臂相同；`holdout_verdict` 封存，整个运行期间任何角色不能请求，只在运行结束后评每臂的最终交付物一次，n = params.verdict\_n \[默认 5\]，固定不自适应。两份都在问题建立的第一天切好，是数据不是代码，所以第 1 周就有。
+**D66 \[Constraint C3; external review N1\] Two holdouts.** If in-run rechecks (the Critic checking the top-k, jump alerts) and the final verdict use the same holdout, the sharing arm touches the holdout more often, and the verdict is biased toward it. So there are two. `holdout_run` is for the Critic during the run. It has a usage cap \[Default 10 per arm per run\], the same for every arm. `holdout_verdict` is sealed: no role can request it at any point during the run. It evaluates each arm's final deliverable only once, after the run ends, with n = params.verdict\_n \[Default 5\], fixed and not adaptive. Both are cut on the first day the problem is set up. They are data, not code, so they exist from week 1.
 
-**D73 \[约束 C3；来自 v3 审稿\] 配对测量。** 每次 eval 提交的是候选和它所基于的那版基线，两者在同一批数据、同一时段上跑，结果是逐项差值：均值、标准误、项数、复测次数 n。配对去掉了题目难度和时段的影响，这通常是噪声里最大的两块。n 只计 Eval service 自己跑的复测，缓存命中不算。比例型指标（如命中率）分子分母分别加总后再算差，区间用 bootstrap。候选的哈希 = 基线标识 + 规范化后的载荷（修正 D69）：同一个 diff 打在不同基线上是不同的候选。测试台的慢档返回逐种子分，任意两个候选的配对差事后就能算，不额外花顶层 eval——前提是同种子下 eval 是确定性的（问题 A 的仿真器是；问题 B 里有模型调用，仍要同批、同时段跑）。确定性的便宜层没有标准误，按"增益 > 0"晋级。
+**D73 \[Constraint C3; from the v3 review\] Paired measurement.** Each eval submission consists of the candidate and the baseline version it is based on. Both run on the same batch of data in the same time window. The result is the per-item difference: mean, standard error, number of items, and number of remeasures n. Pairing removes the effects of item difficulty and time window, which are usually the two largest parts of the noise. n counts only remeasures that the Eval service runs itself; cache hits do not count. For ratio metrics (such as hit rate), sum the numerators and the denominators separately before taking the difference, and use bootstrap for the interval. Candidate hash = baseline identifier + normalized payload (amends D69): the same diff applied to different baselines is a different candidate. The testbed's slow tier returns per-seed scores, so the paired difference between any two candidates can be computed after the fact without spending extra top-level eval. This requires the eval to be deterministic for a given seed (problem A's simulator is; problem B contains model calls, so it still has to run in the same batch and the same time window). Deterministic cheap tiers have no standard error and promote on "gain > 0".
 
-**D74 \[推论 P1、D3、D64；来自 v3 审稿\] 合并流程：基线一步步往前走，每合入一个就重测一次。** D64 说交付物是组合，这条把组合怎么发生写具体。判断仍由 agent 做，记账由代码做（P4）。
+**D74 \[Derived P1, D3, D64; from the v3 review\] Merge flow: the baseline advances step by step, with one remeasure for every merge.** D64 says the deliverable is a composition; this entry makes concrete how the composition happens. Judgment is still done by agents, and bookkeeping by code (P4).
 
-- 基线有版本：baseline@0 是原始系统，每合入一个候选前进一版。只有 Integrator 这段纯代码能写基线分支，每版记在 baseline/\<k>.json：含哪些候选、配对结果、gate 结果。
-- verified 的候选按验证时间先进先出。按预测增益排会奖励吹牛。
-- 合入前先 rebase 到当前基线。有文本冲突 → 发一个 compose 任务（D3、D64）；执行者是 worker 池外新开的 agent，不带任何臂的上下文，产出只回 Integrator，各臂相同（B1 里不能交给 B1 的 worker，否则破坏孤立；S2 的 worker 另外可以领 D64 的"组合候选"任务，那属于共享）。合好的结果作为新候选重新排队。无冲突但基线已经动过 → 对当前基线做一次配对复测；基线没动就复用验证那次，不多花。复测走内部接口 remeasure(candidate, baseline)，不经过 needs\_confirmation，也不经过去重。
-- 接收规则 \[默认\]：配对增益超过 1 个标准误（单次配对测量的标准误：基线动过用复测那次的，没动用验证那次的）且过全部 gate 就合入；否则记 integration\_failed，给作者一个后续任务。相互作用：早先增益减复测增益超过 2σ√2 才记一条 interaction\_found（"不到早先的 70%"那种写法误报过半，因为早先那次是过了门槛的、本来就偏高）；Integrator 只发事件，Critic 复核后才写 tags=\[interaction\] 的 insight（D64）。这个阈值的依据只有模拟：eval 稀缺时它的净收益约是严格版的 2 倍、"复测三次看 95% 下界"的 2.9 倍（更接近现实的设定下是 1.2 到 1.6 倍），代价是十分之一到五分之一的合入是略有害的补丁（每次运行合计 −0.3 到 −1.4）。接收规则在预注册时选定，H1 期间不在运行中切换；要用严格版（先筛 0.5σ，再 3 次新复测，90% 下界 > 0），试点就用严格版。估噪声 σ 时用 A/A 复测的上界，不用点估计，否则这条规则会退化成"大于 0 就合"。
-- 每次合入发 baseline\_advanced 事件，带 files\_changed；和本 lease 的 files\_touched 有交集的收硬中断去 rebase，其他人收软中断（第 8 节规则 6）。files\_touched 由 Executor 的 sidecar 在每次心跳时对沙箱跑 git diff --name-only 写进 lease（D32）。B1 的 worker 收不到这个事件，一直在 baseline@0 上干，Integrator 在后台合并它们 verified 的候选；S1 和 S2 收得到（D58）。
-- 贵的 gate 每 3 次合入批量检一次，这期间的基线标 guard\_pending，可以在其上继续干；检出问题就二分找肇事者、写一版排除它的新基线（记录只追加，不改旧的）。交付物永远不是 guard\_pending 的。
-- 运行结束的收尾顺序各臂相同：停止接收；对所有 guard\_pending 的基线补检 gate（固定的预算外配额，检出问题按原流程二分）；最终抽查；冻结交付物 = 最后一版非 guard\_pending 的基线；所有运行都结束后一起评 holdout\_verdict。归因在 holdout\_verdict 评完之后做，只用日常数据，固定配额，不影响判定："逐个方向去掉"，写 report/attribution.md：每个方向贡献多少（带区间）、总增益和各项之和的差（即相互作用）、死胡同。这份报告本身是交付物。运行中没有预算做消融，抓错误合入靠 D72 的抽查，不靠消融。
-- 合并器各臂相同（第 30 轮）：Integrator 在 B0、B1、S1、S2 里都在运行中跑，接收规则、gate、guard 批次、抽查配置一样，复测花各臂自己的顶层名额。"共享"只指 worker 能不能收到 baseline\_advanced 并 rebase。每臂的交付物 = 该臂 Integrator 最后一版非 guard\_pending 的基线；单个最优候选的分另记为 B1-single 诊断列。不再有"结束后 git apply 贪心合并"这一步：那样 S2 多出来的分数里，分不清多少来自共享、多少来自合并器更好。Integrator 写的是被优化系统仓库的基线分支；黑板仓库的 main 仍只由 merge queue 写（D56），两者是两个仓库。
+- The baseline is versioned: baseline@0 is the original system, and each merged candidate advances it by one version. Only the Integrator, a piece of pure code, can write the baseline branch. Each version is recorded in baseline/\<k>.json: which candidates it contains, the paired results and the gate results.
+- Verified candidates go first-in, first-out by verification time. Ordering by predicted gain would reward boasting.
+- Before merging, rebase onto the current baseline. Textual conflict → issue a compose task (D3, D64). The executor is a fresh agent spawned outside the worker pool. It carries no arm's context, and its output goes back only to the Integrator. This is the same in every arm (in B1 the task cannot be handed to B1's workers, or isolation breaks; S2's workers can additionally take D64's "compose candidates" tasks, which counts as sharing). The combined result is requeued as a new candidate. No conflict, but the baseline has moved → do one paired remeasure against the current baseline; if the baseline has not moved, reuse the verification measurement and spend nothing extra. Remeasures go through the internal interface remeasure(candidate, baseline), which bypasses both needs\_confirmation and deduplication.
+- Acceptance rule \[Default\]: merge if the paired gain exceeds 1 standard error (the standard error of a single paired measurement: the remeasure's if the baseline moved, the verification measurement's if it did not) and the candidate passes every gate. Otherwise record integration\_failed and give the author a follow-up task. Interaction: record an interaction\_found only when the earlier gain minus the remeasured gain exceeds 2σ√2. (A rule written as "less than 70% of the earlier gain" raises false alarms more than half the time, because the earlier measurement had passed a threshold and is biased high to begin with.) The Integrator only emits the event; an insight with tags=\[interaction\] is written only after the Critic rechecks it (D64). The only basis for this threshold is simulation. When eval is scarce, its net gain is about 2× that of the strict version and 2.9× that of "remeasure three times and look at the 95% lower bound" (1.2× to 1.6× under more realistic settings). The cost is that one-tenth to one-fifth of merges are slightly harmful patches (a total of −0.3 to −1.4 per run). The acceptance rule is chosen at preregistration and is not switched mid-run during H1. If the strict version is to be used (first screen at 0.5σ, then 3 fresh remeasures, 90% lower bound > 0), the pilot uses the strict version too. When estimating the noise σ, use the upper bound from A/A remeasures, not the point estimate; otherwise this rule degenerates into "merge if greater than 0".
+- Every merge emits a baseline\_advanced event carrying files\_changed. Workers whose lease's files\_touched overlaps it receive a hard interrupt to rebase; everyone else receives a soft interrupt (§8 rule 6). files\_touched is written into the lease by the Executor's sidecar, which runs git diff --name-only on the sandbox at every heartbeat (D32). B1's workers do not receive this event and keep working on baseline@0, while the Integrator merges their verified candidates in the background; S1 and S2 do receive it (D58).
+- Expensive gates are checked in a batch once every 3 merges. Baselines in between are marked guard\_pending, and work can continue on top of them. If a problem is found, bisect to find the culprit and write a new baseline version that excludes it (records are append-only; old ones are not changed). The deliverable is never a guard\_pending baseline.
+- The closeout order at the end of a run is the same in every arm: stop accepting; run the outstanding gate checks on every guard\_pending baseline (a fixed off-budget quota; problems found are bisected by the normal flow); final spot check; freeze the deliverable = the last non-guard\_pending baseline; after all runs have ended, evaluate holdout\_verdict for all of them together. Attribution is done after holdout\_verdict has been evaluated, using only daily data and a fixed quota, and it does not affect the verdict. It is "remove one approach at a time", and it writes report/attribution.md: how much each approach contributed (with intervals), the difference between the total gain and the sum of the parts (that is, the interaction), and the dead ends. This report is itself a deliverable. There is no budget for ablation during the run; bad merges are caught by D72's spot checks, not by ablation.
+- The merger is the same in every arm (round 30). The Integrator runs during the run in B0, B1, S1 and S2, with the same acceptance rule, gates, guard batches and spot-check configuration; remeasures spend each arm's own top-level eval slots. "Sharing" refers only to whether workers can receive baseline\_advanced and rebase. Each arm's deliverable = the last non-guard\_pending baseline of that arm's Integrator; the score of the single best candidate is recorded separately as the B1-single diagnostic column. There is no longer a "greedy merge with git apply after the end" step: with that step, you could not tell how much of S2's extra score came from sharing and how much from a better merger. The Integrator writes the baseline branch of the repo of the system being optimized; the blackboard repo's main is still written only by the merge queue (D56). These are two different repos.
 
-**D75 \[约束；来自 v3 审稿\] 出网白名单。** worker 的沙箱只能访问模型 API、herd 工具服务、声明过的上下文源和包镜像，别的一律不通，各臂相同。上下文源的白名单写在 charter/egress.md，没写的不通。否则 worker 可以去拿公开 benchmark 的答案。
+**D75 \[Constraint; from the v3 review\] Egress allowlist.** The worker sandbox can reach only the model API, the herd tool service, declared context sources and package mirrors. Everything else is blocked, the same in every arm. The allowlist of context sources is in charter/egress.md; anything not listed there is blocked. Otherwise workers could go and fetch the answers to public benchmarks.
 
-**D78 \[推论 P10；第 30 轮推迟\] 用 token 换 eval——推迟到 H1 之后单独 A/B。** 原意是候选进慢档前由 2 个 Critic 各审一次，否决就不占名额。审稿指出三个问题：否决理由写成公开 claim 会把"为什么得分"泄露给 worker（D11 不公开理由正是因为它就是 hacking 说明书）；Critic 的 LLM 审计在门槛后，H1 阶段没人执行；只在 S2 开又是一个混淆。所以 H1 阶段不做，之后作为单独的 A/B 再试，那时由一个不读 eval 代码的预审员做，各臂相同。保留的两条：快档复测不限次数；compose 任务可以同时派给几个 agent，但多个版本只用快档挑，选出一版才进慢档。
+**D78 \[Derived P10; Deferred in round 30\] Trading tokens for eval: Deferred until after H1, as a separate A/B.** The original idea was that before a candidate enters the slow tier, 2 Critics each review it once, and a vetoed candidate takes no eval slot. The review pointed out three problems. Writing veto reasons as public claims would leak "why it scores" to workers (D11 keeps the rationale private precisely because it is a hacking manual). The Critic's LLM audit comes after the gate, so nobody performs it during H1. Turning it on only in S2 adds one more confound. So it is not done during H1. It will be tried later as a separate A/B, done at that point by a pre-screener who does not read eval code, the same in every arm. Two things are kept: fast-tier remeasures are unlimited; a compose task can be dispatched to several agents at once, but their versions are picked using only the fast tier, and only the one chosen version enters the slow tier.
 
-**三种形态 \[约束 C6\]**
+**Three forms \[Constraint C6\]**
 
-| 形态 | 顶层信号 | 下层信号 | 和基础设计的差别 |
+| Form | Top-level signal | Lower-tier signals | Difference from the base design |
 | --- | --- | --- | --- |
-| A 固定 eval | 给定的工具或数据集 | T0、T1、本地代理 | 无。eval 有噪声时 result 带 n 和区间 |
-| B 有 topline 但不固定 | 周级大评测或线上指标，稀疏 | herd 自己设计并标定的代理 | 改尺子是工作的一部分：metric claim；队列多一类"改进测量"任务；Planner 多一份 measurement 预算 \[默认 15%\]；Critic 多查代理提升有没有转移到 topline；charter/progress.md 必须写明 topline 和代理边界 |
-| C 没有 metric | 人的判断，经 PI agent，有预算 | Critic 加多个 worker 盲排名的共识 | 人是 T2；候选是文档不是代码；评审积累后训 judge 转为 B；价值保证最弱，不建议从这里起步 |
+| A Fixed eval | A given tool or dataset | T0, T1, local proxies | None. When the eval is noisy, result carries n and an interval |
+| B Has a topline, but not fixed | Weekly large evaluations or online metrics; sparse | Proxies that the herd designs and calibrates itself | Changing the ruler is part of the work: metric claims; the queue gains an "improve measurement" task type; the Planner gets an extra measurement budget \[Default 15%\]; the Critic additionally checks whether proxy gains transfer to the topline; charter/progress.md must state the topline and the proxy boundary |
+| C No metric | Human judgment, through the PI agent, with a budget | Consensus of the Critic plus blind rankings by several workers | The human is T2; candidates are documents, not code; once judgments accumulate, train a judge and move to B; the weakest guarantee of value; not recommended as a starting point |
 
-形态 A 的一个特例：被优化的就是 harness 本身。Eval = 用候选 harness 跑 held-out 任务集，每个候选至少 n 次；worker 自己跑在冻结版本上，候选只在 eval 沙箱里运行，否则 herd 在改自己脚下的地板。
+A special case of form A: the thing being optimized is the harness itself. Eval = running a held-out task set with the candidate harness, at least n times per candidate. The workers themselves run on a frozen version, and candidates run only in the eval sandbox; otherwise the herd would be changing the floor under its own feet.
 
-## 9.1 动态分配：探索的广度与深度
+## 9.1 Dynamic allocation: breadth and depth of exploration
 
-这一节回答两个问题：怎么保证探索足够广又足够深；一个 agent 发现好方向时，怎么动态把更多 agent 和机器给它。v1 把这件事藏在"Planner 分预算"一句话里，不够具体，下面是机械的定义。
+This section answers two questions. How do we make sure exploration is broad enough and also deep enough? When an agent finds a good approach, how do we dynamically give it more agents and machines? v1 hid this inside one sentence, "the Planner allocates budget", which was not concrete enough. The mechanical definitions follow.
 
-**D49 \[推论 C1、C4\] 分配的单位是 slot，不是机器。** 两种 slot：worker slot（一个 worker 进程加 sandbox）和 eval slot（外部 eval 的日配额）。每个方向有 `target_slots[a]` 和 `eval_share[a]`。"给方向加 agent"的机械含义是提高它的 target\_slots 和 eval 队列权重：worker 不被杀，完成当前任务后按新权重领任务（lease 上限按方向计算）；只有方向被 frozen 才硬中断。"给方向加机器"的含义是该方向的 worker 获得更多 sandbox 并发（本地代理跑更多）和更高的 eval 队列优先级。分配状态只有一个落点：allocation/\<local\_id>.json，生效顺序按合入 seq，由分配规则或 Planner 的覆盖写入，approaches 的 frontmatter 不存份额（D31）。H1 的对照阶段每方向 slot 数写死在 spec.md，D49 到 D51 全部关闭（D42 规则 1）。
+**D49 \[Derived C1, C4\] The unit of allocation is the slot, not the machine.** There are two kinds of slot: the worker slot (one worker process plus a sandbox) and the eval slot (the daily quota of an external eval). Each approach has `target_slots[a]` and `eval_share[a]`. "Adding agents to an approach" mechanically means raising its target\_slots and its eval queue weight. Workers are not killed: after finishing the current task, they take tasks according to the new weights (lease caps are computed per approach). There is a hard interrupt only when an approach is frozen. "Adding machines to an approach" means that approach's workers get more sandbox concurrency (more local proxy runs) and a higher eval queue priority. Allocation state has exactly one home: allocation/\<local\_id>.json. It takes effect in merge `seq` order and is written by the allocation rule or by a Planner override; approach frontmatter does not store shares (D31). In the H1 control phase, the number of slots per approach is hard-coded in spec.md, and D49 to D51 are all turned off (D42 rule 1).
 
-**D50 \[推论 P3、P7\] 快反应和永久化分开：surge 机制。** 顶层 eval 太慢，等它回来再加码会错过窗口；便宜信号又不可信，直接动预算是 Goodhart。所以：
+**D50 \[Derived P3, P7\] Separate fast reaction from making it permanent: the surge mechanism.** The top-level eval is too slow: waiting for it to come back before scaling up misses the window. Cheap signals are untrustworthy, and letting them move the budget directly is Goodhart. So:
 
-| 阶段 | 条件 | 动作 | 上限与期限 |
+| Phase | Condition | Action | Cap and time limit |
 | --- | --- | --- | --- |
-| 触发 | 一个方向在便宜层连续 k 个候选 \[默认 3\] 超过全局当前最优，且 Critic 未否决 | 该方向 target\_slots 翻倍，eval\_share 翻倍 | 单方向 ≤ 总 slot 的 40% \[默认\]；期限到下一次顶层结果回来，或 24 小时 \[默认\] |
-| 固化 | 顶层 eval verified 了 surge 期间的候选 | surge 的份额转为永久预算 | 仍受 40% 上限 |
-| 回收 | 顶层未确认，或期限到 | 份额回到 surge 前，释放的 slot 进 exploration 池 | 同一方向 48 小时内不能再 surge \[默认\] |
+| Trigger | k consecutive candidates \[Default 3\] from one approach beat the global current best on a cheap tier, and the Critic has not vetoed | That approach's target\_slots doubles, and its eval\_share doubles | A single approach ≤ 40% of total slots \[Default\]; lasts until the next top-level result comes back, or 24 hours \[Default\] |
+| Consolidate | The top-level eval verified a candidate from the surge period | The surge share becomes permanent budget | Still subject to the 40% cap |
+| Reclaim | The top level did not confirm, or the time limit expired | Shares return to their pre-surge levels; released slots go into the exploration pool | The same approach cannot surge again within 48 hours \[Default\] |
 
-这和 D12 一致：顶层信号决定永久预算，便宜信号只能借、不能占。
+This is consistent with D12: top-level signals decide the permanent budget; cheap signals can only borrow, not take.
 
-**深度来自 fork，不来自人数。** surge 进来的 worker 不从零开始，从发现者在发现时刻的 checkpoint fork（D5），每个带不同的 sub-goal：做变体、做消融、和另一个方向组合、测鲁棒性、补 evidence。十个从零开始的 agent 是广度，十个继承了发现上下文的 agent 才是深度。sub-goal 由发现者在 surge 触发时列出 \[默认 5 类模板，发现者可改\]，这是它写进 claim 的一部分。
+**Depth comes from fork, not from headcount.** Workers brought in by a surge do not start from zero. They fork from the discoverer's checkpoint at the moment of discovery (D5), each with a different sub-goal: build variants, run ablations, combine with another approach, test robustness, add evidence. Ten agents that start from zero are breadth; only ten agents that inherit the context of the discovery are depth. The discoverer lists the sub-goals when the surge triggers \[Default: 5 template categories, which the discoverer can edit\]; this is part of what it writes into the claim.
 
-**D51 \[推论 P7\] 广度靠硬底线，不靠判断。**
+**D51 \[Derived P7\] Breadth comes from hard floors, not from judgment.**
 
-- exploration 池的底线随时间退火：前 3 天 50%，之后 25% \[默认\]；永远不被 surge 占用。早期广，后期深。池里的 worker 领的任务是：新方向、长尾方向、给已有 dead\_end 找反例。
-- 任何方向 ≤ 40%；每个 active 方向 ≥ 1 个 slot 保活，防止一个方向在轮到它之前就饿死。
-- Worker 可以写 type=question、tag=new\_approach 的 claim 提出新方向，自动批准到 active 方向数上限 \[默认 8\]，超过的由 Planner 或人批。
-- dead\_end 冻结方向释放的 slot 回到 exploration 池，不回到当前最优方向。
+- The exploration pool's floor anneals over time: 50% for the first 3 days, 25% after that \[Default\]. A surge never takes it. Broad early, deep late. The tasks that workers in the pool take are: new approaches, long-tail approaches, and finding counterexamples to existing dead\_end claims.
+- Any approach ≤ 40%; every active approach keeps ≥ 1 slot to stay alive, so that no approach starves before its turn comes.
+- Workers can propose a new approach by writing a claim with type=question, tag=new\_approach. Such claims are approved automatically up to the cap on the number of active approaches \[Default 8\]; beyond that, the Planner or a human approves.
+- Slots released when a dead\_end freezes an approach go back to the exploration pool, not to the current best approach.
 
-**第一版的分配规则是确定性的，不是 LLM。** `target_slots[a] ∝ softmax(improvement_rate[a] / τ)`，improvement\_rate 是该方向最近一个窗口 \[默认 24 小时\] 内顶层信号的最优值提升速率。只用顶层，不用代理，否则和 D12 矛盾；第一版用方向自己的最优分，第二版改用"加入当前最优组合后的边际增量"（D64、H13）；顶层窗口之间分配不变，变化只能来自有上限有期限的 surge（D50）；再套 25% 池、40% 上限、1 slot 保活。τ \[默认 1.0\] 越大越平均。Planner（LLM）只能带理由覆盖这个规则，覆盖本身写进 decisions 可被申诉。理由：确定性规则可预测、可调、一周就能落地；LLM 做分配是推迟项，等有了对照数据再 A/B。
+**The first-version allocation rule is deterministic, not an LLM.** `target_slots[a] ∝ softmax(improvement_rate[a] / τ)`, where improvement\_rate is the rate at which the approach's best top-level signal value improved over the most recent window \[Default 24 hours\]. Only the top level is used, not proxies; otherwise it would contradict D12. The first version uses the approach's own best score; the second version switches to "the marginal increment after adding it to the current best composition" (D64, H13). Between top-level windows, the allocation does not change; changes can come only from capped, time-limited surges (D50). On top of that, apply the 25% pool, the 40% cap and the 1-slot keep-alive. The larger τ \[Default 1.0\], the more even the allocation. The Planner (an LLM) can override this rule only with a stated reason; the override itself is written into decisions and can be appealed. Reason: a deterministic rule is predictable and tunable, and it can land within a week. LLM allocation is a Deferred item, to be A/B tested once there is control data.
 
-**广度和深度各一个指标。** 广度 = active 方向数 × 候选 diff 的 embedding 多样性；深度 = 每方向 lineage 的最长链长和 corroborated insight 数。两个都进 dashboard，surge 和回收的每一次都记事件。
+**One metric each for breadth and depth.** Breadth = number of active approaches × embedding diversity of candidate diffs. Depth = the longest lineage chain per approach and the number of corroborated insights. Both go on the dashboard, and every surge and every reclaim is recorded as an event.
 
-**D64 \[推论 P1、P7；第 22 轮\] 优化的产出是组合，不是单条路径的最优点。** 附录 B 和 harness 走查里最大的一步都来自组合：a-02 的截断修复加 a-04 的验证循环。不同方向在不同的地方各有改进，最终交付物是它们里不冲突的那部分合在一起。所以候选从一开始就是可组合的对象：lineage 允许多父；"组合候选 c-a 与 c-b"是任务模板之一，由 worker 在 sandbox 里做（冲突需要判断，不是机械 merge）；组合候选和普通候选一样走 eval 阶梯和 gate；Critic 多一项检查：组合分和各部分分的关系（≈ 和 → 可加；< max → 冲突；之间 → 部分重叠），写成 type=insight、tags=\[interaction\] 的 claim，这是只有组合才能产生的知识。
+**D64 \[Derived P1, P7; round 22\] The output of optimization is a composition, not the optimum of a single path.** In both Appendix B and the harness walkthrough, the biggest step came from composition: a-02's truncation fix plus a-04's verification loop. Different approaches each bring improvements in different places, and the final deliverable is the non-conflicting parts of them put together. So candidates are composable objects from the start. Lineage allows multiple parents. "Compose candidates c-a and c-b" is one of the task templates, done by a worker in a sandbox (conflicts need judgment; it is not a mechanical merge). Composite candidates go through the eval ladder and gates like ordinary candidates. The Critic gets one more check: the relation between the composite score and the scores of its parts (≈ sum → additive; < max → conflict; in between → partial overlap), written as a claim with type=insight, tags=\[interaction\]. This is knowledge that only composition can produce.
 
-对分配的推论：在可组合的问题上，方向之间不是争一个奖的 bandit arm，是一个 portfolio，一个方向的价值是它对当前组合的边际贡献。所以 exploration 底线应该更高、kill 更少；D51 的 improvement\_rate 第二版改为"加入当前最优组合后的增量"（H13）。
+The implication for allocation: on composable problems, approaches are not bandit arms competing for one prize. They are a portfolio, and an approach's value is its marginal contribution to the current composition. So the exploration floor should be higher, and kills fewer. The second version of D51's improvement\_rate changes to "the increment after adding it to the current best composition" (H13).
 
-**D65 \[第 22 轮\] best-of-N 是对照臂的名字，不是交付物的形状。** 它从 swarm scaling 文献和第 2 轮讨论里来，含义只是"N 个 worker 各跑各的、互不共享"。v2 初稿让这个名字渗进了判定（"选一个最优候选"），和 D64 矛盾。改法：所有臂的候选都由同一个 Integrator 在运行中合并（D74、D58），B1 只是 worker 看不见基线前进，这样 H1 检验的是"运行中共享"相对于"同一合并器下不共享"的增量，而不是"有没有合并"或"合并器好不好"的增量；单个最优候选的 holdout 分作为 B1-single 诊断列保留。
+**D65 \[round 22\] best-of-N is the name of a control arm, not the shape of the deliverable.** The name comes from the swarm-scaling literature and the round-2 discussion. It means only "N workers, each running isolated, sharing nothing". The v2 first draft let this name leak into the verdict ("pick one best candidate"), which contradicts D64. The fix: all arms' candidates are merged during the run by the same Integrator (D74, D58), and B1 differs only in that its workers cannot see the baseline advance. That way H1 tests the increment of "sharing during the run" over "no sharing under the same merger", not the increment of "merging or not" or "a good merger or not". The holdout score of the single best candidate is kept as the B1-single diagnostic column.
 
-## 9.2 停止规则、人的注意力、硬约束门
+## 9.2 Stop rules, human attention, hard-constraint gates
 
-三件第一轮 PoC 就会撞上、但 v1 没写的事。它们和 9.1 是同一类问题：资源有限时，注意力和信任该放在哪。
+These are three things the first-round PoC will run into, but which v1 did not cover. They are the same kind of problem as §9.1: when resources are limited, where should attention and trust go?
 
-**D52 \[推论 C1、C5\] 停止规则。** 没有停止规则的系统会一直花钱。四种停止：
+**D52 \[Derived C1, C5\] Stop rules.** A system with no stop rule keeps spending money. There are four kinds of stop:
 
-| 触发 | 条件 | 动作 |
+| Trigger | Condition | Action |
 | --- | --- | --- |
-| 预算用完 | Budget meter 达到 constraints.md 的上限 | 自动停，汇报 |
-| 平台期 | 顶层最优分连续 N 个名额窗口 \[默认 3\] 无改进，且 exploration 池在同期没有产出新的 corroborated insight | 发 plateau 事件，escalation 给人，选项：继续、改 charter、停。超时默认动作：冻结全部方向 |
-| 全部冻结 | 所有方向 frozen 或 dead\_end | 自动停，汇报 |
-| 达标 | 顶层分达到 progress.md 的目标 | 汇报，人决定是否继续 |
+| Budget exhausted | The Budget meter reaches the cap in constraints.md | Stop automatically, report |
+| Plateau | The top-level best score has not improved for N consecutive quota windows \[Default 3\], and the exploration pool produced no new corroborated insight in the same period | Emit a plateau event and escalate to the human, with options: continue, change the charter, stop. Default action on timeout: freeze all approaches |
+| All frozen | All approaches are frozen or dead\_end | Stop automatically, report |
+| Target met | The top-level score reaches the target in progress.md | Report; the human decides whether to continue |
 
-"该换 charter 而不是继续"的两个信号，由 Librarian 标注、PI agent 呈现：多个方向的 dead\_end 都把原因归到同一条约束上（claim 带 `blamed_constraint`）；人注入的洞察连续两次没有产生 corroborated 的后果。这两个信号说明问题定义可能错了，不是执行错了。
+There are two signals that it is time to change the charter rather than continue. The Librarian tags them and the PI agent presents them: dead\_end claims from several approaches all attribute the cause to the same constraint (the claim carries `blamed_constraint`); insights injected by the human fail twice in a row to produce a corroborated consequence. These two signals suggest that the problem definition may be wrong, not the execution.
 
-**D53 \[约束 C5\] 人的注意力分配。** 人每天给 herd 的时间写在 charter（`attention_minutes_per_day` \[默认 30\]）。PI agent 维护一个优先队列，每次呈现带"预计占你几分钟"：
+**D53 \[Constraint C5\] Allocating human attention.** The time the human gives the herd each day is written in the charter (`attention_minutes_per_day` \[Default 30\]). The PI agent maintains a priority queue, and every item it presents carries "about how many minutes of your time this will take":
 
-1. 临近超时的 escalation
-2. Critic 推翻当前最优
-3. surge 的固化或回收需要人批的（只在方向份额超 30% 时）
-4. surprise 抽样：每天 N 条 \[默认 3\]，按 Librarian 标的跨方向性排序
-5. top-k 抽查防 hacking：每天 1 条
-6. 常规汇报
+1. Escalations close to timing out
+2. The Critic overturning the current best
+3. Surge consolidations or reclaims that need human approval (only when the approach's share exceeds 30%)
+4. surprise sampling: N per day \[Default 3\], sorted by the cross-approach rating the Librarian tags
+5. top-k spot check against hacking: 1 per day
+6. Routine reports
 
-超出预算的一律攒到周汇报。人看过什么、跳过什么记成事件，这是 taste.md 最可靠的来源：人实际把注意力花在哪，比人说自己关心什么更准。
+Anything over budget is held for the weekly report. What the human looked at and what they skipped are recorded as events. This is the most reliable source for taste.md: where the human actually spends attention is more accurate than what the human says they care about.
 
-**D54 \[推论 P3；约束 C3\] 硬约束做门，不做分数。** constraints.md 里能自动检查的约束（非回归测试、延迟上限、成本上限、权限模型不变、安全扫描）编译成 gate，在 eval\_request 前作为 T0 的一部分执行，result 写回后再执行一次。不通过直接 refuted，不进分数，Planner 不能权衡，只有人能改 gate 列表。区分两类东西：score 可以权衡，gate 不能。gate 失败的候选写一条 type=dead\_end、reason=gate:\<name> 的 claim，这样提交前检索也能提醒别人。harness 自优化那类问题里，"分数好但破坏了任务集之外的东西"是最常见的事故，这是它的防线。
+**D54 \[Derived P3; Constraint C3\] Hard constraints are gates, not scores.** Constraints in constraints.md that can be checked automatically (non-regression tests, latency cap, cost cap, unchanged permission model, security scans) are compiled into gates. They run before eval\_request as part of T0, and once more after the result is written back. A failure means immediate refuted. It does not enter the score, the Planner cannot trade it off, and only a human can change the gate list. Two kinds of thing are kept apart: a score can be traded off; a gate cannot. A candidate that fails a gate gets a claim with type=dead\_end, reason=gate:\<name>, so that the pre-submission search can warn others too. In harness self-optimization problems, "good score, but it broke something outside the task set" is the most common incident, and this is the line of defense against it.
 
-## 10. 对齐与运行期人机交互
+## 10. Alignment and run-time human–machine interaction
 
-**D20 \[推论 P6\] herd 不读人，只读 charter 和 PI agent。** 人和 PI agent 的讨论是全系统密度最高的信息（C5），所以 D21：讨论全文入库、可检索、可回头问；D22：首波 worker 直接从对齐后的上下文 fork \[假设 H10\]。
+**D20 \[Derived P6\] The herd does not read the human; it reads only the charter and the PI agent.** The discussion between the human and the PI agent is the densest information in the whole system (C5). Hence D21: the full discussion is stored, searchable, and open to ask-back; and D22: first-wave workers fork directly from the post-alignment context \[Hypothesis H10\].
 
-**charter 目录**
+**charter directory**
 
 ```
 charter/
-  status.md         draft | aligned | revising；不是 aligned 不启动
-  problem.md        问题本身，协商过的表述
-  why.md            你为什么关心，什么结果算有意思
-  constraints.md    预算（eval 名额、天数；不设 token 预算，P10）、不许碰的东西；Budget meter 对照它
-  progress.md       什么算进展，什么只是动静；形态 B 必须写明 topline 和代理边界
-  taste.md          偏好：优雅 vs 暴力、保守 vs 激进、直接跳过的方向类型；什么算 gaming
-  non_goals.md      明确不做的
-  escalation.md     哪些决定必须回到人；默认动作和超时
-  assumptions.md    PI agent 列出的理解和假设，人逐条确认或推翻
-  disagreements.md  没达成一致、但同意先这样做的点
-  sources.md        signal source 列表，逐个确认 trust 和 readable_by（必答题）
-  egress.md         出网白名单：模型 API、herd 工具、上下文源、包镜像（D75）
-  transcript.ptr    对齐对话全文的 checkpoint 指针
+  status.md         draft | aligned | revising; nothing starts unless it is aligned
+  problem.md        the problem itself, in its negotiated wording
+  why.md            why you care; what result counts as interesting
+  constraints.md    budget (eval slots, days; no token budget, P10), things not to touch; the Budget meter checks against it
+  progress.md       what counts as progress and what is just motion; form B must state the topline and the proxy boundary
+  taste.md          preferences: elegant vs brute force, conservative vs aggressive, approach types to skip outright; what counts as gaming
+  non_goals.md      what is explicitly out of scope
+  escalation.md     which decisions must go back to the human; default actions and timeouts
+  assumptions.md    the understanding and assumptions the PI agent lists, each confirmed or overturned by the human
+  disagreements.md  points with no agreement, where both sides agreed to proceed this way for now
+  sources.md        list of signal sources, with trust and readable_by confirmed for each one (mandatory)
+  egress.md         egress allowlist: model API, herd tools, context sources, package mirrors (D75)
+  transcript.ptr    checkpoint pointer to the full alignment conversation
 ```
 
-**对齐协议**
+**Alignment protocol**
 
-1. 人描述问题。PI agent 先写 teach-back：用自己的话复述，列出它默认了但人没说的假设。弱模型会说"明白了"，强模型会说"你没说但我默认了这三件事，对不对"，这是 PI agent 必须用最强模型的原因。
-2. 人改。PI agent 提 3 到 5 个初始方向，每个带理由和对一天、一周后状态的预测；方向之间用 embedding 距离做一次机械的多样性检查（P7）。
-3. 分歧显式写进 disagreements.md，不抹平。
-4. 人签字，status → aligned。PI agent 生成 spec.md 和 approaches/，从自己的 checkpoint fork 首波 worker（每方向 2 到 3 个 \[默认\]，goal 各异），其余 worker 从队列领常规任务。
-5. charter 任何文件改动 → status 自动变 revising → 受影响方向的 worker 收软注入（problem.md 或 constraints.md 变了则硬中断）。PI agent 重新对齐后改回 aligned。
+1. The human describes the problem. The PI agent first writes a teach-back: it restates the problem in its own words and lists the assumptions it made that the human did not state. A weak model says "got it"; a strong model says "you didn't say this, but I assumed these three things, is that right?" This is why the PI agent must use the strongest model.
+2. The human edits. The PI agent proposes 3 to 5 initial approaches, each with a rationale and a prediction of its state after one day and after one week. One mechanical diversity check is run across the approaches using embedding distance (P7).
+3. Disagreements are written explicitly into disagreements.md, not smoothed over.
+4. The human signs, status → aligned. The PI agent generates spec.md and approaches/, and forks the first-wave workers from its own checkpoint (2 to 3 per approach \[Default\], each with a different goal). The remaining workers take routine tasks from the queue.
+5. Any change to any charter file → status automatically becomes revising → workers on the affected approaches receive a soft injection (a hard interrupt if problem.md or constraints.md changed). After realigning, the PI agent sets it back to aligned.
 
-**escalation.md \[约束 C5\]**
+**escalation.md \[Constraint C5\]**
 
 ```yaml
 must_escalate:
@@ -611,558 +613,558 @@ must_escalate:
   - any_source_with: escalate_on_request
 default_when_unanswered:
   timeout_hours: 8
-  action: freeze_affected_approach   # 不是 kill，不是继续
+  action: freeze_affected_approach   # not kill, and not continue
 ```
 
-人不在线时 Planner 不能自己拍板，也不能无限等。默认动作是冻结受影响方向、名额暂时转给其他方向，人回来再决定。
+When the human is offline, the Planner can neither decide on its own nor wait indefinitely. The default action is to freeze the affected approach and temporarily move its eval slots to other approaches; the human decides on return.
 
-**运行期控制台：四种操作**
+**Run-time console: four operations**
 
-| 操作 | 人说的话 | PI agent 做的事 | 落到仓库 |
+| Operation | What the human says | What the PI agent does | What lands in the repo |
 | --- | --- | --- | --- |
-| 问 | "方向 3 卡在哪" | 读 digest，必要时 ask\_checkpoint 问相关 worker，用原文核实后回答 | 不写 |
-| 注入洞察 | "我觉得 X 和 Y 有关" | 写 author=human 的 claim，evidence 指向对话 checkpoint，标注方向 | claims + events；规则 5 硬中断 |
-| 改航向 | "别做方向 2 了" | 改 charter，status → revising，重新对齐后改回 | charter + events |
-| 回头问 | "worker 17 昨天看到了什么" | ask\_checkpoint(worker-17, ts, question) | 不写 |
+| Ask | "Where is approach 3 stuck?" | Reads the digest; if needed, uses ask\_checkpoint to ask the relevant workers; verifies against the original text, then answers | Nothing written |
+| Inject insight | "I think X and Y are related" | Writes a claim with author=human, evidence pointing to the conversation checkpoint, tagged with approaches | claims + events; rule 5 hard interrupt |
+| Change course | "Stop working on approach 2" | Edits the charter, status → revising, sets it back after realigning | charter + events |
+| Ask back | "What did worker 17 see yesterday?" | ask\_checkpoint(worker-17, ts, question) | Nothing written |
 
-升级请求的呈现格式固定：要决定什么、两到三个选项、Planner 的倾向和理由、不决定的默认动作和超时。汇报默认每个顶层 eval 批次后一次，三行：最优分变化、新 corroborated 的 insight、预算调整。PI agent 不替人做 escalation 里的决定，不替人改 charter。
+Escalation requests are presented in a fixed format: what needs to be decided, two or three options, the Planner's leaning and its reason, and the default action and timeout if no decision is made. By default there is one report after each top-level eval batch, three lines long: change in the best score, newly corroborated insights, budget adjustments. The PI agent does not make escalation decisions on the human's behalf, and does not change the charter on the human's behalf.
 
-**跨问题持久的是 PI agent，不是 herd。** 每个问题一份 charter、一个 herd，用完即散。PI agent 积累的是 taste.md 的历史和讨论记录，下一个问题的对齐从上一个的 taste 开始。
+**What persists across problems is the PI agent, not the herd.** Each problem gets one charter and one herd, which disperses when the work is done. What the PI agent accumulates is the history of taste.md and the discussion records; alignment for the next problem starts from the previous problem's taste.
 
-## 11. 实验设计
+## 11. Experiment design
 
-第 3 节的每个假设对应一个实验。系统只有在同样的 eval 预算下稳定赢过 baseline 才有资格谈规模，所以 baseline 先跑。
+Each hypothesis in §3 maps to one experiment. The system earns the right to talk about scale only if it consistently beats the baseline under the same eval budget, so the baselines run first.
 
-**臂**
+**Arms**
 
-| 名称 | 配置 | 检验的假设 |
+| Name | Configuration | Hypothesis tested |
 | --- | --- | --- |
-| B0 单强体 | 一个最强模型的 agent，全量检索，自己的笔记文件，长时间跑，同样 eval 名额 | 问题是不是根本不该拆（P1 的反面） |
-| B1 best-of-N | N 个 worker，各自孤立，不共享任何东西，同样 eval 名额 | 并行本身的价值 |
-| S1 只共享分数 | 完整系统，但 worker、Librarian、Planner 都只能看到候选和分数 | 中间臂：定位分数共享和 insight 共享的差别 |
-| S2 完整系统 | 本文设计，Planner 关闭 | H1 |
-| S2+P | S2 加 Planner | Planner 的增量 |
+| B0 single strong agent | One agent on the strongest model, full search, its own notes file, long run, the same eval quota | Whether the problem should not be split at all (the converse of P1) |
+| B1 best-of-N | N workers, each isolated, sharing nothing, the same eval quota | The value of parallelism itself |
+| S1 shares scores only | The full system, but workers, the Librarian and the Planner can see only candidates and scores | Intermediate arm: pins down the difference between sharing scores and sharing insights |
+| S2 full system | The design in this document, Planner off | H1 |
+| S2+P | S2 plus the Planner | The Planner's increment |
 
-预期 S2 > S1 > B1 > B0 在 eval 稀缺的问题上成立；B0 > B1 在"只有一个 click 且材料装得下一个上下文"的问题上成立。S1 和 S2 没有差距 → insight 共享没起作用，回去查 Librarian 和 diff 排序，不是加 worker。
+Expected: S2 > S1 > B1 > B0 holds on eval-scarce problems; B0 > B1 holds on problems where "there is only one click, and the material fits in one context". No gap between S1 and S2 → insight sharing is not working; go back and check the Librarian and the diff ranking, rather than adding workers.
 
-**D42 \[v1 审稿\] 对照的四条规则，少一条不可判**
+**D42 \[v1 review\] Four rules for the controls; if any one is missing, the result cannot be judged**
 
-1. 所有臂用同一个分配策略：对照阶段 Planner 关闭，全部 FIFO 加固定配额；Planner 单独做 S2 vs S2+P。否则通信价值和分配策略混在一起。
-2. 计量单位是 eval 机器小时，所有 source 全算。S2 多用的便宜 eval 不能白用。
-3. 先小后大，多次独立运行：5 到 10 个 worker，每臂至少 3 次独立运行（下限；实际次数按 D72 的试点和功效算）。本文其他地方写的 seed 都指一次独立运行：LLM API 不可复现，差异来自运行本身。单次运行的"稳定超过"不可测。
-4. 预注册分两步：先按 D72 的试点（3 个批次）测臂间和运行间的方差，再据此定效应量和运行次数（例如"S2 比 B1+M 在 holdout\_verdict 上高 1.5 分且配对 t 检验显著"），封存后开跑，不事后挑指标。阈值在测方差之前定是猜。具体协议见 D72。
+1. All arms use the same allocation policy: in the control phase the Planner is off, and everything is FIFO plus a fixed quota; the Planner is tested separately as S2 vs S2+P. Otherwise the value of communication gets mixed up with the allocation policy.
+2. The unit of measure is eval machine hours, counting every source. The extra cheap eval that S2 uses does not come free.
+3. Small before large, with multiple independent runs: 5 to 10 workers, at least 3 independent runs per arm (a lower bound; the actual number is computed from D72's pilot and statistical power). Wherever this document says "seed", it means one independent run: the LLM API is not reproducible, so the variation comes from the run itself. "Consistently beats" cannot be measured from a single run.
+4. Preregistration has two steps. First, use D72's pilot (3 batches) to measure the between-arm and between-run variance. Then set the effect size and the number of runs from that (for example, "S2 beats B1+M by 1.5 points on holdout\_verdict, and a paired t-test is significant"). Seal it, then start the runs; no picking metrics after the fact. A threshold set before the variance is measured is a guess. See D72 for the detailed protocol.
 
-**D62 判定分数不是 best-so-far。** 噪声 eval 下，"目前最优分"只要多跑几次就会涨：多个噪声样本的最大值随样本数上升，和臂的真实质量无关。判定协议改为：每臂在固定 eval 预算用完时，交付物是该臂 Integrator 最后一版非 guard\_pending 的基线（D74：合并器各臂相同、运行中都跑，不由 LLM 选）；交付物在 holdout\_verdict 上重评 n 次 \[默认 5\] 取均值，这就是臂的分数。交付物通常是组合不是单点（D64、D65）。best\_score 曲线只用于诊断。附带的好处是它同时考了臂的选择能力，这正是 eval 稀缺下要的能力。
+**D62 The verdict score is not best-so-far.** With a noisy eval, the "best score so far" goes up just from running more times: the maximum of many noisy samples rises with the number of samples, regardless of the arm's true quality. The verdict protocol becomes the following. When each arm has used up its fixed eval budget, the deliverable is the last non-guard\_pending baseline of that arm's Integrator (D74: the merger is the same in every arm and runs during the run in all of them; it is not chosen by an LLM). The deliverable is re-evaluated n times \[Default 5\] on holdout\_verdict, and the mean is the arm's score. The deliverable is usually a composition, not a single point (D64, D65). The best\_score curve is for diagnosis only. A side benefit is that this also tests the arm's selection ability, which is exactly the ability needed when eval is scarce.
 
-**D72 \[约束 C3；来自 v3 审稿\] 判定协议：三份数据，先试点再定运行次数，配对 t 检验。** 这条把 D42 第 4 条和 D66 写成可执行的步骤，替掉原来"高 1.5 分且 3 次全成立"那种在测噪声之前就定下的杠杠。
+**D72 \[Constraint C3; from the v3 review\] Verdict protocol: three data splits, pilot first and then set the number of runs, paired t-test.** This entry turns D42 rule 4 and D66 into executable steps. It replaces the old bar of "1.5 points higher, and true in all 3 runs", which was set before the noise had been measured.
 
-- **数据分三份**，第一天切好：日常用的；运行中抽查用的（holdout\_run）；最终判定用的（holdout\_verdict）。判定那份整个实验只碰一次：所有运行结束后一起评，评完之前谁也看不到数字。
-- **运行中的抽查规则各臂相同**：每 2 次合入抽查一次，总数不超过 D66 的上限 10，其中留 3 次给二分和最终抽查。抽的是一段：上次抽查过的 baseline@j 到当前的 baseline@k。对这一段同时做两次新的配对测量，一次在日常数据上，一次在抽查数据上，两者之差超过 2.5·√(σ\_日常² + σ\_抽查²) 才标记（σ 是各数据集 A/A 复测得到的单次配对噪声；两份数据一样大时就是 2.5σ√2），然后二分找到肇事的那次合入并回退，它的 claim 置为 quarantined，只有人能解除。不能拿合入时测得的增益去比：能过门槛的测量本来就偏高，这个偏差随合入次数线性累积，而原来的 2σ√k 阈值只按 √k 涨，模拟里没有任何过拟合时每次运行也有 58% 到 99% 会误报；两次新测量的版本误报约每次运行 4%。日常数据那次新测量走抽查的独立容量，不占每小时限速，也不计入 holdout\_run 的 10 次上限。
-- **试点**：正式运行前，B1+M 和 S2 各跑 3 个批次（同一批次各臂并行；B0 便宜，可以一起带上），交付物在抽查数据上各评 5 次，得到配对噪声 σ\_paired 和运行间噪声 σ\_run；每个源再做 A/A 复测。这 5 次计入该运行自己的 10 次抽查上限，所以试点运行里的运行中抽查最多 5 次。试点不进判定。试点要等 S2 的组件全部建完才能跑。
-- **预注册**：试点后、正式运行前写死：最小有意义效应（人定）、运行次数、配额和延迟、判定协议、接收规则（默认版还是严格版，运行中不再切）、排除规则、结论表。运行次数 = 让功效 ≥ 80% 的最小 n，σ\_run 取试点估计的 1.5 倍（3 个批次只有 2 个自由度，1.5 倍大约是 64% 上界，两臂合并估计约 78%，所以试点跑 3 个批次而不是 2）；若 S2 要同时赢两个对照组，按联合功效算，各自 90% 才有约 83% 联合。只跑 3 次是不够的：效应要到运行间噪声的 2.3 倍才有 80% 功效，效应是 1.5 倍时只有一半机会测出来；所以本文其他地方写的"3 次运行"都只是下限，实际次数按这里算。
-- **检验**：单侧配对 t 检验，α = 0.05，按批次配对：同一批次里各臂同时跑，各自独立的 run\_id 命名空间，同一个冻结的构建，这样模型供应商的漂移在差值里抵消。同时报效应量和 90% 区间。预算不够 n 次，就标为探索性运行：报区间，不过 gate。
-- **为什么换掉 3/3**：模拟显示它的假阳性随噪声漂移，效应恰好等于阈值时只有约 12% 通过；配对 t 检验在各噪声水平下都保持 5% 假阳性。模拟脚本在 herd-sim/，审稿见《Research Herd v3 审稿》（文件 Research-Herd-v3-Review.md）第 4 节。
+- **The data is split three ways**, cut on day one: one for routine use; one for in-run spot checks (holdout\_run); one for the final verdict (holdout\_verdict). The verdict split is touched only once in the whole experiment: all runs are evaluated on it together after they have all ended, and nobody sees any number until that evaluation is complete.
+- **The in-run spot-check rule is the same in every arm**: one spot check every 2 merges, with a total no greater than D66's cap of 10, of which 3 are reserved for bisection and the final spot check. What gets checked is a segment: from baseline@j, the one checked last time, to the current baseline@k. Two fresh paired measurements are made on this segment at the same time, one on daily data and one on spot-check data. Flag only when the difference between them exceeds 2.5·√(σ\_daily² + σ\_spot²) (σ is the single-paired-measurement noise of each dataset, obtained from A/A remeasures; when the two datasets are the same size, this is 2.5σ√2). Then bisect to find the offending merge and roll it back. Its claim is set to quarantined, and only a human can lift that. You cannot compare against the gain measured at merge time: a measurement that got past the threshold is biased high to begin with, and this bias accumulates linearly with the number of merges, while the old 2σ√k threshold grows only as √k. In simulation, even with no overfitting at all, 58% to 99% of runs raised a false alarm. The version with two fresh measurements has about 4% false alarms per run. The fresh measurement on daily data uses the spot check's own separate capacity; it does not count against the hourly rate limit, and it does not count toward holdout\_run's cap of 10.
+- **Pilot**: before the formal runs, B1+M and S2 each run 3 batches (within a batch, the arms run in parallel; B0 is cheap and can be brought along). Each deliverable is evaluated 5 times on spot-check data, which gives the paired noise σ\_paired and the between-run noise σ\_run. Each source also gets A/A remeasures. These 5 evaluations count toward that run's own cap of 10 spot checks, so a pilot run can do at most 5 in-run spot checks. The pilot does not enter the verdict. The pilot cannot run until all of S2's components have been built.
+- **Preregistration**: after the pilot and before the formal runs, fix the following in writing: the minimum meaningful effect (set by a human), the number of runs, quota and latency, the verdict protocol, the acceptance rule (default or strict version; no switching mid-run), the exclusion rules, and the conclusion table. Number of runs = the smallest n that gives statistical power ≥ 80%, with σ\_run taken as 1.5 times the pilot estimate. (3 batches give only 2 degrees of freedom. 1.5 times is roughly a 64% upper bound; with the estimate pooled across the two arms it is about 78%. That is why the pilot runs 3 batches rather than 2.) If S2 has to beat two control groups at once, compute joint power: 90% each gives only about 83% jointly. Running only 3 times is not enough: the effect has to be 2.3 times the between-run noise to reach 80% power, and when the effect is 1.5 times the noise, there is only a 50% chance of detecting it. So every "3 runs" elsewhere in this document is only a lower bound, and the actual number is computed here.
+- **Test**: one-sided paired t-test, α = 0.05, paired by batch. Within a batch, all arms run at the same time, each with its own independent run\_id namespace, on the same frozen build, so that model-provider drift cancels out in the differences. Also report the effect size and the 90% interval. If the budget does not cover n runs, label it an exploratory run: report the interval, and it does not pass the gate.
+- **Why replace 3/3**: simulation shows that its false-positive rate drifts with the noise, and when the effect exactly equals the threshold, only about 12% pass. The paired t-test keeps a 5% false-positive rate at every noise level. The simulation scripts are in `herd-sim/` (not in the repo); the review is in §4 of *Research Herd v3 Review* (not in the repo).
 
-**D58 臂的开关表。** 每个臂具体开什么、关什么，随预注册一起签字，否则"共享"的含义不唯一。
+**D58 Arm switch table.** Exactly what each arm turns on and what it turns off is signed along with the preregistration; otherwise "sharing" has more than one meaning.
 
-| 开关 | B0 | B1 | S1 | S2 |
+| Switch | B0 | B1 | S1 | S2 |
 | --- | --- | --- | --- | --- |
-| repo\_read 范围 | 全部 | spec.md、approaches/、自己的前缀 | 前述 + candidates/ 和 result 事件 | 全部 |
-| worker ctx 组成 | spec + 自己的笔记 | spec + 自己的 claims | spec + 自己的 claims + 全局候选分数表 | spec + digest + diff\_since |
-| search | 自己的笔记 | 关 | 只索引 candidates | 全开 |
-| diff\_since | 无 | 关 | 只含 result 事件 | 全开 |
-| 路由规则 1（自己的 result\_ready） | 开 | 开 | 开 | 开 |
-| 路由规则 2 到 5 | 无 | 关 | 关 | 开 |
-| eval\_request 前的相似候选检索（needs\_confirmation） | 无 | 关 | 开 | 开 |
-| Eval service 侧的 hash 去重 | 无 | 关：重复候选真跑真计费，否则 B1 白得共享 | 开 | 开 |
-| D26 提交前检索 dead\_end | 无 | 关 | 关 | 开 |
-| D19 连续失败强制刷新 | 无 | 关 | 关 | 开 |
-| Librarian | 无 | 关 | 关 | 开 |
-| Critic / holdout | holdout 自动复核 | 同 | 同 | 同 |
-| gate（D54） | 开 | 开 | 开 | 开 |
-| 分配 | 无 | 每方向 slot 写死在 spec.md | 同 | 同；D49 到 D51 关 |
-| Planner | 无 | 关 | 关 | 关（S2+P 单独跑） |
-| fork / ask\_checkpoint | 无 | 关 | 关 | 关（H2 单独实验） |
-| Integrator（D74） | 开，同配置 | 开，同配置；worker 不可见 | 开，同配置 | 开，同配置 |
-| baseline\_advanced 推给 worker、规则 6 | 单 agent，自己的基线自己看得见 | 关：worker 一直在 baseline@0 上干 | 开 | 开 |
-| compose 任务的执行者 | 池外新 agent | 同 | 同 | 同；另外 worker 可领组合候选任务（D64） |
-| 抽查（D72） | 同一规则 | 同 | 同 | 同 |
-| 出网白名单（D75）；不靠 checkpoint 的重启（D77） | 开 | 开 | 开 | 开 |
-| 预审（D78） | 推迟，H1 阶段各臂都不开 | 同 | 同 | 同 |
-| map/（D76） | 初始地图，随自己的基线重跑 | 只有 baseline@0 上的初始地图 | 随 baseline\_advanced 更新；不能加脚本 | 全开；worker 可加脚本 |
-| 最终交付物（D62、D65） | 该臂 Integrator 最后一版非 guard\_pending 的基线，在 holdout\_verdict 上重评 n 次取均值即臂的分数；单个最优候选的分另记为 B1-single 诊断列（D62、D65、D74） | 同 | 同 | 同 |
+| repo\_read scope | All | spec.md, approaches/, own prefix | The above + candidates/ and result events | All |
+| worker ctx contents | spec + own notes | spec + own claims | spec + own claims + global candidate score table | spec + digest + diff\_since |
+| search | Own notes | Off | Indexes candidates only | Fully on |
+| diff\_since | None | Off | result events only | Fully on |
+| Routing rule 1 (own result\_ready) | On | On | On | On |
+| Routing rules 2 to 5 | None | Off | Off | On |
+| Similar-candidate search before eval\_request (needs\_confirmation) | None | Off | On | On |
+| Hash dedup on the Eval service side | None | Off: duplicate candidates really run and are really billed; otherwise B1 gets sharing for free | On | On |
+| D26 search for dead\_end before submission | None | Off | Off | On |
+| D19 forced refresh after consecutive failures | None | Off | Off | On |
+| Librarian | None | Off | Off | On |
+| Critic / holdout | Automatic holdout recheck | Same | Same | Same |
+| gate (D54) | On | On | On | On |
+| Allocation | None | Slots per approach hard-coded in spec.md | Same | Same; D49 to D51 off |
+| Planner | None | Off | Off | Off (S2+P runs separately) |
+| fork / ask\_checkpoint | None | Off | Off | Off (separate H2 experiment) |
+| Integrator (D74) | On, same configuration | On, same configuration; not visible to workers | On, same configuration | On, same configuration |
+| baseline\_advanced pushed to workers, rule 6 | Single agent; sees its own baseline | Off: workers keep working on baseline@0 | On | On |
+| Executor of compose tasks | Fresh agent from outside the pool | Same | Same | Same; in addition, workers can take compose-candidates tasks (D64) |
+| Spot check (D72) | Same rule | Same | Same | Same |
+| Egress allowlist (D75); restart that does not rely on checkpoint (D77) | On | On | On | On |
+| Pre-review (D78) | Deferred; off in every arm during H1 | Same | Same | Same |
+| map/ (D76) | Initial map, rerun on its own baseline | Only the initial map on baseline@0 | Updated on baseline\_advanced; cannot add scripts | Fully on; workers can add scripts |
+| Final deliverable (D62, D65) | The last non-guard\_pending baseline of that arm's Integrator; the mean of n re-evaluations on holdout\_verdict is the arm's score; the score of the single best candidate is recorded separately as the B1-single diagnostic column (D62, D65, D74) | Same | Same | Same |
 
-**假设与实验的对应**
+**Mapping hypotheses to experiments**
 
-| 假设 | 实验 | 指标 | 预注册标准（示例，开跑前定） |
+| Hypothesis | Experiment | Metric | Preregistered criterion (example; set before the runs start) |
 | --- | --- | --- | --- |
-| H1 共享胜过孤立 | S2（Planner 关）vs B1 @ 5，运行次数按 D72 试点算，S1 作中间臂 | 最终交付物的 holdout 分（D62、D65） | S2 赢 B1+M：试点后预注册，人定最小有意义效应；单侧配对 t 检验，α = 0.05；运行次数按功效 ≥ 80% 从试点噪声算，噪声乘 1.5 留余量；同时报效应量和 90% 区间（D72） |
-| H2 fork 保真度 | handoff 实验：一个 worker 跑到 surprise claim，分三组各 5 个 agent 续跑一小时——摘要组、轨迹组、fork 组，用便宜 eval 评候选 | 三组候选分数分布；与原 worker 意图的一致性（盲评） | fork 组均值高于摘要组 2 倍以上 |
-| H3 轮询够用 | 记录每次硬中断的实际时延；做废功事后抽样 | 中断时延分布；做废功比例 | 到 5 分钟兜底的中断占比 ≤ 10%；中断后的做废功（事件合入到 agent 确认之间的 token 和工具调用）单独报。原来的"中位 < 5 分钟"被 5 分钟兜底保证了，测不出东西 |
-| H4 单仓库 | 持续运行一周 | merge queue 积压、CI 排队 | 积压中位 < 2 分钟 |
-| H5 代理可标定 | 相关性记录 | 本地代理和 T1 对顶层的相关性 | 至少一层 ≥ 0.5 |
-| H7 单 Planner | 方向数 5、10、20 | Planner 单次运行时长、decisions 质量（人评） | 时长 < 名额窗口的 1/4 |
-| H8 预测加权 | 预测误差与后续成功率 | 相关性 | ≥ 0.3，否则取消加权 |
-| H9 Scout | 第 5 周起，Scout 开关对照 | cross\_approach insight 的复用率 | ≥ 1 条被 ≥ 2 次引用/周 |
-| H10 首波 fork | 首波一半 fork、一半读 spec | 一天后候选多样性和便宜 eval 分数 | fork 组不差且多样性不低 |
-| H11 跨机 fork | 第 0 周 spike | 迁移时间、快照大小 | 迁移 < 2 分钟，快照 < 1 GB |
+| H1 sharing beats isolation | S2 (Planner off) vs B1 @ 5, number of runs computed from the D72 pilot, S1 as the intermediate arm | holdout score of the final deliverable (D62, D65) | S2 beats B1+M: preregistered after the pilot, with the minimum meaningful effect set by a human; one-sided paired t-test, α = 0.05; number of runs computed from the pilot noise for statistical power ≥ 80%, with the noise multiplied by 1.5 as a margin; also report the effect size and the 90% interval (D72) |
+| H2 fork fidelity | Handoff experiment: one worker runs until it reaches a surprise claim; then three groups of 5 agents each continue for one hour (a summary group, a trace group and a fork group); candidates are scored with a cheap eval | Distribution of candidate scores in the three groups; consistency with the original worker's intent (blind rating) | Fork-group mean higher than the summary group's by 2× or more |
+| H3 polling is enough | Record the actual latency of every hard interrupt; sample wasted work after the fact | Interrupt latency distribution; fraction of wasted work | Share of interrupts that reach the 5-minute fallback ≤ 10%; wasted work after an interrupt (tokens and tool calls between the event's merge and the agent's acknowledgment) is reported separately. The old "median < 5 minutes" was guaranteed by the 5-minute fallback, so it measured nothing |
+| H4 single repo | Run continuously for one week | merge queue backlog, CI queueing | Median backlog < 2 minutes |
+| H5 proxies can be calibrated | Correlation records | Correlation of local proxies and T1 with the top level | At least one tier ≥ 0.5 |
+| H7 single Planner | 5, 10, 20 approaches | Planner run time per invocation, quality of decisions (human-rated) | Run time < 1/4 of the quota window |
+| H8 prediction weighting | Prediction error vs subsequent success rate | Correlation | ≥ 0.3, otherwise drop the weighting |
+| H9 Scout | From week 5, Scout on vs off | Reuse rate of cross\_approach insights | ≥ 1 insight cited ≥ 2 times per week |
+| H10 first-wave fork | Half of the first wave forks, half reads the spec | Candidate diversity and cheap-eval scores after one day | Fork group is no worse, and its diversity is no lower |
+| H11 cross-machine fork | Week-0 spike | Migration time, snapshot size | Migration < 2 minutes, snapshot < 1 GB |
 
-**四个常设指标**
+**Four standing metrics**
 
-| 指标 | 定义 | 采集 |
+| Metric | Definition | Collected by |
 | --- | --- | --- |
-| 固定预算下所选候选的 holdout 分 | 判定用。每臂预算用完时自己选一个候选，holdout 重评 n 次取均值；best\_score 对累计 eval 机器小时的曲线只做诊断 | Eval service |
-| dead\_end 重走次数 | 候选与 confirmed 的 dead\_end 相似度超阈值、仍被提交到 T1 以上的次数 | Indexer 自动，不依赖被测系统内的标注 |
-| insight 复用次数 | type=insight 被 depends\_on 或被顶层 verified 候选引用的次数分布 | Indexer 的 reuse\_count |
-| 预测误差 | 按 agent、按方向的 predicted 与 actual 的差 | Eval service |
+| holdout score of the selected candidate under a fixed budget | Used for the verdict. When its budget runs out, each arm selects one candidate itself, which is re-evaluated n times on the holdout and averaged; the curve of best\_score against cumulative eval machine hours is for diagnosis only | Eval service |
+| dead\_end re-walk count | Number of times a candidate whose similarity to a confirmed dead\_end exceeds the threshold is still submitted to T1 or above | Indexer, automatically; does not depend on labels inside the system under test |
+| insight reuse count | Distribution of the number of times a type=insight claim is referenced through depends\_on or by top-level verified candidates | The Indexer's reuse\_count |
+| Prediction error | Difference between predicted and actual, by agent and by approach | Eval service |
 
-辅助：候选 diff 的 embedding 多样性（趋同告警）、各层相关性、Critic 的 refuted 率、做废功比例（事后抽样标注，只用于诊断不用于判定）。所有臂记录完整轨迹，事后能回放。
+Auxiliary: embedding diversity of candidate diffs (convergence alert), correlations between tiers, the Critic's refuted rate, and the fraction of wasted work (labeled through post-hoc sampling; used only for diagnosis, not for the verdict). All arms record full traces, so they can be replayed afterward.
 
-## 12. 资源与规模
+## 12. Resources and scale
 
-**机器分配 \[约束 C7\]，100 台**
+**Machine allocation \[Constraint C7\], 100 machines**
 
-| 用途 | 台数 | 说明 |
+| Use | Machines | Notes |
 | --- | --- | --- |
-| Worker + sandbox | 80 | 每台 3 到 4 个 worker 和沙箱；本地代理 eval 跑在这里。eval 是外部系统时这是集群的主要用途 |
-| 本地便宜 eval 层 | 12 | 只在问题有可本地跑的子集或小实例时启用；否则并入 worker 池 |
-| 仓库、Indexer、Eval service（只是外部队列的客户端）、Budget meter、对象存储网关 | 4 | git 和对象存储各一个热备副本，仓库每小时 bundle 到对象存储 |
-| 备用 | 4 | 副本切换和 surge 时的临时 sandbox |
+| Worker + sandbox | 80 | 3 to 4 workers and sandboxes per machine; local proxy evals run here. When the eval is an external system, this is the cluster's main use |
+| Local cheap eval tier | 12 | Enabled only when the problem has a subset or small instance that can run locally; otherwise merged into the worker pool |
+| Repository, Indexer, Eval service (only a client of the external queue), Budget meter, object storage gateway | 4 | One hot standby replica each for git and object storage; the repository is bundled to object storage every hour |
+| Spare | 4 | Replica failover, and temporary sandboxes during surge |
 
-这个表是示意，具体数字由 sources.md 的声明算出来。eval 自己跑在集群上的问题（形态 A 的 harness 自优化之类）把 worker 池按 eval 的占用让出去。
+This table is illustrative. The actual numbers are computed from the declarations in sources.md. For problems whose eval itself runs on the cluster (such as form A's harness self-optimization), the worker pool gives up machines in line with the eval's usage.
 
-**模型 \[P10\]**：所有角色用同一个最强模型，不分级。首波 worker 从 PI fork，本来就是同一个模型（D22）。v2.2 以前这里有一张分级表（D47），第 29 轮撤销。
+**Models \[P10\]**: All roles use the same strongest model, with no tiering. First-wave workers are forked from the PI, so they are the same model anyway (D22). Before v2.2 there was a tiering table here (D47). It was withdrawn in round 29.
 
-**量级估算**
+**Order-of-magnitude estimates**
 
-每个 worker 持续运行约 2M 到 5M token/小时，50 个 worker 的瞬时速率可能到每秒几万 token。token 不设预算（P10），唯一要在启动前核对的是 API 的并发和速率上限：它决定能同时开多少个 agent，harness 里要有退避（C7）。
+Each worker runs continuously at about 2M to 5M tokens/hour. The instantaneous rate of 50 workers may reach tens of thousands of tokens per second. Tokens have no budget (P10). The only thing to check before launch is the API's concurrency and rate limits: they decide how many agents can run at the same time, and the harness must have backoff (C7).
 
-**规模上限 \[假设 H4、H7\]**
+**Scale limits \[Hypothesis H4, H7\]**
 
-| 规模 | 瓶颈 | 处理 |
+| Scale | Bottleneck | Handling |
 | --- | --- | --- |
-| 50 | 无 | 本文设计 |
-| 200 到 500 | CI 时长；Router 检查的 O(事件 × lease) | CI 分级已做；Router 检查按 approach 分片 |
-| 1,000+ | 单仓库 clone 和 merge 吞吐；Librarian 数量 | 按方向分仓；source of truth 换数据库，git 退化为审计日志 |
+| 50 | None | This document's design |
+| 200 to 500 | CI duration; the Router check's O(events × leases) | CI tiering is already done; shard the Router check by approach |
+| 1,000+ | Single-repository clone and merge throughput; number of Librarians | Split repositories by approach; move the source of truth to a database, and git degrades to an audit log |
 
-**单任务时长 \[默认 20 分钟到 2 小时\]**：短于 10 分钟的任务硬中断没有意义，只在任务边界读即可；长于 4 小时的要强制 checkpoint 分段。这个默认值也是 H3 成立的前提。
+**Single-task duration \[Default 20 minutes to 2 hours\]**: For tasks shorter than 10 minutes, hard interrupts are pointless; reading at task boundaries is enough. Tasks longer than 4 hours must be split into segments with forced checkpoints. This default is also a precondition for H3 to hold.
 
-## 13. 失败模式
+## 13. Failure modes
 
-每条都有一个能被观测到的信号，否则对策没法触发；最后一列说压力落在哪个决定上，PoC 里出现这个信号就去登记表查那个决定的 fallback。
+Each one has an observable signal; otherwise the countermeasure cannot be triggered. The last column says which decision the pressure lands on. If the signal appears in the PoC, look up that decision's fallback in the register.
 
-| 失败模式 | 信号 | 对策 | 压力落在 |
+| Failure mode | Signal | Countermeasure | Pressure lands on |
 | --- | --- | --- | --- |
-| Reward hacking 通过共享传播 | 分数跳升；顶层与 holdout 差异；Critic refuted 率上升 | D10 隔离；holdout；跳升触发 Critic；refuted 子代连带；audit 理由不公开 | D10、D11；残余：Critic 被骗，人抽查 |
-| 所有 worker 趋同 | 候选 diff 的 embedding 多样性下降 | exploration 份额上调；新方向强制 fork 自不同 checkpoint；lease 限同方向并发 | D24；残余：真的只有一条路 |
-| 黑板变噪声 | diff 截断率高；search 复用率低；dead\_end 重走上升 | low\_signal 标签；digest 结构和上限；evidence 必填 | D6、D14 |
-| 垃圾 claim | question 占比高；reuse\_count 长期 0 | 允许"本次无发现"的 dead\_end；reuse\_count 进队列权重 | D4 结束前必写 |
-| Eval 结果无人消化 | result\_ready 后 24 小时无后续候选 | D28 | D28；残余：checkpoint 过旧 |
-| 假 refuted 级联 | reinstated 次数；级联后被撤销的任务 | 单来源不级联；二次确认；reinstated | D34 |
-| Planner 单点 | 运行失败或超时；decisions 停更 | 上一份 decisions 续用；worker 自领任务 | H7 |
-| Librarian 偏见 | digest 覆盖率低 | worker 可绕过；Critic 抽查一致性 | D14 |
-| 硬中断打断正在 click 的 worker | 中断后重进状态做废功 | 只在 tool call 边界；中断前 checkpoint；附"可 fork 继续" | D17 |
-| 人成为瓶颈 | escalation 积压；默认动作触发次数 | 默认动作和超时；批量呈现 | C5；残余：默认动作选错 |
-| Rebase 风暴 | merge queue 积压 | append-only；CI 分级；批量 rebase | D31、H4 |
-| git 或对象存储单点 | 服务不可达 | 热备副本；每小时 bundle | D30 |
-| evidence 指针悬空 | CI 解析失败 | 只归档不删；合入时解析 | D33 |
-| 长 sandbox 期间 lease 误判 | 同一任务两个 lease | 后台心跳；回收前查进程 | D32 |
-| API 限流 | 429 比例 | 退避；按角色配额 | C7 |
-| 预算无人执行 | 累计超 constraints | Budget meter | v1 审稿 |
-| claim 正文做 prompt injection | Librarian 或 Planner 读到异常指令 | 进 digest 前只保留结构化字段；Planner 只读结构化部分 | D13、D15 |
-| 预测加权奖励保守候选 | 高准确度 agent 的候选方差异常低 | 加权只作用于 information 份额 | D37、H8 |
-| 便宜 eval 层与顶层不相关 | 标定相关性低 | 自动降级；退到 T0 加顶层 | H5 |
-| Fork 继承错误上下文 | 同一 checkpoint 的 worker 集体走偏 | 首波 fork 数量限制；goal 必须不同；多样性检查 | D22、H10 |
-| 形态 B 的代理被 game | 代理涨、topline 不涨 | D12 只有 topline 动预算；Critic 查转移；proxy\_only 标记 | D12 |
-| 组合冲突或负交互 | 组合候选的分低于各部分的最大值 | 组合候选也过 gate 和 eval；Critic 写 interaction claim；冲突的两方向不再自动组合 | D64 |
-| 臂之间泄漏 | B1 的 worker 轨迹里出现其他 worker 的候选 id | 每运行、每 B1 worker 独立仓库和命名空间；worker 无 push 凭证 | D67、D68 |
+| Reward hacking spreads through sharing | Score jumps; gap between top level and holdout; Critic refuted rate rises | D10 isolation; holdout; jumps trigger the Critic; refuted cascades to descendants; audit reasons are not public | D10, D11; residual: the Critic is fooled, human spot check |
+| All workers converge | Embedding diversity of candidate diffs drops | Raise the exploration share; new approaches are forced to fork from different checkpoints; leases limit same-approach concurrency | D24; residual: there really is only one path |
+| The blackboard turns into noise | High diff truncation rate; low search reuse rate; dead\_end re-walks rise | low\_signal tag; digest structure and caps; evidence is mandatory | D6, D14 |
+| Junk claims | High share of question claims; reuse\_count stays at 0 for a long time | Allow a dead\_end that says "no findings this time"; reuse\_count feeds into queue weight | D4 must-write before ending |
+| Nobody digests eval results | No follow-up candidate within 24 hours after result\_ready | D28 | D28; residual: checkpoint is too stale |
+| False refuted cascade | Number of reinstated events; tasks revoked after a cascade | No cascade from a single source; second confirmation; reinstated | D34 |
+| Planner as a single point of failure | Run fails or times out; decisions stop updating | Keep using the previous decisions; workers claim tasks on their own | H7 |
+| Librarian bias | Low digest coverage | Workers can bypass it; the Critic spot-checks consistency | D14 |
+| A hard interrupt breaks a worker in the middle of the click | Wasted work re-entering state after the interrupt | Only at tool call boundaries; checkpoint before the interrupt; attach "can fork to continue" | D17 |
+| The human becomes the bottleneck | Escalation backlog; number of times default actions fire | Default actions and timeouts; batch presentation | C5; residual: the wrong default action was chosen |
+| Rebase storm | Merge queue backlog | append-only; CI tiering; batch rebase | D31, H4 |
+| git or object storage as a single point of failure | Service unreachable | Hot standby replica; hourly bundle | D30 |
+| Dangling evidence pointers | CI fails to resolve them | Archive only, never delete; resolve at merge time | D33 |
+| Lease misjudged during a long sandbox run | Two leases for the same task | Background heartbeat; check the process before reclaiming | D32 |
+| API rate limiting | 429 ratio | Backoff; per-role quotas | C7 |
+| Nobody enforces the budget | Cumulative usage exceeds constraints | Budget meter | v1 review |
+| Prompt injection in claim bodies | Librarian or Planner reads unusual instructions | Keep only structured fields before anything enters the digest; the Planner reads only the structured part | D13, D15 |
+| Prediction weighting rewards conservative candidates | Abnormally low variance in candidates from high-accuracy agents | Weighting applies only to the information share | D37, H8 |
+| Cheap eval tier is uncorrelated with the top level | Low calibrated correlation | Automatic downgrade; fall back to T0 plus the top level | H5 |
+| Fork inherits the wrong context | Workers from the same checkpoint go astray together | Limit on the number of first-wave forks; goals must differ; diversity check | D22, H10 |
+| Form B's proxy gets gamed | The proxy rises, the topline does not | D12: only the topline moves the budget; the Critic checks transfer; proxy\_only flag | D12 |
+| Composition conflicts or negative interactions | A composite candidate scores below the maximum of its parts | Composite candidates also go through gate and eval; the Critic writes an interaction claim; two conflicting approaches are no longer combined automatically | D64 |
+| Leakage between arms | Other workers' candidate ids appear in a B1 worker's trace | Separate repository and namespace per run and per B1 worker; workers have no push credentials | D67, D68 |
 
-## 14. 最小落地版与建造顺序
+## 14. Minimum viable version and build order
 
-前置：测试台（另一份文档《Herd 测试台》）先建 3 天，和 herd 的第 0 周 spike 并行；herd 第 1 周用的 eval 就是测试台的慢档服务。第一轮 PoC 的目的只有一个：把 H1 变成已验证或已推翻。为此分两栏：门槛前是验证 H1 必需的，门槛后第 4 周起接入；都不影响 H1 的推迟。砍掉的在登记表里标"推迟"，不是删除。
+Prerequisite: the testbed (the separate document *Herd Testbed* (`herd-testbed.md`)) is built first, over 3 days, in parallel with the herd's week-0 spike. The eval that the herd uses in week 1 is the testbed's slow tier service. The first PoC round has only one purpose: to turn H1 into verified or refuted. For this there are two columns. Before the gate is what is required to validate H1; after the gate is integrated from week 4 on. Neither affects the H1 deferrals. What is cut is marked "Deferred" in the register, not deleted.
 
-**最小落地版包含**
+**The minimum viable version includes**
 
-**门槛前（验证 H1 必需，第 1 到 3 周）**
+**Before the gate (required to validate H1, weeks 1 to 3)**
 
-- 六个端口的接口、内存适配器、本地 Executor、MCP 工具服务（D59、D60）；charter 里门槛前就要用的四个文件由人手写：params.yaml、constraints.md、progress.md、status.md（对齐流程本身在门槛后）；仓库约定、状态机、append-only、CI 同步检查、事件 schema（D30、D31、D9、D34、D56）
-- 任务队列和 lease 在 KV（D55、D32）
-- 一个 worker 的完整循环和全部 hook，含立即 push 和结束前必写（D1、D35、D36、D4）
-- Indexer：SQLite、embedding、diff\_since、search、result\_ready 后续任务（D13、D18、D28）
-- tool call 边界的 Router 检查（D29）
-- Eval service：source 声明、阶梯推导、去重、预测记录、配额加 FIFO、gate（D39、D37、D40、D54）
-- 一个 Librarian（D14）
-- holdout 自动复核；Critic 的 LLM 审计放门槛后
-- Budget meter 和简化的停止规则：预算用完、达标（D43、D52 的两条）
-- spec.md 和首批 approaches 由人手写；每方向 slot 写死
-- 臂开关表和预注册（D42、D58）
-- Integrator：先进先出、rebase、compose 任务、配对复测、接收规则、guard 批次、收尾顺序（D74）；四个臂同配置，测试台的两个对照臂也用它
-- 配对测量：result\_ready 带 baseline 和 paired，候选哈希含基线标识（D73、D69）
-- 抽查和试点：两次新测量的抽查规则、试点 3 个批次、A/A 复测（D72）
-- 出网白名单（D75）；不靠 checkpoint 的重启路径（D77，gate 前就能用）
-- 机会地图：人手写第一批测量脚本，Integrator 在 baseline\_advanced 后重跑（D76）
+- Interfaces for the six ports, in-memory adapters, local Executor, MCP tool service (D59, D60); the four charter files needed before the gate are written by hand by a human: params.yaml, constraints.md, progress.md, status.md (the alignment process itself comes after the gate); repository conventions, state machine, append-only, synchronous CI checks, event schema (D30, D31, D9, D34, D56)
+- Task queue and leases in KV (D55, D32)
+- One worker's full loop and all hooks, including immediate push and the must-write before ending (D1, D35, D36, D4)
+- Indexer: SQLite, embedding, diff\_since, search, follow-up tasks after result\_ready (D13, D18, D28)
+- Router checks at tool call boundaries (D29)
+- Eval service: source declarations, ladder derivation, dedup, prediction recording, quota plus FIFO, gate (D39, D37, D40, D54)
+- One Librarian (D14)
+- Automatic holdout re-check; the Critic's LLM audit goes after the gate
+- Budget meter and simplified stop rules: budget exhausted, target met (D43; two of D52's rules)
+- spec.md and the first approaches are written by hand by a human; slots per approach are hardcoded
+- Arm switch table and preregistration (D42, D58)
+- Integrator: first-in-first-out, rebase, compose tasks, paired remeasure, acceptance rule, guard batches, closeout order (D74); the same configuration in all four arms, and the testbed's two control arms use it too
+- Paired measurement: result\_ready carries baseline and paired; the candidate hash includes the baseline identifier (D73, D69)
+- Spot checks and pilot: the spot-check rule with two new measurements, a 3-batch pilot, A/A remeasure (D72)
+- Egress allowlist (D75); the restart path that does not rely on checkpoints (D77, usable before the gate)
+- Opportunity map: a human writes the first batch of measurement scripts by hand, and the Integrator reruns them after baseline\_advanced (D76)
 
-**门槛后（第 4 周起接入）**
+**After the gate (integrated from week 4)**
 
-- checkpoint、fork、ask\_checkpoint，第 0 周 spike 的产出（D5）
-- PI agent、charter 目录、escalation、人的注意力队列（D20 到 D23、D53）
-- Critic 的 LLM 审计（D11）
-- Planner 只写带理由的覆盖（D15）
-- 确定性分配规则、surge、广度底线（D49 到 D51）
-- 平台期和全部冻结的停止规则（D52 其余两条）
+- checkpoint, fork, ask\_checkpoint: the output of the week-0 spike (D5)
+- PI agent, charter directory, escalation, the human attention queue (D20 to D23, D53)
+- The Critic's LLM audit (D11)
+- The Planner only writes overrides with reasons (D15)
+- Deterministic allocation rule, surge, breadth floor (D49 to D51)
+- The plateau and all-frozen stop rules (the other two rules of D52)
 
-**推迟到 H1 验证之后，每项单独 A/B**
+**Deferred until after H1 is validated, each with its own A/B**
 
-- Scout（D16、H9）
-- 每方向一个 Librarian
-- NATS 推送（H3 失败时才做）
-- 代理打分器和新颖度排序（D41）
+- Scout (D16, H9)
+- One Librarian per approach
+- NATS push (only if H3 fails)
+- Proxy scorer and novelty ranking (D41)
 - ASHA early stopping
-- 扩到 50 以上
+- Scaling beyond 50
 
-&#91;embedded content: 建造顺序 · 第 0 周 spike 并行，四周主线，每周一个门槛\]
+&#91;embedded content: Build order · week-0 spike in parallel, four-week main line, one gate per week\]
 
-读法：菱形是门槛。第 3 周的门槛是 H1 的第一次真正检验，过不了就回去改通信层，不加 worker。
+How to read it: diamonds are gates. The week-3 gate is the first real test of H1. If it does not pass, go back and fix the communication layer; do not add workers.
 
-0. 第 0 周（与第 1、2 周并行，两周）：spike H11。checkpoint 带 sandbox 状态，能在另一台机器恢复并继续。产出是一个最小迁移实现加迁移时间和快照大小的数字。不先做掉它，D5 和 D22 都是愿望。
-1. 第 1 周：六个端口的接口代码、内存适配器、本地子进程 Executor、MCP 工具服务；仓库目录和 schema；状态机和事件权限；CI 同步检查；Indexer 的 SQLite；一个 worker 的完整循环；Eval service 的 T0 和顶层层，带去重、预测记录、result\_ready；两份 holdout 切好封存（D66）；Budget meter。跑 L0 全绿，再跑 B0。
-2. 第 2 周：lease 在 KV；merge queue 和分级 CI；便宜 eval 层和相关性标定；本地代理记录；embedding 和 search；配额加 FIFO；每运行独立的 run\_id 命名空间和 B1 的每 worker 独立仓库（D67）；worker 只读 clone（D68）。跑测试台问题 A 到记分卡全绿；加 Integrator 和配对测量（D73、D74），测试台的两个对照臂改用它。
-3. 第 3 周：Router 检查；diff\_since 和游标；全部 hook；一个 Librarian；Critic 和 holdout。跑 S2（Planner 关）vs B1 @ 5，S1 作中间臂：组件齐了先按 D72 试点 3 个批次，再预注册、再跑正式 H1，运行次数按功效算。周数是示意，按门槛走，不够就顺延。
-4. 第 4 周：k8s Executor 适配器（第二个适配器，顺便验 H12）；接入 checkpoint、fork、ask\_checkpoint，跑 handoff 实验判定 H2；PI agent 和 charter；Planner；扩到 20。跑 S2 @ 20 和 S2 vs S2+P。
-5. 第 5 周起：推迟清单逐项 A/B；扩到 50；让系统在 20 个 worker 上连续跑一周看它怎么坏，再加功能。
+0. Week 0 (in parallel with weeks 1 and 2, two weeks): spike H11. A checkpoint carries sandbox state and can be restored and continued on another machine. The output is a minimal migration implementation plus numbers for migration time and snapshot size. Unless this is done first, D5 and D22 are both just wishes.
+1. Week 1: interface code for the six ports, in-memory adapters, local subprocess Executor, MCP tool service; repository directories and schema; state machine and event permissions; synchronous CI checks; the Indexer's SQLite; one worker's full loop; the Eval service's T0 and top levels, with dedup, prediction recording, result\_ready; two holdouts cut and sealed (D66); Budget meter. Run L0 to all green, then run B0.
+2. Week 2: leases in KV; merge queue and tiered CI; cheap eval tier and correlation calibration; local proxy recording; embedding and search; quota plus FIFO; a separate run\_id namespace per run and a separate repository per worker for B1 (D67); workers get read-only clones (D68). Run testbed problem A until the scorecard is all green; add the Integrator and paired measurement (D73, D74), and switch the testbed's two control arms to use it.
+3. Week 3: Router checks; diff\_since and cursor; all hooks; one Librarian; Critic and holdout. Run S2 (Planner off) vs B1 @ 5, with S1 as the intermediate arm. Once the components are complete, first run the 3-batch pilot per D72, then preregister, then run the formal H1; the number of runs is computed from statistical power. The week numbers are illustrative. Follow the gates, and push the schedule back if the time is not enough.
+4. Week 4: k8s Executor adapter (the second adapter, which also tests H12); integrate checkpoint, fork, ask\_checkpoint, and run the handoff experiment to decide H2; PI agent and charter; Planner; scale to 20. Run S2 @ 20 and S2 vs S2+P.
+5. Week 5 onward: A/B the deferred list item by item; scale to 50; let the system run continuously for a week on 20 workers to see how it breaks, then add features.
 
-## 14.1 验收阶梯：接真问题之前怎么知道 backbone 对了
+## 14.1 Acceptance ladder: how to know the backbone is right before connecting a real problem
 
-**D70 \[第 23 轮\] 三级验收，每级回答一个问题，花的时间差一个量级；上一级不全绿不进下一级。** 单元测试和 H1 之间缺一层：直接 hook 到大问题上跑两天才发现 backbone 有问题，代价太高，而且分不清是系统坏了还是假设错了。
+**D70 \[Round 23\] Three levels of acceptance. Each level answers one question, and their time costs differ by an order of magnitude. Do not go to the next level until the previous one is all green.** A layer is missing between unit tests and H1. Hooking directly onto a big problem and running it for two days before finding out the backbone has a problem costs too much, and you cannot tell whether the system is broken or the hypothesis is wrong.
 
-| 级 | 问的问题 | 时间 | 配置 | 失败说明 |
+| Level | Question asked | Time | Configuration | What failure means |
 | --- | --- | --- | --- | --- |
-| L0 插头 | 管道和不变量对不对 | 秒级 | 一个进程，内存适配器，脚本化 worker（不用 LLM） | 代码错 |
-| L1 测试台问题 A、B | 机制在真 LLM worker 手里是否按设计起作用 | A 两天一轮，B 两天一轮 | N 个 LLM worker，本地 Executor，慢档人造稀缺，三个臂同配额 | backbone 坏了，或问题里拼的分量不够；不是假设错了 |
-| L2 真问题 | H1 成不成立 | 天级 | 第 11 节 | 假设错了，或问题不适合 |
+| L0 plumbing | Are the pipes and invariants right | Seconds | One process, in-memory adapters, scripted workers (no LLM) | Code bug |
+| L1 testbed problems A, B | Do the mechanisms work as designed in the hands of real LLM workers | A: one round per two days; B: one round per two days | N LLM workers, local Executor, slow tier artificial scarcity, three arms with the same quota | The backbone is broken, or the problem does not put enough weight on combining; not that the hypothesis is wrong |
+| L2 real problem | Does H1 hold | Days | §11 | The hypothesis is wrong, or the problem is not suitable |
 
-**L0：插头测试的 20 条断言**（每条一个测试，脚本化 worker 按固定策略动，全部在内存适配器上几秒跑完）
+**L0: the 20 assertions of the plumbing test** (one test per assertion; scripted workers act on a fixed policy; everything runs in a few seconds on in-memory adapters)
 
-1. claim\_task 的选取顺序：for\_agent 优先，再 priority，再 target\_slots 差最大的方向（D55）。
-2. 写一条 claim → 合入产生 seq → Indexer 从零回放两次，状态完全一致（D56）。
-3. eval\_request 两阶段：有相似候选 → needs\_confirmation；带 token 再调 → queued 且 result claim 已生成（D57）。
-4. 同基线、同 payload 第二次提交 → dedup\_hit，配额不减；只改基线标识，哈希就变（D69、D73）。
-5. result\_ready → 后续任务 for\_agent 是提交者；提交者有 lease 时 interrupt:\<agent> 被写（D28）。
-6. 单来源 refuted 不级联；Critic 来源的级联到 depends\_on，reinstated 撤销（D34）。
-7. gate 失败 → 不进分数，写 dead\_end reason=gate:\<name>（D54）。
-8. lease TTL 过期 → 任务回队列一次且仅一次（D32）。
-9. Budget meter 累计到上限 → stop 事件（D52）。
-10. 臂开关表：B1 配置下 search 和 diff\_since 返回空，路由规则 2 到 5 不触发；S2 全开（D58）。
-11. Integrator：有文本冲突 → 发 compose 任务；无冲突但基线动过 → 恰好一次配对复测；增益不过 1 个标准误 → integration\_failed 并给作者后续任务；B1 配置下 worker 收不到 baseline\_advanced（D74、D58）。
-12. worker 角色读 private:// → 拒绝；worker 对仓库 push → 拒绝（D63、D68；内存适配器也要模拟权限）。
-13. result\_ready 带 baseline、配对增益、标准误、n\_items、n\_reps；n\_reps 不计缓存命中（D73）。
-14. baseline\_advanced 的 files\_changed 和 lease 的 files\_touched 有交集 → 硬中断；没有交集 → 软中断（第 8 节规则 6）。
-15. 一个 guard 批次失败 → 二分，写一版排除肇事者的新基线，旧记录不变；交付物永远不是 guard\_pending（D74）。
-16. 抽查：脚本化的过拟合候选被标记、回退、置 quarantined；一次干净的脚本化运行，7 次抽查一次都不报警（D72）。
-17. worker 沙箱访问白名单外的主机 → 拒绝（D75）。
-18. 上下文用量超过 70% → 写 claim 并带起始包开新会话；进程被 kill -9 → sidecar 代写 stub claim（D77）。
-19. 臂的公平性：Integrator 配置在四个臂里逐项相同；compose 任务的执行者不在任何臂的 worker 池里（D58）。
-20. 收尾顺序：预算用完 → 停止接收 → guard\_pending 补检 → 最终抽查 → 冻结交付物；交付物非 guard\_pending（D74、D79）。
+1. claim\_task selection order: for\_agent first, then priority, then the approach with the largest target\_slots gap (D55).
+2. Write one claim → merging produces a seq → the Indexer replays from zero twice, and the state is exactly the same both times (D56).
+3. eval\_request is two-phase: similar candidates exist → needs\_confirmation; call again with the token → queued, and the result claim has already been created (D57).
+4. A second submission with the same baseline and the same payload → dedup\_hit, and the quota is not decremented; changing only the baseline identifier changes the hash (D69, D73).
+5. result\_ready → the follow-up task's for\_agent is the submitter; when the submitter holds a lease, interrupt:\<agent> is written (D28).
+6. A single-source refuted does not cascade; a Critic-sourced one cascades to depends\_on, and reinstated undoes it (D34).
+7. gate fails → not counted in the score; writes dead\_end reason=gate:\<name> (D54).
+8. lease TTL expires → the task goes back to the queue once and only once (D32).
+9. Budget meter accumulates to the cap → stop event (D52).
+10. Arm switch table: under the B1 configuration, search and diff\_since return empty, and routing rules 2 to 5 do not fire; S2 has everything on (D58).
+11. Integrator: textual conflict → issues a compose task; no conflict but the baseline has moved → exactly one paired remeasure; gain not above 1 standard error → integration\_failed, and the author gets a follow-up task; under the B1 configuration, workers do not receive baseline\_advanced (D74, D58).
+12. The worker role reads private:// → denied; a worker pushes to the repository → denied (D63, D68; the in-memory adapters must simulate permissions too).
+13. result\_ready carries baseline, paired gain, standard error, n\_items, n\_reps; n\_reps does not count cache hits (D73).
+14. baseline\_advanced's files\_changed intersects the lease's files\_touched → hard interrupt; no intersection → soft interrupt (§8 rule 6).
+15. A guard batch fails → bisect, write a new baseline version that excludes the culprit, and leave old records unchanged; the deliverable is never guard\_pending (D74).
+16. Spot check: a scripted overfitting candidate is flagged, reverted, and set to quarantined; in a clean scripted run, none of the 7 spot checks raises an alarm (D72).
+17. A worker sandbox accesses a host outside the allowlist → denied (D75).
+18. Context usage goes over 70% → write a claim and start a new session with the start pack; the process is killed with kill -9 → the sidecar writes a stub claim on its behalf (D77).
+19. Arm fairness: the Integrator configuration is identical item by item across the four arms; whoever executes compose tasks is not in any arm's worker pool (D58).
+20. Closeout order: budget exhausted → stop accepting → guard\_pending catch-up check → final spot check → freeze the deliverable; the deliverable is not guard\_pending (D74, D79).
 
-**L1：测试台的两个问题（A 仿真器调度策略，B 埋坑 harness）**
+**L1: the testbed's two problems (A simulator scheduling policy, B planted-bug harness)**
 
-问题本身、埋的结构、记分卡、对照组、建造顺序都在另一份文档《Herd 测试台》里，这里只说它在阶梯里的位置。它的价值是作为 backbone 的正对照：问题是为共享设计的，所以 herd 必须赢"单干"和"各干各的"两个对照组；不赢就是系统坏了，或者问题里"拼"的分量不够。它不能证明 H1。之前的合成问题 Knobs 废掉了：它的难点是材料超过一个上下文窗口，而一个会用 grep 和抽样的 agent 对付得了（第 26 轮）。站得住的理由是"要迭代的方向数 × 每轮要等的时间超过墙钟时间"，A 和 B 都是这个结构。
+The problems themselves, the planted structure, the scorecard, the control groups and the build order are all in the separate document *Herd Testbed* (`herd-testbed.md`). Here we only describe its place in the ladder. Its value is as a positive control for the backbone. The problems are designed for sharing, so the herd must beat both the "single agent" and the "isolated" control groups. If it does not win, either the system is broken or the problem does not put enough weight on "combining". It cannot prove H1. The earlier synthetic problem, Knobs, was dropped. Its difficulty was that the material exceeds one context window, and an agent that uses grep and sampling can handle that (round 26). The reason that holds up is "number of approaches to iterate on × time to wait per round exceeds the wall-clock time"; A and B both have this structure.
 
-**L1 要回答的问题** = 测试台文档第 6 节的记分卡：广度、拼装、吃到几成、死胡同重撞、冲突处理、配额纪律、预测误差、倾斜、泛化，全部从记录器自动算，不靠人读。原来的 10 个问题并入其中。
+**The questions L1 must answer** = the scorecard in §6 of the testbed document: breadth, composition, share of available gain captured, dead-end re-hits, conflict handling, quota discipline, prediction error, tilt, generalization. All are computed automatically from the recorder, not by a human reading. The original 10 questions are folded into it.
 
-问题 A 过了再上 B，B 过了才进 L2。测试台按 v3 审稿接受三条改动：数据分四份（公开、日常、抽查、判定）；对照组按合并后的交付物判（B1+M，单个最好的另作诊断）；每个调用者只看自己的提交历史。v3 要求的"再埋两个杠杆"不要，那是为它的静态分工对照组服务的。L2 的问题由人选（附录 C），但必须保留人造稀缺：即使真 eval 分钟级，Eval service 也把 latency 垫到 ≥ 10 分钟、budget 压到全队每小时 2 次，否则测的不是这个设计存在的理由（C1）。
+Move on to B only after problem A passes, and move on to L2 only after B passes. The testbed accepts three changes from the v3 review: the data is split into four parts (public, daily, spot-check, verdict); control groups are judged on the merged deliverable (B1+M, with the single best kept as a separate diagnostic); each caller sees only its own submission history. The v3 request to "plant two more levers" is not taken; it served that review's static division-of-labor control group. The L2 problem is chosen by a human (Appendix C), but artificial scarcity must be kept. Even if the real eval takes minutes, the Eval service pads latency to ≥ 10 minutes and holds the budget to 2 per hour for the whole team. Otherwise what is being tested is not the reason this design exists (C1).
 
-## 15. 决策登记表
+## 15. Decision register
 
-所有决定按编号列齐。实现时这是检查清单；PoC 出问题时，先从第 13 节的信号找到压力落在哪个 D，再来这里看它的状态：约束不动，推论先质疑原则，假设直接切 fallback，默认值直接调。"推迟"的行不在最小落地版里。
+All decisions are listed in full by number. During implementation this is the checklist. When something goes wrong in the PoC, first use the signals in §13 to find which D the pressure lands on, then come here to check its status. Constraints do not move. For derived decisions, question the principle first. For hypotheses, switch straight to the fallback. Defaults are tuned directly. Rows marked "Deferred" are not in the minimum viable version.
 
-| D# | 决定 | 状态与依据 | 推翻它需要看到什么 | Fallback | 节 |
+| D# | Decision | Status and basis | What would overturn it | Fallback | § |
 | --- | --- | --- | --- | --- | --- |
-| D1 | 任务形态唯一：用方法 Y 推进整个问题，每个 worker 看全部材料 | 推论 P1 | 按材料切分的对照组不差 | 允许 dispatcher 按材料切（等于放弃 P1） | 7 |
-| D2 | 不预先分解；子问题只能由看过全局的 agent 在工作中提出，且能脱离父上下文陈述 | 推论 P1 | 同上 | 同上 | 7 |
-| D3 | 任何合并由一个持有原文检索权的 agent 做，不拼摘要 | 推论 P1 | 拼摘要的对照组不差 | 允许机械合并 | 8 |
-| D4 | 轨迹全量保留；worker 结束前必写 ≥ 1 条带 evidence 的 claim | 推论 P2 | 垃圾 claim 比例高且无法用标签压住 | 改为结束前必写 contribution 摘要，轨迹仍保留 | 7 |
-| D5 | fork 代替 handoff，只用于决策点分叉，不用于上下文解压；checkpoint 含 sandbox 状态和上下文用量 | 推论 P2；假设 H2、H11 | H2：摘要组 ≈ fork 组；H11：迁移太慢或快照太大 | 轨迹指针 + 回头问；或对话 + 命令日志重放 | 7 |
-| D6 | 摘要只做索引，不替代原文 | 推论 P2 | 无 | 无 | 8 |
-| D7 | 检索由接收方在需要时拉，不靠推送摘要 | 推论 P2 | 无 | 无 | 8 |
-| D8 | surprise 单独记录，鼓励产出可执行复现 | 推论 P2 | surprise claim 从未被复用 | 取消工具，保留 evidence 要求 | 7 |
-| D9 | 每类 claim 有自己的状态机 | 推论 P3；v1 审稿 | 无 | 无 | 5 |
-| D10 | eval 定义、holdout、audit 理由在 worker 无凭证的私有存储；黑板只放公开元数据（git 没有按路径读权限） | 推论 P3；约束 C3 | 无 | 无 | 9 |
-| D11 | Critic 审计高分候选；audit 分公开结论和不公开理由；限速 | 推论 P3 | Critic refuted 率为零且无 hacking | 降低触发频率，不取消 | 6 |
-| D12 | 只有 trust 最高的信号能改永久预算；便宜信号只能触发有上限、有期限的 surge（D50） | 推论 P3（反 Goodhart） | topline 极稀疏导致预算长期僵化 | 允许 calibrated 代理按折扣动预算，Critic 加密检查转移 | 9 |
-| D13 | 第 0 层纯代码：索引、路由、合并、eval 服务、计量 | 推论 P4 | 无 | 无 | 6 |
-| D14 | Librarian 是编辑不是守门人，worker 可绕过 | 推论 P4 | digest 覆盖率 < 80% | 查 digest 结构，或分方向加 Librarian | 6 |
-| D15 | Planner 只写 decisions，不做全景、不 fork、不调通信参数 | 推论 P4；假设 H7 | Planner 运行时长超名额窗口 1/4 | 按方向分片 | 6 |
-| D16 | Scout 独立角色做跨方向连接 | 推论 P4、P8；假设 H9；推迟 | 复用率为零 | 取消，靠人 | 6 |
-| D17 | 三通道：硬中断、软注入、按需检索 | 推论 P5 | 固定频率对照组不差 | 固定频率 | 8 |
-| D18 | 游标 diff，按相关性排序，截断 500 token | 推论 C2；默认值 500 | diff 截断率高且做废功高 | 调截断；改排序 | 8 |
-| D19 | 连续 N 次失败后同步点加密，N=3 | 推论 P5；默认值 | 无 | 调 N | 8 |
-| D20 | charter 协商与签字，aligned 才启动 | 推论 P6 | 无 | 无 | 10 |
-| D21 | 对齐讨论全文入库可检索可回头问 | 推论 P6 | 无 | 无 | 10 |
-| D22 | 首波 worker 从 PI agent 上下文 fork | 推论 P6；假设 H10 | fork 组不优于读 spec 组 | 全部读 spec | 10 |
-| D23 | 人的洞察写成 author=human 的 claim，规则 5 硬中断 | 推论 P6 | 无 | 无 | 8 |
-| D24 | approach portfolio；lease 限同方向并发；预算按方向 | 推论 P7 | 多样性从不下降 | 放松并发限制 | 6 |
-| D25 | dead\_end 一等公民，有 confirmed 状态 | 推论 P7 | 无 | 无 | 5 |
-| D26 | eval\_request 前强制检索相似候选和 dead\_end | 推论 P7 | 重走次数为零 | 改为提示不强制 | 7 |
-| D27 | 每层一个 agent 持有该层全貌，层级按抽象分 | 推论 P8 | 无 | 无 | 8 |
-| D28 | result\_ready 绑定提交者 checkpoint，自动生成后续任务 | 推论 P9；v1 审稿 | 无 | 无 | 9 |
-| D29 | Router 检查用 harness 的 tool hook（有则每次 tool call，无则只在 herd 工具调用），Executor 5 分钟兜底 SIGTERM；不做 NATS | 假设 H3 | 到 5 分钟兜底的中断超过 10%，或中断后做废功高 | 加 NATS 推送 | 6 |
-| D30 | 单 git 仓库是唯一 source of truth | 推论 P2、P4；假设 H4 | merge queue 积压中位 > 2 分钟 | 按方向分仓；或换数据库 | 5 |
-| D31 | append-only；只写自己前缀；按作者分目录 | 推论 C4、P2 | 无 | 无 | 5 |
-| D32 | lease 在 KV，TTL 2 小时；心跳由 Executor sidecar 按时间打，不依赖 tool call | 约束（心跳频率）；默认值 | 无 | 调 TTL | 5 |
-| D33 | 轨迹和 checkpoint 在对象存储，只归档不删 | 推论 P2 | 存储成本不可接受 | 删 30 天前未被引用的 | 5 |
-| D34 | 事件优先级；单来源 refuted 不级联；reinstated；merge 序号排序 | 推论 P3；v1 审稿 | 无 | 无 | 5 |
-| D35 | worker 无状态；原则靠 hook 不靠 prompt | 约束 C4 | 无 | 无 | 7 |
-| D36 | 每条 claim 产生时立即 push | 推论 P5；v1 审稿 | commit 率压垮 CI | 批量 push，上限 5 分钟 | 7 |
-| D37 | 提交必带预测；预测准确度只加权 information 份额 | 假设 H8 | 误差与成功率相关性 < 0.3 | 只记录不加权 | 9 |
-| D38 | agent 之间不互发消息，一切通过仓库 | 推论 P1、P4 | 无 | 无 | 8 |
-| D39 | eval 是 signal source 插件接口 | 约束 C6 | 无 | 无 | 9 |
-| D40 | 配额加 FIFO；本地代理是一等机制 | 约束 C1；假设 H5 | 无任何一层相关性 ≥ 0.5 | 退到 T0 加顶层，减 worker 数 | 9 |
-| D41 | 代理打分器和新颖度排序 | 推迟 | 标定数据够了之后 A/B | 不上 | 9 |
-| D42 | 对照四条规则：同分配策略、机器小时计量、多 seed、预注册 | v1 审稿 | 无 | 无 | 11 |
-| D43 | Budget meter 按角色、方向、source 计量 | v1 审稿 | 无 | 无 | 6 |
-| D44 | ASHA early stopping | 推迟 | eval 是长 job 时 A/B | 不上 | 9 |
-| D45 | charter 的 sources.md 是必答题 | 推论 C6 | 无 | 无 | 10 |
-| D46 | escalation 默认动作是冻结，超时 8 小时 | 约束 C5；默认值 | 冻结造成的损失大于继续 | 改默认动作 | 10 |
-| D47 | 撤销（第 29 轮，P10）：原为模型分级，现在所有角色同一个最强模型 | 第 29 轮 | — | — | 12 |
-| D48 | 跳升阈值 2 个标准差；Critic 限速 6 次/小时；Scout 每 6 小时；首波每方向 2 到 3 个 | 默认值 | 无 | 调 | 各节 |
-| D49 | 分配单位是 slot；加 agent = 提 target\_slots 和队列权重，不杀 worker | 推论 C1、C4 | 换方向的延迟（任务时长）导致 surge 窗口错过 | surge 时对低优先方向的 worker 软注入"完成后换方向"，必要时 checkpoint 后硬中断 | 9.1 |
-| D50 | surge：便宜信号触发临时加码（翻倍、≤40%、到顶层结果或 24 小时），顶层确认才固化；surge worker 从发现者 checkpoint fork 并带不同 sub-goal | 推论 P3、P7；默认值 k=3、40%、24h、48h 冷却 | surge 被顶层确认的比例很低（< 30%）说明便宜信号太差；或 surge 从未触发 | 提高 k 或只允许 calibrated 代理触发；或取消 surge，只按顶层分配 | 9.1 |
-| D51 | 广度硬底线：exploration ≥ 25%、单方向 ≤ 40%、每方向 ≥ 1 slot、新方向自动批到 8 个；第一版分配规则是 softmax 确定性规则，只吃顶层信号（与 D12 一致），LLM 只能带理由覆盖 | 推论 P7；默认值 | 多样性指标在底线下仍持续下降；或 Planner 覆盖率 > 50% 说明规则太差 | 调底线和 τ；或把分配交给 LLM Planner（推迟项提前） | 9.1 |
-| D52 | 停止规则：预算、平台期、全部冻结、达标；换 charter 的两个信号 | 推论 C1、C5；默认值 N=3 | 平台期误报（停了之后人工发现还有进展） | 加大 N；平台期只报不停 | 9.2 |
-| D53 | 人的注意力按预算和优先队列分配；看过什么记成事件喂 taste | 约束 C5；默认值 30 分钟/天 | 人总是跳过队列直接翻仓库，说明队列排序不对 | 按人实际点开的类型重排 | 9.2 |
-| D54 | 可自动检查的硬约束编译成 gate，提交前和结果后执行，不进分数，Planner 不能权衡 | 推论 P3；约束 C3 | 无 | 无 | 9.2 |
-| D55 | 任务队列在 KV，task schema 固定；Indexer 维持常规任务和 result\_ready 后续任务；claim\_task 的选取顺序 | 推论 C4；v2 审稿 | 无 | 无 | 5 |
-| D56 | 事件 schema 固定；seq 由合入 main 的串行进程分配；Indexer 按 seq 回放 | 推论 P3；v2 审稿 | 无 | 无 | 5 |
-| D57 | eval\_request 带每层预测，服务自动逐级执行并返回状态；分配状态只在 allocation/；参数在 charter/params.yaml | 推论 C1、P3；v2 审稿 | 无 | 无 | 5、9、9.1 |
-| D58 | 臂的开关表随预注册签字；H1 的门槛是 S2（Planner 关）对 B1，S1 作中间臂 | v2 审稿 | 无 | 无 | 11 |
-| D59 | herd 是独立 runtime，四层，L2 只依赖六个端口；集群仓库和 harness 都是 L0 适配器 | 推论；v2 讨论 | 无 | 无 | 4.1 |
-| D60 | hook 分三层：herd 工具的 hook 在 MCP 服务端；中断检查用 harness 的 tool hook（可选能力 supports\_tool\_hooks）；心跳和兜底在 Executor sidecar | 推论 P4 | 某个必需 hook 无法在服务端实现 | 该 hook 成为 Harness 端口的必需能力，缩小可接的 harness 集合 | 4.1 |
-| D61 | 每端口一个真实适配器加一个内存适配器；第二个真实适配器放 H1 之后；内存版是回归测试 | 假设 H12 | 换适配器后结论变了 | 把泄漏的能力提成端口的显式字段 | 4.1 |
-| D62 | 臂的分数 = 固定预算用完时Integrator 最后一版非 guard\_pending 基线的 holdout 重评均值，不是 best-so-far；seed 指独立运行 | 约束 C3；外部审稿 | 无 | 无 | 11 |
-| D63 | 两个存储：黑板仓库全量可 clone；私有存储放 eval 定义、holdout、audit 理由，worker pod 和 PI agent 都无凭证（PI 的上下文会被 fork 继承） | 约束（git 无按路径读权限）；外部审稿 | 无 | 无 | 5、9 |
-| D64 | 产出是组合不是单点：候选多父、组合任务模板、interaction claim；方向是 portfolio，exploration 底线更高 | 推论 P1、P7；第 22 轮 | 问题本身不可组合（单一证明、互斥方案） | charter 标 composable=false，合并流程退化为取单个最优 | 9.1 |
-| D65 | best-of-N 只是对照臂名；所有臂的候选由同一个 Integrator 在运行中合并，B1+M = worker 看不见基线前进；B1-single 作诊断 | 第 22 轮 | 无 | 无 | 9.1、11 |
-| D66 | 两份 holdout：holdout\_run 给运行中 Critic，有次数上限；holdout\_verdict 封存，只评最终交付物，n 固定 | 约束 C3；外部审稿 N1、N5 | 无 | 无 | 9 |
-| D67 | 隔离靠物理分开：每运行一个 run\_id 的仓库、KV、配额；B1 每 worker 独立仓库；S1 用过滤镜像仓 | 约束（git/shell 不能限读）；外部审稿 N7 | 无 | 无 | 5 |
-| D68 | worker clone 只读，push 凭证只在 MCP 工具服务 | 推论 D31；外部审稿 N8 | 无 | 无 | 5 |
-| D69 | 候选格式：manifest.yaml + payload（patch / config / artifact），hash = 基线标识 + payload，相似度只算 payload（第 30 轮） | 外部审稿 C8 | 无 | 无 | 5 |
-| D70 | 三级验收：L0 插头 12 条断言（秒）、L1 测试台问题 A、B（天）、L2 真问题（天）；上一级不全绿不进下一级；L2 保留人造稀缺 | 第 23 轮；外部审稿 A4 | L1 全绿但 L2 系统性失败，说明测试台问题漏了某个机制 | 给测试台问题加针对该机制的结构，回到 L1 | 14.1 |
-| D71 | PoC 前先在测试台的两个问题上验证 herd 行为（A 仿真器调度策略、B 埋坑 harness），三个臂同配额同时间；herd 的 Eval service 是测试台慢档服务的薄客户端，接口与真外部 eval 一致，换真项目不改 herd | 第 25、26 轮 | herd 赢但记分卡不达标；或平/输但达标 | 前者查记录器看分数从哪来；后者改问题不改 herd；不达标按测试台文档第 5 节的表改对应部分 | 14.1；《Herd 测试台》 |
-| D72 | 判定协议：数据分三份，先试点再按功效定运行次数，单侧配对 t 检验；抽查 = 对同一段基线做两次新测量（日常 vs 抽查数据）比差，阈值 2.5σ√2，各臂相同（第 30 轮改） | 第 27、28 轮（v3 审稿） | 试点算出的运行次数远超预算；或预注册后测出的效应远小于人定的最小有意义效应 | 前者降为探索性运行、如实报告；后者先查噪声估计是不是偏小，再考虑换问题 | 9；14 |
-| D73 | 配对测量：候选和基线同批同时段跑，报逐项差和标准误；候选哈希含基线标识；慢档返回逐种子分 | 同上 | 配对差的方差不比绝对分小；或同一个 diff 打在不同基线上被当成同一候选去重 | 前者查两边数据批次是否真的对齐；后者查哈希实现 | 9 |
-| D74 | 合并流程（Integrator，四臂同配置、运行中都跑）：基线逐步前进，先进先出，合前 rebase，冲突交池外新 agent 合，基线动过则一次配对复测，增益超 1 个标准误且过 gate 才合入；相互作用按 2σ√2 记；运行后出归因报告（第 30 轮改） | 同上 | 合入的东西里接近零的补丁占比超过五分之一；或交付物的分数低于某个单独候选的配对分 | 前者切严格版接收规则；后者是相互作用，归因报告要能指出是哪两个候选 | 9；8 |
-| D75 | 出网白名单：worker 沙箱只通模型 API、herd 工具服务、声明过的上下文源和包镜像 | 同上 | 记录器里出现白名单外的访问；或 worker 的答案和公开资料高度一致 | 封沙箱、候选标 refuted；查适配器的网络配置 | 9 |
-| D76 | 机会地图只是共享信息，不是派活依据；新增 map/、baseline/、report/ 三个目录和配套事件类型；第一批测量脚本由人在建问题时写，Integrator 重跑；S1 收得到更新 | 同上 | PI 或 Planner 开始按地图条目一对一派人（等于回到 v3 的静态分工）；或地图没人读 | 前者在 Planner 的 prompt 里明说地图不是任务表；后者去掉地图，不算错 | 5 |
-| D77 | 不靠 checkpoint 的重启路径：窗口 70% 触发，关自动压缩，起始包四样，进程被杀由 sidecar 代写 stub claim；gate 前就能用，各臂相同 | 同上 | 重启后 agent 重做已经做过的事超过一次；或到 5 分钟兜底的中断占比超过 10%（H3） | 起始包里多带几次工具调用；查用量计算是否滞后 | 7 |
-| D78 | 推迟（第 30 轮）：预审 H1 之后单独 A/B，届时由不读 eval 代码的预审员做、各臂相同；保留快档复测不限次，compose 多版只用快档挑 | 第 29 轮（P10） | Critic 的否决和慢档结果不相关（被否决的候选补跑慢档并不差） | 降到 1 个或去掉预审 | 9 |
-| D79 | 收尾顺序各臂相同：停止接收 → guard\_pending 补检 → 最终抽查 → 冻结交付物 → 所有运行结束后一起评 holdout\_verdict；归因在判定之后、只用日常数据；接收规则预注册时选定，运行中不切 | 第 30 轮（Opus 审稿） | 两臂交付物里 guard\_pending 的处理不一样；或归因碰了判定数据 | 查收尾配额是否各臂相同；归因改用日常数据 | 9 |
+| D1 | Only one task form: advance the whole problem with method Y; every worker sees all the material | Derived P1 | The control group split by material is no worse | Allow the dispatcher to split by material (equivalent to giving up P1) | 7 |
+| D2 | No up-front decomposition; a subproblem can only be raised during work by an agent that has seen the whole picture, and it must be statable without the parent context | Derived P1 | Same as above | Same as above | 7 |
+| D3 | Any merge is done by one agent that holds search access to the original text; no combining of summaries | Derived P1 | The control group that combines summaries is no worse | Allow mechanical merging | 8 |
+| D4 | Traces are kept in full; a worker must write ≥ 1 claim with evidence before it ends | Derived P2 | A high share of junk claims that tags cannot suppress | Change to a mandatory contribution summary before ending; traces are still kept | 7 |
+| D5 | fork replaces handoff, used only for branching at decision points, not for context decompression; a checkpoint includes sandbox state and context usage | Derived P2; Hypothesis H2, H11 | H2: summary group ≈ fork group; H11: migration is too slow or the snapshot is too large | Trace pointers + ask back; or conversation + command-log replay | 7 |
+| D6 | Summaries are only an index; they do not replace the original text | Derived P2 | None | None | 8 |
+| D7 | Retrieval is pulled by the receiver when needed, not done by pushing summaries | Derived P2 | None | None | 8 |
+| D8 | surprise is recorded separately; producing executable reproductions is encouraged | Derived P2 | surprise claims are never reused | Remove the tool, keep the evidence requirement | 7 |
+| D9 | Each claim type has its own state machine | Derived P3; v1 review | None | None | 5 |
+| D10 | Eval definitions, holdout and audit reasons are in a private store the worker has no credentials for; the blackboard holds only public metadata (git has no per-path read permissions) | Derived P3; Constraint C3 | None | None | 9 |
+| D11 | The Critic audits high-scoring candidates; an audit is split into a public conclusion and a non-public reason; rate-limited | Derived P3 | Critic refuted rate is zero and there is no hacking | Lower the trigger frequency; do not remove it | 6 |
+| D12 | Only the highest-trust signal can change the permanent budget; cheap signals can only trigger a capped, time-limited surge (D50) | Derived P3 (anti-Goodhart) | The topline is so sparse that the budget stays rigid for a long time | Allow calibrated proxies to move the budget at a discount, with the Critic checking transfer more often | 9 |
+| D13 | Layer 0 is pure code: indexing, routing, merging, eval service, metering | Derived P4 | None | None | 6 |
+| D14 | The Librarian is an editor, not a gatekeeper; workers can bypass it | Derived P4 | digest coverage < 80% | Check the digest structure, or add Librarians per approach | 6 |
+| D15 | The Planner only writes decisions; it does not build the global view, does not fork, does not tune communication parameters | Derived P4; Hypothesis H7 | Planner run time exceeds 1/4 of the quota window | Shard by approach | 6 |
+| D16 | Scout as a separate role makes cross-approach connections | Derived P4, P8; Hypothesis H9; Deferred | Reuse rate is zero | Remove it and rely on humans | 6 |
+| D17 | Three channels: hard interrupt, soft injection, on-demand search | Derived P5 | The fixed-frequency control group is no worse | Fixed frequency | 8 |
+| D18 | Cursor diff, ranked by relevance, truncated at 500 tokens | Derived C2; Default 500 | High diff truncation rate and high wasted work | Tune the truncation; change the ranking | 8 |
+| D19 | After N consecutive failures, sync points become denser; N=3 | Derived P5; Default | None | Tune N | 8 |
+| D20 | charter negotiation and signing; start only when aligned | Derived P6 | None | None | 10 |
+| D21 | The full text of alignment discussions is stored, searchable, and can be asked back | Derived P6 | None | None | 10 |
+| D22 | First-wave workers fork from the PI agent's context | Derived P6; Hypothesis H10 | The fork group is no better than the group that reads the spec | Everyone reads the spec | 10 |
+| D23 | Human insights are written as claims with author=human; rule 5 hard interrupt | Derived P6 | None | None | 8 |
+| D24 | approach portfolio; leases limit same-approach concurrency; budget per approach | Derived P7 | Diversity never drops | Loosen the concurrency limits | 6 |
+| D25 | dead\_end is a first-class citizen, with a confirmed status | Derived P7 | None | None | 5 |
+| D26 | Mandatory search for similar candidates and dead\_end before eval\_request | Derived P7 | Re-walk count is zero | Change it to a hint, not mandatory | 7 |
+| D27 | At each level one agent holds that level's full picture; levels are divided by abstraction | Derived P8 | None | None | 8 |
+| D28 | result\_ready binds to the submitter's checkpoint and automatically generates follow-up tasks | Derived P9; v1 review | None | None | 9 |
+| D29 | Router checks use the harness's tool hook (on every tool call if there is one; otherwise only on herd tool calls), with an Executor 5-minute fallback SIGTERM; no NATS | Hypothesis H3 | More than 10% of interrupts reach the 5-minute fallback, or wasted work after interrupts is high | Add NATS push | 6 |
+| D30 | A single git repository is the only source of truth | Derived P2, P4; Hypothesis H4 | Median merge queue backlog > 2 minutes | Split repositories by approach; or switch to a database | 5 |
+| D31 | append-only; write only under your own prefix; directories per author | Derived C4, P2 | None | None | 5 |
+| D32 | lease in KV, TTL 2 hours; the heartbeat is sent on a timer by the Executor sidecar, not dependent on tool calls | Constraint (heartbeat frequency); Default | None | Tune the TTL | 5 |
+| D33 | Traces and checkpoints in object storage, archive only, never delete | Derived P2 | Storage cost is unacceptable | Delete unreferenced items older than 30 days | 5 |
+| D34 | Event priority; a single-source refuted does not cascade; reinstated; ordering by merge sequence number | Derived P3; v1 review | None | None | 5 |
+| D35 | Workers are stateless; principles are enforced by hooks, not by prompts | Constraint C4 | None | None | 7 |
+| D36 | Each claim is pushed immediately when it is produced | Derived P5; v1 review | The commit rate overwhelms CI | Batch push, at most every 5 minutes | 7 |
+| D37 | Submissions must include a prediction; prediction accuracy weights only the information share | Hypothesis H8 | Correlation between error and success rate < 0.3 | Record only, no weighting | 9 |
+| D38 | Agents do not message each other; everything goes through the repository | Derived P1, P4 | None | None | 8 |
+| D39 | Eval is a signal source plugin interface | Constraint C6 | None | None | 9 |
+| D40 | Quota plus FIFO; local proxies are a first-class mechanism | Constraint C1; Hypothesis H5 | No tier has correlation ≥ 0.5 | Fall back to T0 plus the top level, reduce the number of workers | 9 |
+| D41 | Proxy scorer and novelty ranking | Deferred | A/B once there is enough calibration data | Do not add | 9 |
+| D42 | Four rules for controls: same allocation policy, machine-hour metering, multiple seeds, preregistration | v1 review | None | None | 11 |
+| D43 | The Budget meter meters by role, approach and source | v1 review | None | None | 6 |
+| D44 | ASHA early stopping | Deferred | A/B when the eval is a long job | Do not add | 9 |
+| D45 | The charter's sources.md is a mandatory question | Derived C6 | None | None | 10 |
+| D46 | The default escalation action is freeze, with an 8-hour timeout | Constraint C5; Default | Freezing causes more loss than continuing | Change the default action | 10 |
+| D47 | Withdrawn (round 29, P10): originally model tiering; now all roles use the same strongest model | Round 29 | — | — | 12 |
+| D48 | Jump threshold 2 standard deviations; Critic rate limit 6/hour; Scout every 6 hours; first wave 2 to 3 per approach | Default | None | Tune | Various |
+| D49 | The allocation unit is the slot; adding agents = raising target\_slots and queue weight, not killing workers | Derived C1, C4 | The delay in switching approach (task duration) makes the surge window get missed | During surge, soft-inject "switch approach when done" into workers on low-priority approaches; if needed, hard interrupt after a checkpoint | 9.1 |
+| D50 | surge: a cheap signal triggers a temporary boost (doubling, ≤40%, until the top-level result or 24 hours), which is made permanent only after top-level confirmation; surge workers fork from the discoverer's checkpoint and carry different sub-goals | Derived P3, P7; Default k=3, 40%, 24h, 48h cooldown | A very low share of surges confirmed by the top level (< 30%), meaning the cheap signal is too poor; or surge never triggers | Raise k, or allow only calibrated proxies to trigger; or remove surge and allocate only by the top level | 9.1 |
+| D51 | Breadth hard floor: exploration ≥ 25%, single approach ≤ 40%, ≥ 1 slot per approach, new approaches auto-approved up to 8; the first-version allocation rule is a deterministic softmax rule that uses only top-level signals (consistent with D12), and an LLM can only override it with reasons | Derived P7; Default | The diversity metric keeps falling even with the floors; or a Planner override rate > 50%, meaning the rule is too poor | Tune the floors and τ; or hand allocation to an LLM Planner (bring a deferred item forward) | 9.1 |
+| D52 | Stop rules: budget, plateau, all frozen, target met; two signals for changing the charter | Derived C1, C5; Default N=3 | Plateau false alarm (after stopping, a human finds there was still progress) | Increase N; on plateau, only report, do not stop | 9.2 |
+| D53 | Human attention is allocated by budget and priority queue; what the human looked at is recorded as events that feed taste | Constraint C5; Default 30 minutes/day | The human always skips the queue and browses the repository directly, meaning the queue order is wrong | Reorder by the types the human actually opens | 9.2 |
+| D54 | Hard constraints that can be checked automatically are compiled into gates, run before submission and after results, not counted in the score; the Planner cannot trade them off | Derived P3; Constraint C3 | None | None | 9.2 |
+| D55 | Task queue in KV, fixed task schema; the Indexer maintains regular tasks and result\_ready follow-up tasks; claim\_task selection order | Derived C4; v2 review | None | None | 5 |
+| D56 | Fixed event schema; seq is assigned by the serial process that merges into main; the Indexer replays by seq | Derived P3; v2 review | None | None | 5 |
+| D57 | eval\_request carries a prediction per tier; the service automatically runs tier by tier and returns status; allocation state lives only in allocation/; parameters are in charter/params.yaml | Derived C1, P3; v2 review | None | None | 5, 9, 9.1 |
+| D58 | The arm switch table is signed together with the preregistration; H1's gate is S2 (Planner off) vs B1, with S1 as the intermediate arm | v2 review | None | None | 11 |
+| D59 | herd is an independent runtime with four layers; L2 depends only on the six ports; the cluster repository and the harness are both L0 adapters | Derived; v2 discussion | None | None | 4.1 |
+| D60 | Hooks in three layers: herd tool hooks are on the MCP server side; interrupt checks use the harness's tool hook (optional capability supports\_tool\_hooks); heartbeat and fallback are in the Executor sidecar | Derived P4 | Some required hook cannot be implemented on the server side | That hook becomes a required capability of the Harness port, which narrows the set of harnesses that can be connected | 4.1 |
+| D61 | One real adapter plus one in-memory adapter per port; the second real adapter comes after H1; the in-memory version is the regression test | Hypothesis H12 | Conclusions change after swapping adapters | Promote the leaked capability to an explicit field of the port | 4.1 |
+| D62 | An arm's score = the mean holdout re-evaluation of the Integrator's last non-guard\_pending baseline when the fixed budget runs out, not best-so-far; a seed means an independent run | Constraint C3; external review | None | None | 11 |
+| D63 | Two stores: the blackboard repository can be cloned in full; the private store holds eval definitions, holdout and audit reasons, and neither worker pods nor the PI agent have credentials for it (the PI's context is inherited by forks) | Constraint (git has no per-path read permissions); external review | None | None | 5, 9 |
+| D64 | The output is a composition, not a single point: multi-parent candidates, a composition task template, interaction claims; approaches are a portfolio, with a higher exploration floor | Derived P1, P7; round 22 | The problem itself is not composable (a single proof, mutually exclusive solutions) | The charter marks composable=false, and the merge flow degrades to taking the single best | 9.1 |
+| D65 | best-of-N is only the name of a control arm; all arms' candidates are merged during the run by the same Integrator; B1+M = workers cannot see the baseline advance; B1-single as a diagnostic | Round 22 | None | None | 9.1, 11 |
+| D66 | Two holdouts: holdout\_run is for the in-run Critic, with a usage cap; holdout\_verdict is sealed, evaluates only the final deliverable, and has a fixed n | Constraint C3; external review N1, N5 | None | None | 9 |
+| D67 | Isolation through physical separation: each run has its own run\_id repository, KV and quota; B1 has a separate repository per worker; S1 uses a filtered mirror repository | Constraint (git/shell cannot restrict reads); external review N7 | None | None | 5 |
+| D68 | Worker clones are read-only; push credentials exist only in the MCP tool service | Derived D31; external review N8 | None | None | 5 |
+| D69 | Candidate format: manifest.yaml + payload (patch / config / artifact); hash = baseline identifier + payload; similarity is computed on the payload only (round 30) | External review C8 | None | None | 5 |
+| D70 | Three-level acceptance: L0 plumbing with 12 assertions (seconds), L1 testbed problems A, B (days), L2 real problem (days); do not go to the next level until the previous one is all green; L2 keeps artificial scarcity | Round 23; external review A4 | L1 is all green but L2 fails systematically, meaning the testbed problems miss some mechanism | Add structure aimed at that mechanism to the testbed problems, and go back to L1 | 14.1 |
+| D71 | Before the PoC, first validate herd behavior on the testbed's two problems (A simulator scheduling policy, B planted-bug harness), with three arms on the same quota and the same time; the herd's Eval service is a thin client of the testbed's slow tier service, with the same interface as a real external eval, so switching to a real project does not change the herd | Rounds 25, 26 | The herd wins but the scorecard misses its targets; or it ties/loses but meets the targets | For the former, check the recorder to see where the score comes from; for the latter, change the problem, not the herd; if targets are missed, change the corresponding part per the table in §5 of the testbed document | 14.1; *Herd Testbed* (`herd-testbed.md`) |
+| D72 | Verdict protocol: the data is split into three parts; pilot first, then set the number of runs by statistical power; one-sided paired t-test; spot check = two new measurements of the same baseline segment (daily vs spot-check data), comparing the difference, threshold 2.5σ√2, the same for all arms (changed in round 30) | Rounds 27, 28 (v3 review) | The number of runs computed from the pilot is far over budget; or the effect measured after preregistration is much smaller than the minimum meaningful effect set by a human | For the former, downgrade to exploratory runs and report it truthfully; for the latter, first check whether the noise estimate is too small, then consider changing the problem | 9; 14 |
+| D73 | Paired measurement: the candidate and the baseline run in the same batch in the same time window, reporting per-item differences and the standard error; the candidate hash includes the baseline identifier; the slow tier returns per-seed scores | Same as above | The variance of the paired differences is not smaller than that of the absolute scores; or the same diff applied to different baselines is deduplicated as the same candidate | For the former, check whether the data batches on both sides are really aligned; for the latter, check the hash implementation | 9 |
+| D74 | Merge flow (Integrator, same configuration in all four arms, running during the run in all of them): the baseline advances step by step, first-in-first-out, rebase before merging, conflicts handed to a new agent outside the pool to merge, one paired remeasure if the baseline has moved, merged only if the gain exceeds 1 standard error and it passes the gate; interactions recorded at 2σ√2; attribution report after the run (changed in round 30) | Same as above | Near-zero patches make up more than one fifth of what gets merged; or the deliverable's score is lower than the paired score of some individual candidate | For the former, switch to the strict version of the acceptance rule; for the latter, it is an interaction, and the attribution report must be able to point out which two candidates | 9; 8 |
+| D75 | Egress allowlist: worker sandboxes can reach only the model API, the herd tool service, declared context sources and package mirrors | Same as above | Access outside the allowlist shows up in the recorder; or the worker's answers closely match public material | Seal the sandbox, mark the candidates refuted; check the adapter's network configuration | 9 |
+| D76 | The opportunity map is only shared information, not a basis for assigning work; adds three directories, map/, baseline/, report/, and matching event types; the first batch of measurement scripts is written by a human when building the problem and rerun by the Integrator; S1 receives the updates | Same as above | The PI or Planner starts assigning people one-to-one by map entries (equivalent to going back to v3's static division of labor); or nobody reads the map | For the former, state plainly in the Planner's prompt that the map is not a task list; for the latter, remove the map, and that does not count as a mistake | 5 |
+| D77 | Restart path that does not rely on checkpoints: triggered at 70% of the window, auto-compaction off, a four-item start pack, the sidecar writes a stub claim on the agent's behalf if the process is killed; usable before the gate, the same for all arms | Same as above | After a restart the agent redoes work already done more than once; or the share of interrupts reaching the 5-minute fallback exceeds 10% (H3) | Include a few more tool calls in the start pack; check whether the usage calculation lags | 7 |
+| D78 | Deferred (round 30): pre-screening becomes a separate A/B after H1, done then by a pre-screener who does not read the eval code, the same for all arms; keep unlimited fast tier remeasures, and pick among multiple compose versions with the fast tier only | Round 29 (P10) | Critic vetoes are uncorrelated with slow tier results (vetoed candidates do no worse when run on the slow tier anyway) | Reduce to 1, or drop the pre-screening | 9 |
+| D79 | Closeout order is the same for all arms: stop accepting → guard\_pending catch-up check → final spot check → freeze the deliverable → after all runs end, evaluate holdout\_verdict together; attribution comes after the verdict and uses daily data only; the acceptance rule is chosen at preregistration and not switched during the run | Round 30 (Opus review) | The two arms' deliverables handle guard\_pending differently; or attribution touched the verdict data | Check whether the closeout quota is the same across arms; switch attribution to daily data | 9 |
 
-## 附录 A：v1 的独立审稿记录
+## Appendix A: Independent review of v1
 
-本附录是 v1 的历史记录：表里的节号和 P 编号指 v1 的编号，v2 的对应决定见第 15 节登记表。审稿由一个没有参与前期讨论的 agent 完成，只看导出的文档。它给了 12 条意见，5 条严重，我全部采纳或部分采纳，正文已按下表改过。保留这份记录是为了让读者知道第一稿错在哪，以及哪些改动是被迫的。
+This appendix is a historical record of v1. The section numbers and P numbers in the table refer to v1's numbering; for the corresponding v2 decisions, see the register in §15. The review was done by an agent that had not taken part in the earlier discussion and saw only the exported document. It raised 12 points, 5 of them severe. I adopted every one of them, in full or in part, and the body has been revised according to the table below. I keep this record so that readers know where the first draft went wrong and which changes were forced.
 
-| # | 严重度 | 审稿指出的问题 | 处理 | 改在哪 |
+| # | Severity | Problem raised by the review | Resolution | Where changed |
 | --- | --- | --- | --- | --- |
-| 1 | 严重 | verified 的定义在 P4、第 4 节、第 5 节互相冲突。CI 只能验证 result，insight 和 dead\_end 永远停在 proposed，而 P4 又禁止 build on 未 verified 的东西，等于封死了 S2 的核心假设 | 采纳。按 claim type 分状态机，加统一的事件权限表；允许引用 proposed 的 insight 但必须标注状态 | 第 2 节 P4、第 4 节状态机表 |
-| 2 | 严重 | eval 结果没有接收者。eval\_request 异步、T2 小时级，任务结束就释放 lease，"我的候选得了几分、下一步怎么改"这个闭环无人负责 | 采纳。result\_ready 事件绑定提交者的 checkpoint，自动生成后续任务 | 第 5 节 Eval service、第 6 节 hook、第 7 节规则 1 |
-| 3 | 严重 | 写规则和目录布局不自洽：lease 每次 tool call 刷心跳却放在 git 里；claims 和 candidates 没有 agent 前缀，CI 路径检查无法执行；result.json 落在 worker 可写目录下可伪造 | 采纳。lease 移到 KV；claims 和 events 按作者分目录；candidates 内按写者分文件，result.json 只有 Eval service 能写 | 第 4 节布局和 lease |
-| 4 | 严重 | eval 吞吐和需求不匹配：10 并发 T2 对 50 个 worker 是每人每 5 小时一次；sandbox 只有 6 台；worker 必然在 sandbox 自建代理 eval，既不在资源计划里也绕开了标定 | 采纳。本地代理成为受记录、受标定的一等机制；sandbox 加到 15 台；明示每 worker 配额 | 第 8 节配额与本地代理、第 12 节机器表 |
-| 5 | 严重 | 实验不可判：四臂各需全量预算且单次运行，LLM 方差下"稳定超过"不可测；B1 的名额分配和 S2 的 Planner 不同，通信价值和分配策略混淆；只数 T2 次数而 S2 额外消耗 T1 和 T3；做废功由被测系统内的 Librarian 标注 | 采纳。所有臂固定同一分配策略；按 eval 机器小时计量；5 到 10 个 worker、3 个 seed、预注册效应量；做废功换成 Indexer 自动计数的 dead\_end 重走次数 | 第 11 节指标表和公平性 |
-| 6 | 中等 | Critic 是泄漏通道：它是唯一读 eval 代码的角色，却把"为什么得分"写成全员可读的 audit，正是第 8 节警告的 hacking 传播路径；触发条件和 T3"极少"矛盾 | 采纳。audit 分公开结论和 worker 不可读的理由区；触发加速率限制 | 第 5 节 Critic、第 8 节 |
-| 7 | 中等 | refuted 级联没有刹车：验证器抖动会产生假 refuted，没有撤销路径，CI 和 Critic 冲突时优先级未定义，跨机时间戳不可靠 | 采纳。事件优先级人 > Critic > CI；单来源 refuted 不级联；加 reinstated 事件；用 merge 序号排序 | 第 4 节配套规则、第 7 节规则 4 |
-| 8 | 中等 | 可见性时延矛盾：循环只在任务结束 push，共享时延等于任务时长，第 7 节却说硬中断秒级 | 采纳。每条 claim、surprise、eval\_request 产生时立即 push；commit 率重算为 300/小时，CI 分级 | 第 5 节 merge queue、第 6 节循环 |
-| 9 | 中等 | 漏掉的失败模式：git 和对象存储单点；30 天删轨迹后 evidence 悬空；长 sandbox 调用期间无心跳；API 限流；token 预算没有组件执行；claim 正文的 prompt injection | 采纳。逐条补进第 13 节；加 Budget meter 组件；轨迹只归档不删 | 第 5 节 Budget meter、第 13 节 |
-| 10 | 中等 | 第一版过度设计：NATS 硬中断、代理模型、ASHA、新颖度排序、每方向 Librarian、全景都排在第 3 周门槛前；第 4 周塞了太多东西；fork 和 ask\_checkpoint 的跨机可移植性是最大工程风险却没有 spike | 大部分采纳。硬中断改为 tool call 边界轮询，NATS 推迟；代理模型、ASHA、新颖度、每方向 Librarian、Scout 全部推迟到第 5 周起单独 A/B；加第 0 周 spike；第 4 周扩到 20 而不是 50。ASHA 保留在设计里，因为它是 eval 吞吐的主要杠杆 | 第 5 节 Router、第 14 节 |
-| 11 | 轻微 | 参数未定义或可博弈：按预测准确度加权会奖励保守候选；候选 embedding 对代码类产物无定义；"一批"、top-k 的 k 未定义；根目录和 charter 下有两个 problem.md | 采纳。加权只作用于 information 份额；embedding 取相对父代的 diff；一批 = 一个小时名额窗口；根文件改名 spec.md | 第 4、5、8 节 |
-| 12 | 轻微 | P5 和第 7 节冲突：Planner 在全景过程里 fork worker、调 diff 截断，正在变成 P5 警告的"管黑板的强 agent" | 采纳。全景独立为 Scout 角色；diff 参数归 charter；Planner 只写 decisions | 第 5 节 Scout 和 Planner、第 7 节 |
+| 1 | Severe | The definition of verified conflicts across P4, §4 and §5. CI can only verify a result, so insight and dead\_end stay at proposed forever, while P4 forbids building on anything that is not verified. That effectively shuts off S2's core hypothesis | Adopted. Split the state machine by claim type and add a unified event-permission table; allow citing a proposed insight, but its status must be marked | §2 P4, §4 state-machine table |
+| 2 | Severe | Eval results have no receiver. eval\_request is asynchronous, T2 takes hours, and the lease is released when the task ends, so no one owns the loop of "what did my candidate score, and what do I change next" | Adopted. The result\_ready event is bound to the submitter's checkpoint and automatically generates a follow-up task | §5 Eval service, §6 hook, §7 rule 1 |
+| 3 | Severe | The write rules and the directory layout are inconsistent: the lease refreshes its heartbeat on every tool call, yet it lives in git; claims and candidates have no agent prefix, so the CI path check cannot run; result.json sits in a worker-writable directory and can be forged | Adopted. Moved the lease to KV; claims and events get per-author directories; inside candidates, files are split by writer, and only the Eval service can write result.json | §4 layout and lease |
+| 4 | Severe | Eval throughput does not match demand: 10 concurrent T2 runs for 50 workers means one run per worker every 5 hours; there are only 6 sandbox machines; workers will inevitably build their own proxy evals in the sandbox, which are not in the resource plan and also bypass calibration | Adopted. The local proxy becomes a recorded, calibrated, first-class mechanism; sandboxes increased to 15 machines; the per-worker quota is made explicit | §8 quota and local proxy, §12 machine table |
+| 5 | Severe | The experiment cannot reach a verdict: each of the four arms needs the full budget and runs only once, so under LLM variance "consistently beats" cannot be measured; B1 allocates eval slots differently from S2's Planner, which confounds the value of communication with the allocation strategy; only T2 runs are counted, while S2 also consumes T1 and T3; wasted work is labeled by the Librarian, which is inside the system under test | Adopted. All arms use the same fixed allocation strategy; metering is in eval machine-hours; 5 to 10 workers, 3 seeds, preregistered effect size; wasted work is replaced by the dead\_end re-walk count, counted automatically by the Indexer | §11 metrics table and fairness |
+| 6 | Moderate | The Critic is a leak channel: it is the only role that reads eval code, yet it writes "why this scored" into an audit that everyone can read. That is exactly the hacking propagation path that §8 warns about. Its trigger conditions also contradict T3 being "very rare" | Adopted. The audit is split into a public conclusion and a rationale section that workers cannot read; rate limits are added to the trigger | §5 Critic, §8 |
+| 7 | Moderate | The refuted cascade has no brake: verifier flakiness produces false refuteds; there is no undo path; the priority when CI and the Critic conflict is undefined; cross-machine timestamps are unreliable | Adopted. Event priority is human > Critic > CI; a refuted from a single source does not cascade; add the reinstated event; order by merge sequence number | §4 accompanying rules, §7 rule 4 |
+| 8 | Moderate | Visibility latency contradiction: the loop pushes only when a task ends, so sharing latency equals task duration, yet §7 says hard interrupts take seconds | Adopted. Each claim, surprise and eval\_request is pushed immediately when it is produced; the commit rate is recalculated to 300/hour, and CI is tiered | §5 merge queue, §6 loop |
+| 9 | Moderate | Missing failure modes: git and the object store are single points of failure; after traces are deleted at 30 days, evidence dangles; there is no heartbeat during long sandbox calls; API rate limiting; no component enforces the token budget; prompt injection in claim bodies | Adopted. Each one is added to §13; add the Budget meter component; traces are only archived, never deleted | §5 Budget meter, §13 |
+| 10 | Moderate | The first version is over-designed: NATS hard interrupts, proxy models, ASHA, novelty ranking, a per-approach Librarian and the big-picture pass were all scheduled before the Week 3 gate; Week 4 was crammed with too much; the cross-machine portability of fork and ask\_checkpoint is the biggest engineering risk, yet there is no spike for it | Mostly adopted. Hard interrupts changed to polling at tool call boundaries, and NATS is deferred; proxy models, ASHA, novelty, the per-approach Librarian and Scout are all deferred to Week 5 onward, each with its own A/B; a Week 0 spike is added; Week 4 scales to 20 rather than 50. ASHA stays in the design, because it is the main lever on eval throughput | §5 Router, §14 |
+| 11 | Minor | Parameters are undefined or gameable: weighting by prediction accuracy rewards conservative candidates; candidate embeddings are undefined for code artifacts; "a batch" and the k in top-k are undefined; there are two problem.md files, one at the root and one under charter | Adopted. Weighting applies only to the information share; the embedding is taken on the diff relative to the parent; one batch = one one-hour quota window; the root file is renamed spec.md | §4, §5, §8 |
+| 12 | Minor | P5 conflicts with §7: in the big-picture pass the Planner forks workers and tunes diff truncation, so it is turning into the "strong agent managing the blackboard" that P5 warns about | Adopted. The big-picture pass becomes a separate Scout role; diff parameters belong to the charter; the Planner only writes decisions | §5 Scout and Planner, §7 |
 
-**审稿的总体判断**
+**The review's overall judgment**
 
-最大的风险不是规模，是闭环断裂：eval 结果无人接收、insight 无法 verified、吞吐不够，三者叠加会让 50 个 worker 多数时间在等待或重复。最值得先验证的假设是"同等 eval 预算下共享 insight 胜过孤立 best-of-N"，而且必须用 5 到 10 个 worker、固定分配策略、多 seed，先把 S1 对 B1 的差距做出来再谈 50。在此之前应把 fork 和 ask\_checkpoint 的跨机可移植性作为独立 spike 先做掉，它决定 P2 和 P7 能否成立。
+The biggest risk is not scale. It is broken loops: eval results with no receiver, insights that can never become verified, and too little throughput. Together, these three would leave 50 workers waiting or repeating work most of the time. The hypothesis most worth testing first is "with the same eval budget, shared insight beats isolated best-of-N". It must be tested with 5 to 10 workers, a fixed allocation strategy and multiple seeds: first establish the gap between S1 and B1, and only then talk about 50. Before that, the cross-machine portability of fork and ask\_checkpoint should be done first as a separate spike, because it decides whether P2 and P7 can hold.
 
-我同意这个判断。第一稿把注意力放在了通信层的设计上，把"eval 结果回来之后谁接"这种最基本的闭环漏掉了，这是在讨论里从原则往下推时最容易犯的错：原则都对，但没有人从一个 worker 的一天从头走到尾。附录 B 的走查在改完之后重新对过，Day 1 第 6 小时那一行就是补上的闭环。
+I agree with this judgment. The first draft put its attention on designing the communication layer and missed the most basic loop: "who picks up the eval result when it comes back". This is the easiest mistake to make when deriving downward from principles in a discussion: the principles are all correct, but no one walked through one worker's day from start to finish. The walkthrough in Appendix B was rechecked after the revisions; the Day 1, hour 6 row is the loop that was added.
 
-**修订后仍然开放的点**
+**Points still open after the revision**
 
-- Critic 自己被骗怎么办，目前只有人抽查。
-- 本地代理和 T1 的相关性如果一直上不去，整个"eval 稀缺"的设计退化成 best-of-N 加去重。
-- 第 0 周 spike 如果发现 sandbox 快照太大、恢复太慢，fork 要降级为"对话 + 命令日志重放"，P2 的保真度会打折。
+- What to do if the Critic itself is fooled: for now there are only human spot checks.
+- If the correlation between the local proxy and T1 never rises, the whole "eval scarcity" design degrades into best-of-N plus deduplication.
+- If the Week 0 spike finds that sandbox snapshots are too large and restores too slow, fork must be downgraded to "conversation + command-log replay", and P2's fidelity takes a hit.
 
-**v2 外部审稿（2026-10-18，5 条，全部采纳）**
+**v2 external review (2026-10-18, 5 items, all adopted)**
 
-| 问题 | 为什么对 | 改在哪 |
+| Problem | Why it is right | Where changed |
 | --- | --- | --- |
-| H1 的分数不可信：best-so-far 随噪声 eval 次数上涨；seed 未定义 | 多个噪声样本的最大值随样本数上升，与质量无关；LLM API 不可 seed | D62；§11 指标表和 D42 规则 3 |
-| worker 能读到隐藏材料：git clone 没有按路径的读权限 | readable\_by 在同一个仓库里是空话 | D63；D10 改写；§5 目录、§9 声明 |
-| hook 漏掉大部分 tool call：Claude Code 内建的 Bash、Read、Edit 不走 MCP server | "hook 全在服务端"只对 herd 工具成立 | D60 改成三层；心跳移到 Executor sidecar；Harness 端口加 supports\_tool\_hooks；D29、D32、H3 |
-| fork 不能解决上下文满：子进程起点就在上限 | fork 复制整个对话 | §7 hook 表改为压缩 + 继续任务；D5 限定 fork 用途，checkpoint 记上下文用量 |
-| D51 和 D12 矛盾：代理分进了 softmax，等于动了永久预算 | D12 只允许顶层动永久预算 | D51 改为只吃顶层，窗口之间只有 surge |
+| H1's scores are not trustworthy: best-so-far rises with the number of noisy evals; seed is undefined | The maximum of several noisy samples rises with the number of samples, independent of quality; LLM APIs cannot be seeded | D62; §11 metrics table and D42 rule 3 |
+| Workers can read hidden material: git clone has no per-path read permission | readable\_by is an empty promise inside a single repository | D63; D10 rewritten; §5 directories, §9 declarations |
+| Hooks miss most tool calls: Claude Code's built-in Bash, Read and Edit do not go through the MCP server | "All hooks live on the server side" holds only for herd tools | D60 changed to three layers; heartbeat moved to the Executor sidecar; the Harness port gains supports\_tool\_hooks; D29, D32, H3 |
+| fork cannot fix a full context: the child process starts at the limit | fork copies the entire conversation | §7 hook table changed to compaction + continuation task; D5 restricts what fork is used for, and the checkpoint records context usage |
+| D51 contradicts D12: proxy scores enter the softmax, which amounts to touching the permanent budget | D12 allows only the top level to touch the permanent budget | D51 changed to consume only the top level; between windows there is only surge |
 
-**v2b 实现就绪度审稿（2026-10-18，独立 agent，实现者视角，12 条，全部采纳）**
+**v2b implementation-readiness review (2026-10-18, independent agent, implementer's perspective, 12 items, all adopted)**
 
-结论：没有结构性错误，缺的是接口层面的字段和一致性。已改：事件文件名改用 local\_id，seq 由 merge queue 在合入时写 `events/_seq/`（D56）；各臂的最终候选选择规则进 D58；eval\_request 自动生成 result claim 并返回 claim\_id，result\_ready 带完整字段，两阶段确认用 confirm\_token，加 parent（D57）；source 声明加必填 cost\_machine\_hours；Model 端口加 embed；Harness 端口给出 build / export\_state / import\_state 签名；lease 的 target\_claims 由 goal 解析加 repo\_write 时服务端维护；Router 检查只读 KV 的 interrupt:\<agent>；D58 补路由规则、服务侧去重、D19、ctx 组成几行；门槛前加 charter 的四个手写文件；event.role 加 librarian，claim.author 加 eval\_service，frontmatter 加 tags 和 blamed\_constraint；D34 优先级补齐全部角色；PI agent 不持有私有存储凭证；D19 的"失败"给了定义；H2 实验移到第 4 周。
+Conclusion: there are no structural errors; what is missing is interface-level fields and consistency. Changes made: event file names now use local\_id, and the merge queue writes seq to `events/_seq/` at merge time (D56); each arm's rule for selecting its final candidate goes into D58; eval\_request automatically generates a result claim and returns claim\_id, result\_ready carries the full set of fields, two-phase confirmation uses confirm\_token, and parent is added (D57); source declarations gain a required cost\_machine\_hours; the Model port gains embed; the Harness port gets signatures for build / export\_state / import\_state; a lease's target\_claims is maintained server-side, by parsing the goal and on each repo\_write; the Router check reads only the KV key interrupt:\<agent>; D58 gains rows for routing rules, service-side deduplication, D19 and ctx composition; the four hand-written charter files are added before the gate; event.role gains librarian, claim.author gains eval\_service, and frontmatter gains tags and blamed\_constraint; D34's priority order now covers all roles; the PI agent holds no private-store credentials; D19's "failure" now has a definition; the H2 experiment moves to Week 4.
 
-**v2 外部审稿第二批（2026-10-18，来自另一个 agent 的验证文件，全部采纳）**
+**v2 external review, second batch (2026-10-18, from another agent's verification file, all adopted)**
 
-| 编号 | 问题 | 改在哪 |
+| ID | Problem | Where changed |
 | --- | --- | --- |
-| N1 | 运行中复核和最终判定用同一份 holdout，偏向共享臂 | D66 两份 holdout |
-| N4 | B1 在 holdout 存在之前就跑；§14 和附录 C 的时序不一致 | holdout 第 1 天切好；附录 C 第一天的 5 worker 是 smoke 不是正式臂 |
-| 阈值 | 3/3 的标准在测方差之前就定了 | D42 规则 4 改为两步：先试跑测方差再封存 |
-| N5 | 最终选择的 n 怎么增长没定义 | D66：n = params.verdict\_n 固定 |
-| A4 | 分钟级 eval 的 PoC 测不到稀缺 | D70：L1 和 L2 都保留人造稀缺 |
-| N7 | 臂不隔离：B1 worker 能读其他 worker 的候选；12 次运行没分开 | D67 |
-| N8 | worker 能直接 git push 绕过工具检查 | D68 |
-| C8 | 候选格式未定义 | D69 |
-| N2 | 第 4 周之前没有 checkpoint，但 result\_ready 引用了它 | D55：H1 阶段 seed\_context 和 submitter\_checkpoint 可空 |
+| N1 | In-run rechecks and the final verdict use the same holdout, which favors the sharing arms | D66 two holdouts |
+| N4 | B1 runs before the holdout exists; the timelines in §14 and Appendix C disagree | The holdout is split on day 1; the 5 workers on the first day in Appendix C are a smoke run, not a formal arm |
+| Threshold | The 3/3 criterion was fixed before variance was measured | D42 rule 4 changed to two steps: first a trial run to measure variance, then seal |
+| N5 | How n grows for the final selection is undefined | D66: n = params.verdict\_n, fixed |
+| A4 | A PoC with minute-scale evals cannot measure scarcity | D70: L1 and L2 both keep artificial scarcity |
+| N7 | Arms are not isolated: B1 workers can read other workers' candidates; the 12 runs are not separated | D67 |
+| N8 | Workers can git push directly and bypass the tool checks | D68 |
+| C8 | The candidate format is undefined | D69 |
+| N2 | There are no checkpoints before Week 4, but result\_ready references one | D55: in the H1 phase, seed\_context and submitter\_checkpoint may be empty |
 
-## 附录 B：假想 case 走查
+## Appendix B: Walkthrough of a hypothetical case
 
-用一个假想问题把每个机制都走一遍（走查写于 v1，机制在 v2 中编号为 D1 到 D58，逻辑未变）。所有分数、次数、agent 编号都是示意，用来看机制怎么咬合，不是预测。
+This walks every mechanism through one hypothetical problem (the walkthrough was written for v1; in v2 the mechanisms are numbered D1 to D58, and the logic is unchanged). All scores, counts and agent numbers are illustrative. They show how the mechanisms mesh; they are not predictions.
 
-**问题**
+**Problem**
 
-把一个 7B 开源模型在一套数学推理 benchmark 上的分数从 61 提到 70，只改 post-training 数据配方，不改模型。Eval：T2 = 8 张 GPU 跑 6 小时 SFT 再评测，eval 是外部系统，10 并发，每天约 40 次 T2 名额。T1 = 1B 模型 40 分钟 + benchmark 子集，T0 = 数据格式和去重统计，秒级。T3 = 人维护的 holdout benchmark 变体。
+Raise an open-source 7B model's score on a math-reasoning benchmark from 61 to 70 by changing only the post-training data recipe, not the model. Eval: T2 = 6 hours of SFT on 8 GPUs, then evaluation; eval is an external system with 10 concurrent runs and about 40 T2 eval slots per day. T1 = 40 minutes on a 1B model + a benchmark subset. T0 = data-format and deduplication statistics, in seconds. T3 = a holdout variant of the benchmark, maintained by humans.
 
-**Day 0：对齐（两小时）**
+**Day 0: Alignment (two hours)**
 
-| 步骤 | 发生了什么 | 落到仓库 |
+| Step | What happened | Written to the repo |
 | --- | --- | --- |
-| 人描述 | "61 到 70，只改数据，不许任何形式的 benchmark 污染" | transcript.ptr |
-| Teach-back | PI agent 复述，列出三条默认假设：只允许 SFT；数据来源限于现有 3 个数据池；70 指 T3 分数 | assumptions.md |
-| 人纠正 | 第一条错，RL 可以但预算小；第二条对，合成数据可以但要标来源；第三条对 | assumptions.md 更新 |
-| 品味 | "要知道为什么有效，不要堆数据"；"一条过滤规则比十个 trick 好" | taste.md |
-| 方向 | PI 提 5 个：a-01 用 verifier 过滤错解；a-02 难度课程；a-03 合成多步推理数据；a-04 格式一致性；a-05 小预算 RL | approaches/ |
-| 分歧 | PI 认为 a-04 低价值，人坚持保留，预算 10% | disagreements.md |
-| 升级规则 | kill 预算超 30% 的方向要人；T3 跌超 2 点要人；Critic 推翻当前最优要人；超时 8 小时冻结 | escalation.md |
-| 签字 | status → aligned。PI 从自己的 checkpoint fork 首波 12 个 worker（每方向 2 到 3 个，goal 各异），其余 38 个从任务队列领常规任务 | status.md、checkpoints/pi/ |
+| Human describes | "61 to 70, change only the data, no benchmark contamination of any kind" | transcript.ptr |
+| Teach-back | The PI agent restates it and lists three default assumptions: only SFT is allowed; data sources are limited to the existing 3 data pools; 70 means the T3 score | assumptions.md |
+| Human corrects | The first is wrong: RL is allowed, but with a small budget; the second is right: synthetic data is allowed, but its source must be labeled; the third is right | assumptions.md updated |
+| Taste | "I want to know why it works, not pile up data"; "one filtering rule beats ten tricks" | taste.md |
+| Approaches | The PI proposes 5: a-01 filter out wrong solutions with a verifier; a-02 difficulty curriculum; a-03 synthetic multi-step reasoning data; a-04 format consistency; a-05 small-budget RL | approaches/ |
+| Disagreement | The PI thinks a-04 is low value; the human insists on keeping it, with a 10% budget | disagreements.md |
+| Escalation rules | Killing an approach that holds more than 30% of the budget needs the human; a T3 drop of more than 2 points needs the human; the Critic overturning the current best needs the human; freeze after an 8-hour timeout | escalation.md |
+| Sign | status → aligned. The PI forks the first wave of 12 workers from its own checkpoint (2 to 3 per approach, each with a different goal); the other 38 pick up regular tasks from the task queue | status.md, checkpoints/pi/ |
 
-**Day 1：启动**
+**Day 1: Launch**
 
-| 时间 | 角色 | 事件 | 机制 |
+| Time | Role | Event | Mechanism |
 | --- | --- | --- | --- |
-| 0 到 2 小时 | 全部 worker | 读 spec.md 和 digest（此时为空），在 sandbox 里分析数据池，大量 T0 提交 | 任务形态是"推进整个问题"，没有"读数据池 X"这种切片 |
-| 3 小时 | worker-07（a-01） | 提交候选 c-9f3a，predicted 64.0，理由"verifier 过滤掉 18% 错解"。Hook 检索无相似候选。T1 相对 baseline +2.1，进 T2 队列 | eval\_request 前强制检索；带预测提交 |
-| 4 小时 | worker-19（a-01） | 提交几乎相同的候选。Hash 不同，但 hook 报告"与 c-9f3a 相似度 0.93，已在 T2 队列"。worker-19 撤回，改做 verifier 的变体 | 去重在提交前发生，省下一次 T2 |
-| 6 小时 | Eval service | 首批 T2 结果：c-9f3a 实际 63.4，误差 -0.6。result\_ready 事件绑定 worker-07 提交时的 checkpoint；它已结束那个任务，Indexer 以该 checkpoint 为 seed 生成后续任务，被 worker-07 自己领走继续 | 预测记录 |
-| 6.5 小时 | Librarian-a01 | 第 10 个 commit 触发，写 a-01 的 digest，提炼 insight c-0102："过滤后数据的难度分布明显左移" | Librarian 从 diff 提炼 insight |
-| 8 小时 | worker-23（a-03） | 发现合成数据里多步题的 T1 失败集中在"单位换算"子类。调 surprise() 写 claim，附一个能跑的 notebook 复现。调 fork() 起一个兄弟追这条线，自己继续主线 | 线索变成可执行 artifact；fork 代替 handoff |
+| Hours 0 to 2 | All workers | Read spec.md and the digest (empty at this point), analyze the data pools in the sandbox, submit many T0 runs | The task shape is "advance the whole problem"; there are no slices like "read data pool X" |
+| Hour 3 | worker-07 (a-01) | Submits candidate c-9f3a, predicted 64.0, rationale "the verifier filters out 18% of wrong solutions". The hook's search finds no similar candidate. T1 is +2.1 relative to baseline; it enters the T2 queue | Mandatory search before eval\_request; submissions carry a prediction |
+| Hour 4 | worker-19 (a-01) | Submits a nearly identical candidate. The hash differs, but the hook reports "similarity 0.93 to c-9f3a, already in the T2 queue". worker-19 withdraws it and works on a variant of the verifier instead | Deduplication happens before submission, saving one T2 run |
+| Hour 6 | Eval service | First batch of T2 results: c-9f3a actually scores 63.4, an error of -0.6. The result\_ready event is bound to the checkpoint worker-07 had when it submitted; worker-07 has already finished that task, so the Indexer generates a follow-up task seeded from that checkpoint, and worker-07 itself picks it up and continues | Prediction recording |
+| Hour 6.5 | Librarian-a01 | Triggered by the 10th commit, it writes the a-01 digest and distills insight c-0102: "the difficulty distribution of the filtered data shifts clearly to the left" | The Librarian distills insights from diffs |
+| Hour 8 | worker-23 (a-03) | Finds that T1 failures on multi-step problems in the synthetic data concentrate in the "unit conversion" subcategory. Calls surprise() to write a claim, with a runnable notebook that reproduces it attached. Calls fork() to start a sibling that pursues this lead, and continues on its own main line | A lead becomes an executable artifact; fork replaces handoff |
 
-**Day 2：第一次分配，第一次复用，第一次硬中断**
+**Day 2: First allocation, first reuse, first hard interrupt**
 
-| 时间 | 角色 | 事件 | 机制 |
+| Time | Role | Event | Mechanism |
 | --- | --- | --- | --- |
-| 早 | Planner | 首批完整 T2 结果到齐后首次运行。a-01 领先，a-04 无进展。写 decisions：a-01 份额 35%，a-04 降到 5%（不 kill，因为 disagreements.md 里有记录），exploration 30% | Planner 读 digest 不读轨迹；决定带理由 |
-| 上午 | worker-31（a-02） | 连续 3 次 T1 失败。Hook 强制刷新 digest 和检索，看到 c-0102"过滤后难度左移"，意识到自己的课程切分点基于过滤前的分布。改切分点后 T1 +1.4 | 卡住时多读；insight 跨方向复用，reuse\_count +1 |
-| 下午 | Critic-1 | 审计 a-04 的高分 claim c-0211，发现"格式一致性的效果"实际来自 eval 解析器的一个 bug。发 refuted 事件，写 audit claim | Critic 是唯一能读 eval 代码的角色 |
-| 下午 | Router | worker-12 的 lease 里 target\_claims 含 c-0211 的子 claim，depends\_on 命中 refuted → 硬中断，附 audit。worker-12 在下一个 tool call 边界收到，checkpoint 后释放 lease，转领新任务 | 规则 4；中断只在 tool call 边界生效 |
+| Early morning | Planner | Runs for the first time once the first batch of complete T2 results is in. a-01 leads; a-04 has made no progress. Writes decisions: a-01 share 35%, a-04 cut to 5% (not killed, because disagreements.md has a record of it), exploration 30% | The Planner reads digests, not traces; decisions carry a rationale |
+| Morning | worker-31 (a-02) | Fails T1 3 times in a row. The hook forces a digest refresh and a search; it sees c-0102 "difficulty shifts left after filtering" and realizes that its curriculum split points were based on the pre-filtering distribution. After it changes the split points, T1 +1.4 | Read more when stuck; insights are reused across approaches, reuse\_count +1 |
+| Afternoon | Critic-1 | Audits a-04's high-scoring claim c-0211 and finds that the "format consistency effect" actually comes from a bug in the eval parser. Emits a refuted event and writes an audit claim | The Critic is the only role that can read eval code |
+| Afternoon | Router | The target\_claims in worker-12's lease include a child claim of c-0211, and depends\_on hits the refuted → hard interrupt, with the audit attached. worker-12 receives it at the next tool call boundary, checkpoints, releases the lease and picks up a new task | Rule 4; interrupts take effect only at tool call boundaries |
 
-**Day 3：Reward hacking 和一次升级**
+**Day 3: Reward hacking and an escalation**
 
-| 时间 | 角色 | 事件 | 机制 |
+| Time | Role | Event | Mechanism |
 | --- | --- | --- | --- |
-| 早 | worker-41（a-03） | 候选 c-77be 的 T1 +5.8，是历史最高的 2.5 倍 | 跳升超 2 个标准差 → 告警不是庆祝 |
-| 早 | Eval service | 自动把 c-77be 送 Critic，暂停其 T2 | 跳升自动触发 Critic |
-| 中午 | Critic-2 | 审计发现合成数据的生成模板是 benchmark 题目的改写，语义污染。请求 T3：-0.3。发 refuted；c-77be 的两个子代一并标 refuted | T3 只有 Critic 能请求 |
-| 中午 | Router | 两个在 c-77be 基础上工作的 worker 被硬中断 | 规则 4 |
-| 下午 | Planner → PI agent | 命中 escalation 的"Critic 推翻当前最优"。PI 带给人："改写级别的相似算不算污染？"三个选项：A 任何与 benchmark 模板相似度超 0.8 的合成数据禁止；B 只禁原题；C 允许但在 T3 单独报告。Planner 倾向 A。超时默认：冻结 a-03 | escalation 格式固定 |
-| 下午 | 人 | 选 A。PI 改 constraints.md，status → revising，向 a-03 的 worker 软注入，改回 aligned | 改航向走 charter，不走 prompt |
-| 晚 | Librarian-a03 | 写 dead\_end claim："合成数据模板源于 benchmark 的任何形式都是 dead end，T3 不涨"。后续任何 a-03 的 eval\_request 前检索都会撞到它 | dead\_end 是一等公民 |
+| Early morning | worker-41 (a-03) | Candidate c-77be scores T1 +5.8, 2.5 times the historical best | A jump of more than 2 standard deviations → an alert, not a celebration |
+| Early morning | Eval service | Automatically sends c-77be to the Critic and pauses its T2 | A jump automatically triggers the Critic |
+| Noon | Critic-2 | The audit finds that the synthetic data's generation templates are rewrites of benchmark questions: semantic contamination. Requests T3: -0.3. Emits refuted; c-77be's two descendants are marked refuted as well | Only the Critic can request T3 |
+| Noon | Router | Two workers building on c-77be get hard interrupts | Rule 4 |
+| Afternoon | Planner → PI agent | Hits the "Critic overturns the current best" escalation rule. The PI brings it to the human: "Does rewrite-level similarity count as contamination?" Three options: A, ban any synthetic data whose similarity to a benchmark template exceeds 0.8; B, ban only the original questions; C, allow it but report T3 separately. The Planner leans toward A. Timeout default: freeze a-03 | The escalation format is fixed |
+| Afternoon | Human | Chooses A. The PI edits constraints.md, sets status → revising, soft-injects into a-03's workers, and changes it back to aligned | Course changes go through the charter, not through prompts |
+| Evening | Librarian-a03 | Writes a dead\_end claim: "synthetic data whose templates derive from the benchmark in any form is a dead end; T3 does not rise". From then on, the search before every a-03 eval\_request hits it | dead\_end is a first-class citizen |
 
-**Day 4：全景过程和人的洞察**
+**Day 4: The big-picture pass and a human insight**
 
-| 时间 | 角色 | 事件 | 机制 |
+| Time | Role | Event | Mechanism |
 | --- | --- | --- | --- |
-| 早 | Scout（全景 agent） | 读全部 digest，抽查 surprise claim。发现 a-01 过滤后的难度左移和 a-02 课程后半段数据不足是同一件事的两面。写 cross\_approach insight，并直接从全景上下文 fork 出 worker-52，goal："过滤 + 对过滤后的难度缺口做定向合成，只用非 benchmark 来源" | 跨方向 click 由一个持有全貌的脑子产生；fork 不写任务描述 |
-| 上午 | 人 → PI agent | "我记得有篇论文说 SFT 数据里保留一定比例的错误解加 critique 反而有帮助。" PI 写 author=human 的 claim，evidence 指向这段对话，标注 a-01 | 人的洞察无损入库 |
-| 上午 | Router | 规则 5 命中，a-01 的 worker 硬中断看到。worker-07 用 ask\_checkpoint 问 PI 那段对话里人有没有提具体比例，得到"没有，人也不确定"，fork 一个兄弟去扫比例 | 回头问 |
+| Early morning | Scout (big-picture agent) | Reads all digests and spot-checks surprise claims. Finds that the leftward difficulty shift after a-01's filtering and the shortage of data in the second half of a-02's curriculum are two sides of the same thing. Writes a cross\_approach insight and forks worker-52 directly from its big-picture context, with goal: "filtering + targeted synthesis to fill the difficulty gap left after filtering, using only non-benchmark sources" | The cross-approach click comes from one mind that holds the full picture; fork writes no task description |
+| Morning | Human → PI agent | "I remember a paper saying that keeping a certain share of wrong solutions plus critiques in SFT data actually helps." The PI writes a claim with author=human, with evidence pointing to this conversation, tagged a-01 | Human insight enters the store without loss |
+| Morning | Router | Rule 5 hits, and a-01's workers see it through a hard interrupt. worker-07 uses ask\_checkpoint to ask the PI whether the human mentioned a specific proportion in that conversation, gets "no, the human isn't sure either", and forks a sibling to sweep the proportion | Ask back |
 
-**Day 5 到 7：收敛**
+**Days 5 to 7: Convergence**
 
-| 时间 | 角色 | 事件 | 机制 |
+| Time | Role | Event | Mechanism |
 | --- | --- | --- | --- |
-| Day 5 | worker-52 | 候选 c-c1d0：predicted 67.5，T1 +4.9，T2 66.8，T3 66.5。Critic 审计通过：得分来自难度覆盖，不是污染。verified | 跨方向 insight 兑现 |
-| Day 5 | worker-07 的 fork | critique 数据比例扫到 15% 最好，在 c-c1d0 基础上 T2 +0.8。合并候选 c-e4a2 T2 67.9 | 人的洞察兑现 |
-| Day 6 | Planner | 把 a-05 的小预算 RL 放到 c-e4a2 上。T2 69.2，T3 68.9 | 预算跟着进展走 |
-| Day 7 | PI agent → 人 | 汇报：T3 68.9，目标 70 未达；按 progress.md 的定义（每周 +4 为显著进展）属于显著进展。建议下周重点：RL 预算上调、a-04 关闭 | 汇报三行 |
+| Day 5 | worker-52 | Candidate c-c1d0: predicted 67.5, T1 +4.9, T2 66.8, T3 66.5. The Critic's audit passes: the score comes from difficulty coverage, not contamination. verified | The cross-approach insight pays off |
+| Day 5 | worker-07's fork | The sweep of the critique-data proportion finds 15% best, giving T2 +0.8 on top of c-c1d0. Merged candidate c-e4a2: T2 67.9 | The human insight pays off |
+| Day 6 | Planner | Puts a-05's small-budget RL on top of c-e4a2. T2 69.2, T3 68.9 | Budget follows progress |
+| Day 7 | PI agent → Human | Report: T3 68.9, the target of 70 is not reached; by the definition in progress.md (+4 per week counts as significant progress), this is significant progress. Suggested focus for next week: raise the RL budget, close a-04 | A three-line report |
 
-**七天后的账（示意）**
+**The accounting after seven days (illustrative)**
 
-| 指标 | 数值 | 说明 |
+| Metric | Value | Notes |
 | --- | --- | --- |
-| T2 使用 | 268 / 280 | 去重和 T1 筛掉了约 60% 的提交 |
-| 最优 T3 | 61 → 68.9 | B1 best-of-N 对照组同期 65.1；S1 只共享分数 66.3 |
-| dead\_end 重走次数 | 7 次 | 其中 4 次是跨方向的 dead\_end 在 diff 排序里排太后，worker 没看到。改排序规则 |
-| insight 复用 | 12 条中 5 条 reuse ≥ 2，最高 7 | 最高的是 c-0102"过滤后难度左移" |
-| 预测误差中位 | 0.9 分 | worker-07 和 worker-52 最准，队列权重上调 |
-| 候选多样性 | Day 2 触发趋同告警 | exploration 从 30% 上调到 40% 后恢复 |
-| Critic refuted | 3 次 | 一次 eval bug，一次语义污染，一次子代连带 |
-| Handoff 实验 | 摘要组 +0.6，轨迹组 +1.7，fork 组 +3.1（T1 均值） | fork 和摘要差 5 倍，通信层预算按此调 |
+| T2 usage | 268 / 280 | Deduplication and T1 screened out about 60% of submissions |
+| Best T3 | 61 → 68.9 | Over the same period, the B1 best-of-N control group reached 65.1; S1, sharing only scores, reached 66.3 |
+| dead\_end re-walk count | 7 | 4 of them were cross-approach dead\_ends ranked too low in the diff ordering, so workers didn't see them. Change the ranking rule |
+| insight reuse | 5 of 12 have reuse ≥ 2; the highest is 7 | The highest is c-0102 "difficulty shifts left after filtering" |
+| Median prediction error | 0.9 points | worker-07 and worker-52 are the most accurate; their queue weights are raised |
+| Candidate diversity | A convergence alert fired on Day 2 | Recovered after exploration was raised from 30% to 40% |
+| Critic refuted | 3 | One eval bug, one semantic contamination, one descendant refuted along with its parent |
+| Handoff experiment | Summary group +0.6, trace group +1.7, fork group +3.1 (T1 mean) | fork and summary differ by 5x; the communication-layer budget is adjusted accordingly |
 
-**这个 case 验证了什么，没验证什么**
+**What this case verified, and what it did not**
 
-验证了：九条原则各自在至少一个事件里起了作用；eval 稀缺下提交前的检索和预测能省下大量 T2；硬中断在 refuted 传播时有用；人的介入通过 charter 和 claim 两条路都能无损进入。
+Verified: each of the nine principles played a role in at least one event; under eval scarcity, the search and prediction before submission save a large number of T2 runs; hard interrupts are useful when a refuted propagates; human input enters without loss through both paths, the charter and claims.
 
-没验证：Planner 的分配决定是否最优（没有对照）；全景过程如果没发现那个 click 系统会怎样；50 个 worker 是不是真的比单个强 agent 好（要和 B0 比，这个 case 没跑 B0）。
+Not verified: whether the Planner's allocation decisions are optimal (there is no control); what the system would do if the big-picture pass had not found that click; whether 50 workers really beat a single strong agent (that needs a comparison with B0, and this case did not run B0).
 
-## 附录 C：PoC 启动包（给实现 agent 的第一条指令）
+## Appendix C: PoC kickoff pack (the first instruction to the implementation agent)
 
-这一页可以直接作为给实现 agent 的第一条消息。它的第一个交付物不是代码，是一份落地计划，人批了再写代码。
+This page can be used as-is as the first message to the implementation agent. Its first deliverable is not code. It is an implementation plan, and code gets written only after the human approves it.
 
-前置：测试台（另一份文档《Herd 测试台》）的前 3 天先完成，预检四条全过；herd 的 Eval service 只是它慢档服务的客户端。**范围**：第 14 节"门槛前"那一栏。不做 fork、PI agent、Planner、Critic 的 LLM 审计、surge。目标是第 3 周末跑出 S2（Planner 关）对 B1 @ 5 个 worker 的预注册判定（运行次数按 D72 试点算；预算不够就标为探索性运行），把 H1 变成已验证或已推翻。
+Prerequisite: the first 3 days of the testbed (the separate document *Herd Testbed*, `herd-testbed.md`) are done first, and all four prechecks pass; the herd's Eval service is only a client of the testbed's slow-tier service. **Scope**: the "before the gate" column of §14. Do not build fork, the PI agent, the Planner, the Critic's LLM audit, or surge. The goal: by the end of Week 3, produce a preregistered verdict for S2 (Planner off) vs B1 @ 5 workers (compute the number of runs from the D72 pilot; if the budget is not enough, label them exploratory runs), and so turn H1 into verified or refuted.
 
-**第一个交付物（第 1 天）：落地计划，含五样东西**
+**First deliverable (Day 1): an implementation plan with five parts**
 
-1. interfaces.md：task、event（含 Integrator 的新事件）、lease（含 files\_touched）、eval\_request（含 baseline）、baseline/\<k>.json 的 schema，以第 5、9 节为准，补齐字段类型和错误码；臂开关表（D58）的最终版；`router/rules.yaml` 的格式和第一版规则；`charter/params.yaml` 的键；私有存储的布局和凭证边界（D63）；D62 的 holdout 重评流程。
-2. 端口接口的代码：第 4.1 节的六个端口写成接口文件，加内存适配器和本地子进程 Executor。这是 herd 作为独立 runtime 的边界，先于任何集群或 harness 的接入。Harness 的第一个适配器用 Claude Code headless，herd 工具通过 MCP 工具服务暴露且 hook 在服务端；中断检查用 Claude Code 的 PreToolUse hook；心跳和兜底在 Executor sidecar（D60 三层）。k8s 是 Executor 的第二个适配器，第 4 周接，映射表见下。
-3. 仓库骨架：第 5 节的目录，空文件和 schema 示例。
-4. 第 1 到 3 周的里程碑，每周末的门槛按第 14 节。
-5. 下面这张问题表的答案栏，空着的不能自己猜。
+1. interfaces.md: the schemas for task, event (including the Integrator's new events), lease (including files\_touched), eval\_request (including baseline) and baseline/\<k>.json, following §5 and §9, with field types and error codes filled in; the final version of the arm switch table (D58); the format and first set of rules for `router/rules.yaml`; the keys of `charter/params.yaml`; the private store's layout and credential boundary (D63); the holdout re-evaluation process from D62.
+2. Port interface code: write the six ports of §4.1 as interface files, plus in-memory adapters and a local-subprocess Executor. This is the boundary of herd as an independent runtime, and it comes before integrating any cluster or harness. The first Harness adapter uses Claude Code headless; herd tools are exposed through the MCP tool service, with their hooks on the server side; the interrupt check uses Claude Code's PreToolUse hook; heartbeat and backstop live in the Executor sidecar (the three layers of D60). k8s is the Executor's second adapter, integrated in Week 4; see the mapping table below.
+3. Repository skeleton: the directories from §5, with empty files and schema examples.
+4. Milestones for Weeks 1 to 3, with the gate at the end of each week as set in §14.
+5. The answer column of the question table below. Do not guess any that are left blank.
 
-**k8s Executor 适配器的默认映射（第二个适配器，第 4 周；实现 agent 读集群仓库后填实）**
+**Default mapping for the k8s Executor adapter (the second adapter, Week 4; the implementation agent fills in the details after reading the cluster repo)**
 
-| 设计组件 | k8s 资源 | 说明 |
+| Design component | k8s resource | Notes |
 | --- | --- | --- |
-| Worker × N | 一个 Deployment，replicas = 总 slot 数 | 方向之间的分配是队列权重，不是 pod 数；surge 只改权重，必要时再 scale |
-| sandbox | 每任务一个临时 pod，或 worker pod 内的子容器 | 工作目录挂 PVC 或任务结束时 tar 到对象存储，作为 checkpoint 的一半 |
-| git 仓库 + CI hook | 单副本 StatefulSet 跑 git server，pre-receive 做同步检查，post-receive 调 Indexer | 热备副本按已有模式 |
-| merge queue | 单副本 Deployment，串行 ff-merge，分配 seq | 单副本是刻意的，seq 必须全局单调 |
-| Indexer | Deployment，接 post-receive 的 webhook | SQLite 加向量扩展，或集群里已有的数据库 |
-| KV：lease、任务队列、eval 队列状态 | 集群里已有的 Redis 或等价物 | 没有就加一个 |
-| Eval service | Deployment，对外部 eval 系统的客户端加队列 | 外部 eval 时它很薄 |
-| Budget meter | Indexer 的一部分或独立小服务 |  |
-| 对象存储：轨迹、checkpoint | 集群已有的 |  |
-| Librarian、Critic、PI agent | 各一个 Deployment 或 CronJob | PI agent 是长期存在的单副本 |
-| pod 间通信层 | 只给基础设施 RPC 用：worker 调 Eval service、读写 KV | 不给 agent 互发消息用（D38），否则黑板不完整 |
+| Worker × N | One Deployment, replicas = total slot count | Allocation between approaches is queue weight, not pod count; surge changes only the weights, and scales only if necessary |
+| sandbox | One ephemeral pod per task, or a sub-container inside the worker pod | The working directory is mounted on a PVC, or tarred to the object store when the task ends, as one half of the checkpoint |
+| git repo + CI hook | A single-replica StatefulSet runs the git server; pre-receive runs the sync checks, post-receive calls the Indexer | Hot-standby replica following the existing pattern |
+| merge queue | Single-replica Deployment, serial ff-merge, assigns seq | The single replica is deliberate: seq must be globally monotonic |
+| Indexer | Deployment, receives the post-receive webhook | SQLite plus a vector extension, or a database that already exists in the cluster |
+| KV: leases, task queue, eval queue state | Redis or an equivalent that already exists in the cluster | If there is none, add one |
+| Eval service | Deployment: a client for the external eval system plus a queue | With an external eval, it is thin |
+| Budget meter | Part of the Indexer, or a small standalone service |  |
+| Object store: traces, checkpoints | The cluster's existing one |  |
+| Librarian, Critic, PI agent | One Deployment or CronJob each | The PI agent is a long-lived single replica |
+| Inter-pod communication layer | Only for infrastructure RPC: workers calling the Eval service, reading and writing KV | Not for agents to message each other (D38); otherwise the blackboard is incomplete |
 
-**必须先问人的问题**
+**Questions you must ask the human first**
 
-| 问题 | 为什么不能猜 |
+| Question | Why you cannot guess |
 | --- | --- |
-| PoC 用哪个具体问题；eval 的延迟、日配额、并发；有没有 holdout | 决定阶梯、配额、要不要本地代理。系统本身用测试台的问题 A、B 验，不用真问题；L2 的真问题即使 eval 快也要由慢档服务强制人造稀缺（latency ≥ 10 分钟，全队每小时 2 次） |
-| 门槛的预注册：效应量、N 是 5 还是 10、seed 数、每臂 eval 机器小时 | 没有预注册的对照不可判（D42） |
-| 用哪个 harness、哪个模型 ID（所有角色同一个）；API 的并发和速率上限 | 决定 hook 机制和 checkpoint 格式；决定能同时开多少个 agent |
-| 谁手写 spec.md 和首批 approaches；每方向几个 slot | H1 阶段没有 PI agent |
-| 集群仓库的访问权；集群里已有哪些服务（KV、对象存储、git、镜像仓库、数据库）；worker pod 的资源规格和总数上限 | 决定选型 |
-| 每个 source 的 trust 和 readable\_by（D45）；私有存储用另一个仓库还是对象存储 bucket；worker pod 的凭证怎么隔离 | 决定定义放黑板还是私有存储（D63）；隔离做不到则反 hacking 全部失效 |
+| Which concrete problem the PoC uses; the eval's latency, daily quota and concurrency; whether there is a holdout | Determines the ladder, the quota, and whether a local proxy is needed. The system itself is validated on the testbed's problems A and B, not on the real problem; for the real problem at L2, even if eval is fast, the slow-tier service must enforce artificial scarcity (latency ≥ 10 minutes, 2 per hour for the whole team) |
+| Preregistration for the gate: effect size, whether N is 5 or 10, number of seeds, eval machine-hours per arm | A comparison without preregistration cannot reach a verdict (D42) |
+| Which harness and which model ID (the same for all roles); the API's concurrency and rate limits | Determines the hook mechanism and the checkpoint format; determines how many agents can run at once |
+| Who hand-writes spec.md and the first approaches; how many slots per approach | There is no PI agent in the H1 phase |
+| Access to the cluster repo; which services already exist in the cluster (KV, object store, git, image registry, database); the worker pod's resource spec and the cap on the total number of pods | Determines technology choices |
+| Each source's trust and readable\_by (D45); whether the private store is a separate repo or an object-store bucket; how worker pod credentials are isolated | Determines whether definitions go on the blackboard or in the private store (D63); if isolation cannot be achieved, all anti-hacking measures fail |
 
-**计划批准后，第一天的三件事**
+**After the plan is approved: three things for the first day**
 
-1. 用内存适配器在一个进程里跑通整个 herd 的微型版：一个玩具问题、假 SignalSource（固定延迟返回分数）、两个 worker，走完 claim\_task → eval\_request → result\_ready → 后续任务的闭环。这是以后每次改动的回归测试。
-2. 换上真 git、KV 和本地子进程 Executor，同一套 L2 代码在测试台问题 A 上起 5 个孤立 worker 跑一小时作为 smoke（不是正式臂），拿到第一条 best\_score 诊断曲线，并走一遍 Integrator（合入、复测、抽查、收尾）和 holdout\_verdict 流程确认判定管线能通。B1 是所有臂的底座，先跑它最不浪费；5 到 10 个 worker 一台大机器就够，k8s 要到 20 以上才需要。
-3. 把跑出来的第一个坏掉的地方写成第 13 节的新行。
+1. Using the in-memory adapters, run a miniature version of the whole herd end to end in one process: one toy problem, a fake SignalSource (returns scores after a fixed delay), two workers, completing the loop claim\_task → eval\_request → result\_ready → follow-up task. This is the regression test for every later change.
+2. Swap in real git, KV and the local-subprocess Executor. With the same L2 code, start 5 isolated workers on testbed problem A and run them for one hour as a smoke run (not a formal arm). Get the first best\_score diagnostic curve, and walk once through the Integrator (merge, remeasure, spot check, closeout) and the holdout\_verdict flow to confirm that the verdict pipeline works end to end. B1 is the base of every arm, so running it first wastes the least; 5 to 10 workers fit on one large machine, and k8s is needed only at 20 or more.
+3. Write the first thing that breaks as a new row in §13.
 
-**第一轮的完成定义**
+**Definition of done for the first round**
 
-- L0 的 20 条断言和测试台问题 A 的记分卡全绿（§14.1）；然后 S2 对 B1+M @ 5，运行次数按 D72 试点算出（预算不够就标为探索性运行），按预注册标准出结果。赢、输、不可判，三种都算完成。
-- 四个常设指标的 dashboard 能看。
-- 登记表里被这一轮碰到的每条 D 标了"验证 / 推翻 / 未触及"。
-- 一份复盘：哪些 hook 和默认值起了作用，下一轮的默认值改成什么。
+- The 20 L0 assertions and the scorecard for testbed problem A are all green (§14.1); then run S2 vs B1+M @ 5, with the number of runs computed from the D72 pilot (if the budget is not enough, label them exploratory runs), and produce the result by the preregistered criteria. Win, lose or no verdict: all three count as done.
+- The dashboard for the four standing metrics is viewable.
+- Every D in the register that this round touched is marked "verified / refuted / not exercised".
+- A retrospective: which hooks and defaults made a difference, and what the defaults change to for the next round.
 
-**不要做的事**
+**Don't**
 
-- 不要先把全部组件写完再跑。先跑 B1。
-- 不要在没有预注册的情况下开始对照。
-- 不要自己决定 PoC 用什么问题。
-- 碰到文档里没定义的东西，先查第 15 节；没有就加一行 D 并标"实现时定"，不要悄悄决定。
+- Don't write all the components before running anything. Run B1 first.
+- Don't start a comparison without preregistration.
+- Don't decide on your own which problem the PoC uses.
+- When you hit something the document doesn't define, check §15 first; if it isn't there, add a D row marked "decided during implementation". Don't decide it silently.

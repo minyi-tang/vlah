@@ -1,123 +1,133 @@
-```
-给 Fable 的修改清单：Research Herd v2.2
-结论： 方向对。保留 v2 的任务形态、不按杠杆派活是对的。问题在于 D72 到 D78 是以独立段落加进来的，没有接进 schema、组件表、臂开关表、周计划、L0 测试和附录 C。实现者照 §5、§6、§14 和附录 C 做，会得到一个没有 Integrator 的系统；照 D74 做，Integrator 又只在 S2 里有。
-
-对象： ~/Documents/Research-Herd-Design-v2.2.md（1,130 行）。行号指这一版。
+# v2.2 Fixes Review (revision list for Research Herd v2.2)
 
 ```
+Revision list for Fable: Research Herd v2.2
+Conclusion: The direction is right. Keeping v2's task shape and not assigning work by
+leverage is correct. The problem is that D72 to D78 were added as standalone paragraphs
+and were not wired into the schema, the component table, the arm switch table, the weekly
+plan, the L0 tests or Appendix C. An implementer who follows §5, §6, §14 and Appendix C
+will get a system with no Integrator; one who follows D74 gets an Integrator that exists
+only in S2.
 
-**用法：**
-- 标 **【需人定】** 的是设计决定，请先问人，不要自己定。
-- 其余是改文。每条写了改哪里、怎么改。
+Target: ~/Documents/Research-Herd-Design-v2.2.md (1,130 lines). Line numbers refer to
+this version.
+
+```
+
+*English translation of the Chinese original (`zh/research-herd-v2.2-fixes.md`). Its changes are already applied to v2.2 (round 30); it is kept as a record. Line numbers refer to the Chinese v2.2 file.*
+
+**Usage:**
+- Items marked **[Needs a human decision]** are design decisions. Ask a human first; don't decide them yourself.
+- Everything else is a text change. Each item says where to change and how.
 
 ---
 
-## 〇、先请人定的四件事
+## 0. Four things to ask a human to decide first
 
-1. **Integrator 是否各臂都跑**（建议：是，见第一节）。
-2. **D78 预审**：H1 阶段推迟，还是各臂相同、由不读 eval 代码的预审员做（建议：推迟，见第四节）。
-3. **S1 的 worker 能否收到 `baseline_advanced` 和更新后的地图**（建议：能。它是分数类事件，S1 本来就共享分数）。
-4. **周计划顺延**：试点必须在 S2 全部组件建完后才能跑，第 3 周装不下"建完 + 试点 + 预注册 + 正式运行"（建议：第 3 周末试点，第 4 周预注册并跑正式 H1，原第 4 周内容顺延一周）。
+1. **Whether the Integrator runs in every arm** (recommendation: yes; see section 1).
+2. **D78 pre-screening**: defer it for the H1 phase, or make it the same in every arm and have it done by a pre-screener who does not read the eval code (recommendation: defer; see section 4).
+3. **Whether S1 workers can receive `baseline_advanced` and the updated map** (recommendation: yes. It is a score-type event, and S1 already shares scores).
+4. **Pushing back the weekly plan**: the pilot can only run after all S2 components are built, and week 3 cannot fit "build-out + pilot + preregistration + formal run" (recommendation: pilot at the end of week 3; in week 4, preregister and run the formal H1; shift the original week 4 content back one week).
 
 ---
 
-## 一、【高】Integrator 只在 S2 里，H1 的差值混了两样东西
+## 1. [High] The Integrator exists only in S2, so the H1 difference mixes two things
 
-**问题**
-- D74（第 468–477 行）给 S2 一个运行中的 Integrator：先进先出、rebase、基线动过则配对复测、超过 1 个标准误才合、冲突发 compose 任务。
-- 对照臂仍是结束后 `git apply --3way` 按均值贪心（D74 最后一条）。
-- D62（第 638 行）、D65（第 526 行）和 D58 最后一行都说"所有臂用同一套机械合并流程"，D42 第 1 条的精神也是这样。文中自相矛盾。
+**Problem**
+- D74 (lines 468–477) gives S2 an Integrator that runs during the run: first in, first out; rebase; a paired remeasure if the baseline has moved; merge only above 1 standard error; send a compose task on conflict.
+- The control arms still use a post-run `git apply --3way`, applied greedily by mean (the last item of D74).
+- D62 (line 638), D65 (line 526) and the last row of D58 all say "all arms use the same mechanical merge process", and item 1 of D42 has the same intent. The text contradicts itself.
 
-**例子**（缓存命中率问题）
-- worker A、C、D 都改 `prompt_builder.py`。
-- B1+M 结束后贪心应用：A 先进，C、D 和 A 冲突，被跳过。
-- S2 的 Integrator 让 C、D rebase 到 A 上，冲突发 compose 任务，复测后合入。
-- S2 多出来的分数里，多少来自"共享"，多少来自"合并器更好"，分不出来。给 B1 同一个 Integrator，它可能自己就能捡回大半个 C 和 D。
+**Example** (cache hit rate problem)
+- Workers A, C and D all change `prompt_builder.py`.
+- B1+M applies greedily after the run: A goes in first; C and D conflict with A and are skipped.
+- S2's Integrator rebases C and D onto A, sends a compose task for the conflict, remeasures, and merges.
+- Of S2's extra score, you cannot tell how much comes from "sharing" and how much from "a better merger". Given the same Integrator, B1 might recover most of C and D on its own.
 
-**改法**（建议，需人确认）
-- **合并器各臂相同。** Integrator 在所有臂里运行中都跑，配置相同：接收规则、gate、guard 批次、抽查。复测花的是各臂自己的顶层名额。
-- **"共享"只指 worker 能否看到基线变化。** 也就是能否收到 `baseline_advanced` 并 rebase：
-  - S2 开；
-  - B1 关：worker 一直在 baseline@0 上干，Integrator 在后台合并它们 verified 的候选，worker 看不见；
-  - S1 见〇的第 3 条。
-- **compose 任务的执行者。** B1 里不能交给 B1 的 worker，否则破坏孤立。所以各臂的 compose 都交给 worker 池外的新 agent：每次新开，不带任何臂的上下文，产出只回 Integrator。S2 的 worker 仍可以领 D64 的"组合候选"任务，这属于共享。
-- **最终交付物。** 每臂 = 该臂 Integrator 最后一版非 `guard_pending` 的基线。B1-single 诊断列保留。
-- **同步改文：**
-  - 删去 D74 最后一条（对照臂结束后贪心 git apply）；
-  - 改写 D62 的合并描述、D65 的"H1 检验的是运行中共享相对于结束后合并的增量"（改为"相对于同一合并器下不共享的增量"）、D58 最后一行；
-  - 第 112 行 H1 定义里的"孤立运行、结束后再机械合并的 best-of-N"改为"孤立运行、由同一 Integrator 合并的 best-of-N"；
-  - 登记表 D62、D65、D74 行同步。
+**Fix** (recommended; needs human confirmation)
+- **The merger is the same in every arm.** The Integrator runs during the run in every arm, with the same configuration: acceptance rule, gates, guard batches, spot checks. Remeasures spend each arm's own top-level eval slots.
+- **"Sharing" means only whether workers can see baseline changes.** That is, whether they receive `baseline_advanced` and rebase:
+  - S2: on;
+  - B1: off. Workers keep working on baseline@0. The Integrator merges their verified candidates in the background, and the workers cannot see it;
+  - S1: see item 3 of section 0.
+- **Who runs compose tasks.** In B1 they cannot go to B1's workers, or isolation breaks. So in every arm, compose tasks go to a fresh agent outside the worker pool: a new one each time, carrying no context from any arm, with its output going only to the Integrator. S2 workers can still take D64's "combination candidate" tasks; that counts as sharing.
+- **Final deliverable.** For each arm: the last non-`guard_pending` baseline of that arm's Integrator. Keep the B1-single diagnostic column.
+- **Matching text changes:**
+  - delete the last item of D74 (control arms apply greedily with git apply after the run);
+  - rewrite D62's description of merging; D65's "H1 tests the increment of in-run sharing over post-run merging" (change it to "the increment over no sharing under the same merger"); and the last row of D58;
+  - in the H1 definition on line 112, change "best-of-N run in isolation and then mechanically merged after the run" to "best-of-N run in isolation and merged by the same Integrator";
+  - update the D62, D65 and D74 rows of the register to match.
 
-**D58 新增行**（建议）
+**New rows for D58** (recommended)
 
-| 开关 | B0 | B1 | S1 | S2 |
+| Switch | B0 | B1 | S1 | S2 |
 | --- | --- | --- | --- | --- |
-| Integrator（D74） | 开，同配置 | 开，同配置；worker 不可见 | 开，同配置 | 开，同配置 |
-| `baseline_advanced` 推给 worker、规则 6 | 不适用 | 关 | 【需人定】 | 开 |
-| compose 任务的执行者 | 池外新 agent | 同 | 同 | 同；另外 worker 可领组合任务 |
-| 抽查（D72） | 同一规则 | 同 | 同 | 同 |
-| 出网白名单（D75） | 开 | 开 | 开 | 开 |
-| 不靠 checkpoint 的重启（D77） | 开 | 开 | 开 | 开 |
-| 预审（D78） | 按第四节的决定，各臂相同 | 同 | 同 | 同 |
-| `map/`（D76） | 只有 baseline@0 上的初始地图 | 同 | 【需人定】 | 全开，随 `baseline_advanced` 更新 |
-| 最终交付物 | Integrator 最后一版非 `guard_pending` 的基线；B1-single 作诊断 | 同 | 同 | 同 |
+| Integrator (D74) | On, same config | On, same config; invisible to workers | On, same config | On, same config |
+| `baseline_advanced` pushed to workers, rule 6 | N/A | Off | **[Needs a human decision]** | On |
+| Who runs compose tasks | A fresh agent outside the pool | Same | Same | Same; workers can also take combination tasks |
+| Spot check (D72) | Same rule | Same | Same | Same |
+| Egress allowlist (D75) | On | On | On | On |
+| Restart that does not rely on checkpoints (D77) | On | On | On | On |
+| Pre-review (D78) | Per the decision in section 4, the same in every arm | Same | Same | Same |
+| `map/` (D76) | Only the initial map on baseline@0 | Same | **[Needs a human decision]** | Fully on, updated with `baseline_advanced` |
+| Final deliverable | The Integrator's last non-`guard_pending` baseline; B1-single as a diagnostic | Same | Same | Same |
 
 ---
 
-## 二、【高】D72 的抽查规则在没有过拟合时也频繁报警
+## 2. [High] D72's spot-check rule raises frequent alarms even when there is no overfitting
 
-**问题 1：比较的两边不对称。** D72（第 643 行）比较的是两样东西：
-- 日常数据上，各次合入被接收时测得的增益之和；
-- 抽查数据上的一次测量。
+**Problem 1: the two sides of the comparison are asymmetric.** D72 (line 643) compares two things:
+- on daily data, the sum of the gains measured when each merge was accepted;
+- one measurement on spot-check data.
 
-被接收的那次测量本身偏高，因为只有看起来好的才能过 1 个标准误（赢家诅咒）。这个偏差随合入次数线性累积，而阈值 2σ√k 只按 √k 增长。
+The measurement taken at acceptance is itself biased upward, because only what looks good clears 1 standard error (winner's curse). This bias accumulates linearly with the number of merges, while the threshold 2σ√k grows only as √k.
 
-> **例子：** σ = 0.6 时，每次被接收的测量平均偏高约 0.5（按 EXP1 的增益分布模拟）。8 次合入后，累计偏差约 4.0。阈值按"从头算"是 2 × 0.6 × √8 = 3.4，所以即使没有任何过拟合也会报警。运行越长，误报越确定。
+> **Example:** At σ = 0.6, each accepted measurement is biased upward by about 0.5 on average (simulated with EXP1's gain distribution). After 8 merges, the cumulative bias is about 4.0. Reading k as "counted from the start", the threshold is 2 × 0.6 × √8 = 3.4, so the rule raises an alarm even with no overfitting at all. The longer the run, the more certain the false alarm.
 
-**模拟（EXP5，完全没有过拟合）：**
-- k 读作"本段合入数"：每次抽查误报 16–33%。
-- k 读作"从头累计"：每次抽查误报 31–75%。
-- 每次运行至少误报一次：58–99%。
+**Simulation (EXP5, no overfitting at all):**
+- Reading k as "merges in this segment": 16–33% false alarms per spot check.
+- Reading k as "cumulative from the start": 31–75% false alarms per spot check.
+- At least one false alarm per run: 58–99%.
 
-**每次误报的代价：**
-- 二分花掉 2 次抽查名额；
-- 回退一个好的合入；
-- 把它的 claim 隔离给人复核。
+**Cost of each false alarm:**
+- bisection spends 2 spot-check slots;
+- a good merge is reverted;
+- its claim is quarantined for human review.
 
-**问题 2：** k 的含义有两种读法，文中没说是哪种。
+**Problem 2:** k can be read in two ways, and the text does not say which.
 
-**问题 3：** 结束后才合并的 B1+M 没有日常数据上的逐步测量，规则算不出来。如果采纳第一节，B1 也有 Integrator，这个问题就消失了。
+**Problem 3:** B1+M, which merges only after the run, has no step-by-step measurements on daily data, so the rule cannot be computed. If section 1 is adopted, B1 also has an Integrator, and this problem goes away.
 
-**改法**（改写 D72 第二条）
+**Fix** (rewrite the second item of D72)
 
-> 每 2 次合入抽查一次。对同一段（上次抽查过的 baseline@j 到当前 baseline@k）同时做两次新的配对测量：一次在日常数据上，一次在抽查数据上。两者之差超过 2.5·√(σ_日常² + σ_抽查²) 才标记（σ 取各数据集 A/A 复测得到的单次配对噪声；两份数据大小相同时即 2.5σ√2）。日常数据那次新测量走抽查的独立容量，不占每小时限速，也不计入 `holdout_run` 的 10 次上限（它没碰抽查数据）。各臂相同。
+> Spot-check once every 2 merges. For the same segment (from the last spot-checked baseline@j to the current baseline@k), make two new paired measurements at the same time: one on daily data and one on spot-check data. Flag only if their difference exceeds 2.5·√(σ_daily² + σ_spot²) (σ is the single paired-measurement noise obtained from each dataset's A/A remeasure; when the two datasets are the same size, this is 2.5σ√2). The new measurement on daily data uses the spot check's separate capacity. It does not count against the hourly rate limit, and it does not count toward the 10-call cap on `holdout_run` (it does not touch spot-check data). Same in every arm.
 
-- **新规则的误报率（EXP5）：** 阈值 2σ√2 时，每次抽查约 2.3%，每次运行 8–15%；阈值 2.5σ√2 时，每次运行约 4%。
-- **登记表：** D72 行同步。
+- **False alarm rate of the new rule (EXP5):** with threshold 2σ√2, about 2.3% per spot check and 8–15% per run; with threshold 2.5σ√2, about 4% per run.
+- **Register:** update the D72 row to match.
 
 ---
 
-## 三、【高】D72 到 D78 没有进实现者的路径
+## 3. [High] D72 to D78 never made it into the implementer's path
 
-附录 C 让实现者"以第 5、9 节为准"写 interfaces.md，范围是"第 14 节门槛前那一栏"。下面这些地方都没改，实现者会照旧版去做。
+Appendix C tells the implementer to write interfaces.md "treating §5 and §9 as authoritative", with the scope being "the before-the-gate column of §14". None of the places below were changed, so the implementer will build the old version.
 
-### 3.1 §5 事件 schema（第 294 行起）
+### 3.1 §5 event schema (from line 294)
 
-**`type` 列表：** 加 `baseline_advanced | baseline_reverted | integration_failed | interaction_found | map_updated | audit_checked | dedup_hit`。现在只有 D76 的正文里提了一句。
+**`type` list:** add `baseline_advanced | baseline_reverted | integration_failed | interaction_found | map_updated | audit_checked | dedup_hit`. Right now they are mentioned only in one sentence in the body text of D76.
 
-**`role` 列表：** 加 `integrator`。D34 的优先级里，把 integrator 放在和 Eval service / CI 同一级。
+**`role` list:** add `integrator`. In D34's priority order, put integrator at the same level as Eval service / CI.
 
-**新事件的字段**（建议）
+**Fields of the new events** (recommended)
 
 ```yaml
 # baseline_advanced
   baseline: 7
   parent_baseline: 6
   candidate: <hash>
-  files_changed: [prompt_builder.py]      # 规则 6 用它和 lease.files_touched 比
+  files_changed: [prompt_builder.py]      # rule 6 compares this with lease.files_touched
   paired: {mean, se, n_items, n_reps}
   guard_pending: true | false
-# baseline_reverted（记录只追加）
+# baseline_reverted (records are append-only)
   from_baseline: 9
   new_baseline: 10
   removed: [<hash>]
@@ -134,236 +144,236 @@
   candidate, original_claim
 ```
 
-**`result_ready` 的字段**（第 303–310 行）和 **D57 的文字**（第 453 行）：
-- 把 `score / n / ci` 换成：`baseline`、`paired: {mean, se, n_items, n_reps}`、`per_item:`（指针）。
-- 比例型指标另加 bootstrap 区间。
-- 绝对分可以留作诊断字段。
-- `n_reps` 只计 Eval service 自己跑的复测（D73）。
+**The fields of `result_ready`** (lines 303–310) and **the text of D57** (line 453):
+- Replace `score / n / ci` with: `baseline`, `paired: {mean, se, n_items, n_reps}`, `per_item:` (a pointer).
+- For ratio metrics, also add a bootstrap interval.
+- The absolute score can stay as a diagnostic field.
+- `n_reps` counts only the remeasures that the Eval service runs itself (D73).
 
-**`eval_request` 的签名**（第 357 行）：
-- 加 `baseline` 参数，缺省为当前基线；返回值里也带 `baseline`。
-- Integrator 的复测走内部接口 `remeasure(candidate, baseline)`，不经过 `needs_confirmation`，也不经过去重。
+**The signature of `eval_request`** (line 357):
+- Add a `baseline` parameter, defaulting to the current baseline; the return value also carries `baseline`.
+- The Integrator's remeasures go through the internal interface `remeasure(candidate, baseline)`. They go through neither `needs_confirmation` nor dedup.
 
-### 3.2 D69 候选哈希（第 268 行）
+### 3.2 D69 candidate hash (line 268)
 
-**问题：** 文字仍是"hash = payload 的内容 hash"，D73 说要改，但 D69 本身没改。
+**Problem:** The text still says "hash = content hash of the payload". D73 says to change this, but D69 itself was not changed.
 
-**例子：** E 的截断改动只碰 `context.py`，A 合入（只碰 `prompt_builder.py`）后，E rebase 出来的 diff 逐字节相同。按 D69 的哈希，复测会撞上 `dedup_hit`，返回旧分数。Integrator 的复测于是静默地不跑，而这次复测本该抓出"E 的截断和 A 的重排有相互作用"。L0 第 4 条测的正是旧语义下的去重。
+**Example:** E's truncation change touches only `context.py`. After A is merged (it touches only `prompt_builder.py`), the diff that E produces after rebasing is byte-for-byte identical. Under D69's hash, the remeasure hits `dedup_hit` and returns the old score. So the Integrator's remeasure silently does not run, and that remeasure should have caught "E's truncation interacts with A's reordering". L0 item 4 tests exactly this dedup under the old semantics.
 
-**改法：**
-- hash = hash(基线标识 + 规范化后的 payload)。
-- manifest 的 `target` 必须是基线标识，不再允许目标仓库 sha。
-- 相似度检索（`needs_confirmation`）仍只算 payload。
-- 登记表 D69 行同步。
+**Fix:**
+- hash = hash(baseline identifier + normalized payload).
+- The manifest's `target` must be a baseline identifier. A target-repo sha is no longer allowed.
+- Similarity search (`needs_confirmation`) still uses the payload only.
+- Update the D69 row of the register to match.
 
-### 3.3 D32 lease（第 228 行）
+### 3.3 D32 lease (line 228)
 
-**问题：** 规则 6（第 402 行）要用 `files_touched`，lease 里没有这个字段，也没说谁维护。
+**Problem:** Rule 6 (line 402) uses `files_touched`, but the lease has no such field, and nothing says who maintains it.
 
-**改法：** lease 加 `files_touched`。由 Executor sidecar 在每次心跳时对沙箱跑 `git diff --name-only` 写入（它本来就每 30 秒打一次心跳）。
+**Fix:** Add `files_touched` to the lease. The Executor sidecar writes it at each heartbeat by running `git diff --name-only` on the sandbox (it already sends a heartbeat every 30 seconds).
 
-### 3.4 D9 状态机（第 252 行起）
+### 3.4 D9 state machine (from line 252)
 
-**问题：** D72 说肇事 claim "隔离到人复核"，D76 说加 `quarantined`，但状态机表没有这个状态。
+**Problem:** D72 says the offending claim is "quarantined for human review", and D76 says to add `quarantined`, but the state machine table has no such state.
 
-**改法：** result 行加 `verified → quarantined → verified | refuted`。Integrator 把 claim 置为 `quarantined`，只有人能解除。
+**Fix:** Add `verified → quarantined → verified | refuted` to the result row. The Integrator sets a claim to `quarantined`; only a human can release it.
 
-### 3.5 D55 任务（第 280 行）
+### 3.5 D55 tasks (line 280)
 
-- `created_by` 加 `integrator`。
-- goal 模板加两种：
-  - "把候选 c-x rebase 到 baseline@k 并解决冲突"（compose）；
-  - "integration\_failed 后的后续"。
+- Add `integrator` to `created_by`.
+- Add two goal templates:
+  - "Rebase candidate c-x onto baseline@k and resolve conflicts" (compose);
+  - "Follow-up after integration\_failed".
 
-### 3.6 §4.1 L2 列表和 §6 组件表（第 315 行起）
+### 3.6 §4.1 L2 list and §6 component table (from line 315)
 
-"十个组件，五个没有模型"改为"十一个组件，六个没有模型"，并加一行：
+Change "ten components, five without a model" to "eleven components, six without a model", and add a row:
 
-| 组件 | 模型 | 职责 | 触发 | 失败时 | 来源 |
+| Component | Model | Responsibility | Trigger | On failure | Source |
 | --- | --- | --- | --- | --- | --- |
-| Integrator | 无 | 唯一能写基线分支。verified 候选先进先出：rebase；有冲突就发 compose 任务；基线动过就请求一次配对复测；按接收规则合入。发 `baseline_advanced` 等事件。每 3 次合入批量跑贵 gate，检出问题就二分、写排除肇事者的新基线。每 2 次合入触发抽查。`baseline_advanced` 后重跑 `map/` 的测量脚本。运行结束后执行收尾顺序（第七节）和归因 | result claim 到 verified；预算用完 | 队列在 KV，从 `baseline/<k>.json` 恢复 | D74 |
+| Integrator | None | The only writer of the baseline branch. Takes verified candidates first in, first out: rebase; if there is a conflict, send a compose task; if the baseline has moved, request one paired remeasure; merge according to the acceptance rule. Emits `baseline_advanced` and other events. Every 3 merges, runs the expensive gates as a batch; if a problem is found, bisects and writes a new baseline that excludes the culprit. Triggers a spot check every 2 merges. After `baseline_advanced`, reruns the measurement scripts in `map/`. After the run ends, carries out the closeout order (section 7) and attribution | A result claim reaches verified; the budget runs out | The queue is in KV; recover from `baseline/<k>.json` | D74 |
 
-另外写明两个分支的关系（建议）：
-- merge queue 写黑板仓库的 main（claims、events）；
-- Integrator 写被优化系统仓库的 baseline 分支。
+Also state how the two branches relate (recommended):
+- the merge queue writes main of the blackboard repo (claims, events);
+- the Integrator writes the baseline branch of the repo of the system being optimized.
 
-现在 D56 说"merge queue 是唯一写 main 的进程"，D74 说"只有 Integrator 能写基线分支"，两者的关系没有交代。
+Right now D56 says "the merge queue is the only process that writes main", and D74 says "only the Integrator can write the baseline branch". How the two relate is not explained.
 
-### 3.7 §14 门槛前清单和周计划（第 756 行起）
+### 3.7 §14 before-the-gate checklist and weekly plan (from line 756)
 
-**门槛前清单加入：**
-- D73 配对测量；
-- D74 Integrator；
-- D72 抽查和试点；
-- D75 出网白名单；
-- D77 重启路径（D77 自己写了"gate 前就能用"）；
-- D76 的 map 重跑，以及人手写的第一批测量脚本（第八节）。
+**Add to the before-the-gate checklist:**
+- D73 paired measurement;
+- D74 Integrator;
+- D72 spot checks and the pilot;
+- D75 egress allowlist;
+- D77 restart path (D77 itself says it is "usable before the gate");
+- D76's map rerun, plus the first batch of measurement scripts written by hand by a human (section 8).
 
-**周计划：**
-- **第 2 周：** 加 Integrator 和配对测量。原"B1 @ 5 的试跑测方差"（一个臂、一次运行）改为 D72 的试点：B1+M 和 S2 各 3 个批次，同一批次的各臂并行，另加每个 source 的 A/A 复测。
-- **试点的时间点：** 试点要求 S2 全开，所以只能放在 Router、hook、Librarian 建完之后。周计划按〇的第 4 条顺延。
+**Weekly plan:**
+- **Week 2:** add the Integrator and paired measurement. Change the original "B1 @ 5 trial run to measure variance" (one arm, one run) to D72's pilot: 3 batches each of B1+M and S2, with the arms in the same batch running in parallel, plus an A/A remeasure for each source.
+- **Timing of the pilot:** the pilot requires S2 to be fully on, so it can only go after the Router, hooks and Librarian are built. Push back the weekly plan as in item 4 of section 0.
 
-### 3.8 §14.1 L0 测试（第 815 行起）
+### 3.8 §14.1 L0 tests (from line 815)
 
-- **第 4 条：** 改用新哈希。
-- **第 11 条：** 若采纳第一节，结束后贪心合并就没有了，改为测 Integrator（见下面第 14 条）。
-- **新增 13 到 20：**
+- **Item 4:** use the new hash.
+- **Item 11:** if section 1 is adopted, the post-run greedy merge no longer exists. Change this item to test the Integrator (see item 14 below).
+- **Add items 13 to 20:**
 
-13. 只改基线标识，候选哈希就变。`result_ready` 带 baseline、配对增益、标准误、n（D73）。
-14. Integrator：有文本冲突 → 发 compose 任务；无冲突但基线动过 → 恰好一次配对复测；增益不过 1 个标准误 → `integration_failed`，并给作者一个后续任务（D74）。
-15. `baseline_advanced` 的 `files_changed` 和 `files_touched` 有交集 → 硬中断；没有交集 → 软中断（规则 6）。
-16. 一个 guard 批次失败 → 二分，写一版排除肇事者的新基线，旧记录不变；交付物永远不是 `guard_pending`。
-17. 抽查：脚本化的过拟合候选被标记、回退、隔离；一次干净的脚本化运行，7 次抽查一次都不报警（需要第二节的新规则才过得了）。
-18. worker 沙箱访问白名单外的主机 → 拒绝（D75）。
-19. 上下文用量超过 70% → 写 claim，并带起始包开新会话；`kill -9` → sidecar 代写 stub claim（D77）。
-20. 臂的公平性：Integrator 配置在各臂相同；B1 的 worker 收不到 `baseline_advanced`。
+13. Changing only the baseline identifier changes the candidate hash. `result_ready` carries the baseline, paired gain, standard error and n (D73).
+14. Integrator: text conflict → send a compose task; no conflict but the baseline has moved → exactly one paired remeasure; gain does not clear 1 standard error → `integration_failed`, plus a follow-up task for the author (D74).
+15. The `files_changed` of `baseline_advanced` intersects `files_touched` → hard interrupt; no intersection → soft interrupt (rule 6).
+16. A guard batch fails → bisect and write a new baseline that excludes the culprit, leaving old records unchanged; the deliverable is never `guard_pending`.
+17. Spot check: a scripted overfitting candidate is flagged, reverted and quarantined; a clean scripted run raises no alarm in any of its 7 spot checks (this can pass only with the new rule from section 2).
+18. A worker sandbox accesses a host outside the allowlist → refused (D75).
+19. Context usage above 70% → write a claim and open a new session with the start pack; `kill -9` → the sidecar writes a stub claim on its behalf (D77).
+20. Arm fairness: the Integrator configuration is the same in every arm; B1 workers do not receive `baseline_advanced`.
 
-### 3.9 附录 C（第 1071 行起）
+### 3.9 Appendix C (from line 1071)
 
-- **interfaces.md 的清单：** 加 `baseline/<k>.json` 的格式和新事件的字段。
-- **"计划批准后第一天"第 2 条：** "走一遍 D62 的合并"改为"走一遍 Integrator 和 `holdout_verdict` 流程"。
-- **完成定义：**
-  - "L0 的 12 条"改为"L0 的 20 条"；
-  - "S2 对 B1+M @ 5 × 3 次运行"改为"按 D72 试点算出的运行次数；预算不够就标为探索性运行"（第五节）。
-
----
-
-## 四、【高】D78 预审泄露 eval 知识，各臂也不对等
-
-**问题**
-- **泄露 eval 知识。** 否决理由写成公开 claim，但做预审的 Critic 是"唯一能读 eval 代码的 agent"（第 327 行）。D11 不公开理由，恰恰因为"为什么得分"就是 hacking 说明书；D63 也是同一个意思。
-  > **例子：** worker 加一段固定 2,000 token 的前缀。命中率（缓存 token / 总 token）上升，但没有任何真实改进。Critic 否决的理由"分数是缓存 token 占比，固定填充会抬分"一旦公开，S2 的所有 worker 都搜得到。
-- **H1 阶段没人执行。** §14 把 Critic 的 LLM 审计放在门槛后（第 771 行），H1 在门槛前跑。
-- **各臂不对等。** D58 没有预审这一行。如果只在 S2 开，S2 少浪费名额，这和共享无关，又是一个混淆。
-- **限速没说清。** Critic 每小时 6 次（第 327 行、D48）是否包含预审没说，而每个候选要 2 个 Critic 审。
-- **compose 自相矛盾。** compose 并行派给几个 agent 后"取配对分最好的一版"，每一版都要花顶层 eval，和"不花 eval"矛盾。
-
-**改法（需人定；建议 a）**
-- **a.** H1 阶段推迟 D78，登记表标"推迟，H1 之后单独 A/B"。
-- **b.** 保留 D78，但：
-  - 新设"预审员"角色，不能读 eval 代码，只读候选、spec 和 audit 的公开结论；
-  - 各臂相同；
-  - 否决理由在 B1 只给作者，在 S2 写成 claim（这属于共享）；
-  - 不占 Critic 的限速。
-
-不论选 a 还是 b：compose 的多个版本只用快档挑，选出一版才进慢档。
+- **The interfaces.md checklist:** add the format of `baseline/<k>.json` and the fields of the new events.
+- **Item 2 of "Day one after the plan is approved":** change "walk through the D62 merge" to "walk through the Integrator and the `holdout_verdict` flow".
+- **Definition of done:**
+  - change "the 12 L0 items" to "the 20 L0 items";
+  - change "S2 vs B1+M @ 5 × 3 runs" to "the number of runs computed from the D72 pilot; if the budget is not enough, label them as exploratory runs" (section 5).
 
 ---
 
-## 五、【中】运行次数写死为 3，和 D72 的功效计算矛盾
+## 4. [High] D78 pre-screening leaks eval knowledge, and the arms are not equal
 
-**问题：** 下面几处写死了"3 seed"或"3 次运行"：
-- 第 112 行 H1；
-- 第 675 行 §11 表（第 2 列）；
-- §14 第 3 周；
-- 附录 C 的范围和完成定义。
+**Problem**
+- **It leaks eval knowledge.** Veto reasons are written as public claims, but the Critic doing the pre-screening is "the only agent that can read the eval code" (line 327). D11 keeps reasons private precisely because "why it scored" is a hacking manual; D63 says the same thing.
+  > **Example:** A worker adds a fixed 2,000-token prefix. The hit rate (cached tokens / total tokens) goes up, but there is no real improvement at all. Once the Critic's veto reason, "the score is the share of cached tokens, and fixed padding inflates it", is public, every S2 worker can find it by search.
+- **Nobody runs it in the H1 phase.** §14 puts the Critic's LLM audit after the gate (line 771), and H1 runs before the gate.
+- **The arms are not equal.** D58 has no row for pre-screening. If it is on only in S2, S2 wastes fewer eval slots. That has nothing to do with sharing; it is yet another confound.
+- **The rate limit is unclear.** The text does not say whether the Critic's 6 per hour (line 327, D48) includes pre-screenings, and each candidate needs review by 2 Critics.
+- **Compose contradicts itself.** After compose is dispatched in parallel to several agents, it "takes the version with the best paired score". Every version costs a top-level eval, which contradicts "spends no eval".
 
-而 D42 第 4 条说"先用 1 次试跑测方差"，D72 说试点跑 3 个批次、运行次数按功效算。三处互相矛盾。
+**Fix (needs a human decision; recommend a)**
+- **a.** Defer D78 for the H1 phase. Mark it in the register as "Deferred; separate A/B after H1".
+- **b.** Keep D78, but:
+  - create a new "pre-screener" role that cannot read the eval code and reads only the candidate, the spec and the public conclusions of the audit;
+  - the same in every arm;
+  - in B1, veto reasons go only to the author; in S2 they are written as claims (this counts as sharing);
+  - it does not count against the Critic's rate limit.
 
-**模拟（EXP7）：** 单侧配对 t 检验，α = 0.05。效应以"批次差值的标准差"为单位。
+Whether you choose a or b: pick among compose's multiple versions using the fast tier only. Only the chosen version goes on to the slow tier.
 
-| 运行次数 | 效应 1.0 | 1.5 | 2.0 | 2.5 |
+---
+
+## 5. [Medium] The number of runs is hard-coded as 3, which contradicts D72's statistical power calculation
+
+**Problem:** The following places hard-code "3 seeds" or "3 runs":
+- H1 on line 112;
+- the §11 table on line 675 (column 2);
+- week 3 in §14;
+- the scope and the definition of done in Appendix C.
+
+But item 4 of D42 says "first use 1 trial run to measure variance", and D72 says the pilot runs 3 batches and the number of runs is computed from statistical power. The three places contradict one another.
+
+**Simulation (EXP7):** one-sided paired t-test, α = 0.05. The effect is in units of "the standard deviation of the batch differences".
+
+| Runs | Effect 1.0 | 1.5 | 2.0 | 2.5 |
 | --- | --- | --- | --- | --- |
 | 3 | 32% | 53% | 71% | 85% |
 | 5 | 58% | 87% | 98% | ≈100% |
 | 6 | 67% | 93% | 99% | 100% |
 
-只跑 3 次时，要效应达到约 2.3 倍的运行间噪声才有 80% 功效。效应如果是 1.5 倍，3 次运行只有一半机会测出来，"不显著"几乎说明不了什么。
+With only 3 runs, the effect has to reach about 2.3 times the run-to-run noise to get 80% power. If the effect is 1.5 times the noise, 3 runs have only an even chance of detecting it, and "not significant" says almost nothing.
 
-**改法**
-- 上述各处的"3 seed / 3 次运行"改为"按 D72 由试点算出"。
-- D42 第 3 条的"每臂至少 3 次"保留作下限。
-- D42 第 4 条的"1 次试跑"改为"D72 的试点（3 个批次）"。
-- 同一批次的各臂并行跑。测试台问题 A 一次运行 48 小时，串行跑不完。
-- 可选：试点也带上 B0。它便宜，而且能早看到"问题是否根本不该拆"。
-- **试点占用抽查数据：** 试点要在抽查数据上给每个交付物评 5 次，这超出 D66 每臂每运行 10 次的上限。二选一：
-  - 算进该试点运行自己的 10 次上限，运行中的抽查相应减少；
-  - 给试点另切一份数据。
-
----
-
-## 六、【中】`interaction_found` 的 70% 规则误报过半
-
-**问题：** 复测增益不到早先的 70% 就记一条 `interaction_found`（D74）。但早先那次是"过了 1 个标准误的那一次"，本身偏高。
-
-**模拟（EXP6，完全没有相互作用）：** σ = 0.3 / 0.6 / 1.0 时，误报分别是 43% / 55% / 65%。
-
-**后果：** 一次运行约 10 次合入，会产生约 5 条相互作用 claim，多数是假的。它们进入 `map/` 和 digest，S2 的 worker 要花时间去解释不存在的东西，而被污染的恰好是 S2 赖以取胜的共享信息。
-
-**改法**
-- 早先增益减复测增益 > 2σ√2 才记（EXP6 误报 5–9%）；或者差距超过 70% 时再做一次配对复测，确认后才写。
-- 说明和 D64 的关系：D64 里 Critic 也写 `tags=[interaction]` 的 insight（第 522 行）。建议 Integrator 只发事件，Critic 复核后才写 insight。
+**Fix**
+- In each place listed above, change "3 seeds / 3 runs" to "computed from the pilot per D72".
+- Keep "at least 3 per arm" in item 3 of D42 as a floor.
+- Change "1 trial run" in item 4 of D42 to "the D72 pilot (3 batches)".
+- Run the arms of the same batch in parallel. One run of testbed problem A takes 48 hours; running them serially will not finish.
+- Optional: include B0 in the pilot as well. It is cheap, and it gives an early look at "whether the problem should be split at all".
+- **The pilot uses spot-check data:** the pilot has to evaluate each deliverable 5 times on spot-check data, which exceeds D66's cap of 10 per arm per run. Choose one:
+  - count it toward that pilot run's own cap of 10, with correspondingly fewer in-run spot checks;
+  - cut a separate dataset for the pilot.
 
 ---
 
-## 七、【中】运行结束的步骤没定义
+## 6. [Medium] The 70% rule for `interaction_found` gives false alarms more than half the time
 
-**问题**
-- **最后几版基线未检。** 预算用完时，最后几版基线多半是 `guard_pending`（每 3 次合入批量检一次 gate）。文中说"交付物永远不是 `guard_pending`"，但没说怎么办：
-  - 退回最后一版检过的基线？
-  - 还是预算外补检？补检用谁的容量，各臂是否相同？
-- **最终抽查的时点。** 在补检之前还是之后？
-- **归因的数据。** 归因（逐个方向去掉）在预算外，每个方向至少一次 eval，用哪份数据没说。用 `holdout_verdict` 就违反了"整个实验只碰一次"。
-- **严格版切换。** D74 规定"预计有 40% 以上的预算用不完时切严格版"，这是运行中切规则：
-  - 试点是在默认规则下测的噪声，切换后预注册的功效计算就不成立；
-  - 一个臂切、另一个不切，两臂又不一样了。
+**Problem:** If the remeasured gain is less than 70% of the earlier gain, an `interaction_found` is recorded (D74). But the earlier measurement is "the one that cleared 1 standard error", so it is itself biased upward.
 
-**改法**
-- **写死收尾顺序，各臂相同：**
-  1. 停止接收；
-  2. 对所有 `guard_pending` 基线补检 gate（固定的预算外配额，各臂相同；检出问题按原流程二分）；
-  3. 最终抽查；
-  4. 冻结交付物（最后一版非 `guard_pending` 的基线）；
-  5. 所有运行都结束后，一起评 `holdout_verdict`。
-- **归因：** 在 `holdout_verdict` 评完之后做，只用日常数据，固定配额，不影响判定。
-- **H1 实验期间不在运行中切规则：** 接收规则在预注册时选定并写进预注册；要用严格版，试点就用严格版。
+**Simulation (EXP6, no interaction at all):** at σ = 0.3 / 0.6 / 1.0, the false alarm rates are 43% / 55% / 65%.
+
+**Consequence:** A run has about 10 merges, so it produces about 5 interaction claims, most of them false. They go into `map/` and the digest, and S2 workers spend time explaining things that don't exist. What gets polluted is exactly the shared information that S2 relies on to win.
+
+**Fix**
+- Record it only if the earlier gain minus the remeasured gain > 2σ√2 (EXP6 false alarms 5–9%). Or, when the gap exceeds 70%, do one more paired remeasure and write it only after it is confirmed.
+- State the relationship with D64: in D64, the Critic also writes insights with `tags=[interaction]` (line 522). Recommendation: the Integrator only emits the event, and the Critic writes the insight only after reviewing it.
 
 ---
 
-## 八、【中】地图没人负责
+## 7. [Medium] The end-of-run steps are not defined
 
-**问题**
-- D76 说每次 `baseline_advanced` 后由纯代码重跑 `map/` 的测量脚本，但没人负责写第一批脚本：
-  - 不在 charter 的四个手写文件里；
-  - 不是任何组件的职责；
-  - 不在周计划里。
-- D58 也没有地图这一行。
+**Problem**
+- **The last few baselines are unchecked.** When the budget runs out, the last few baselines are most likely `guard_pending` (gates are checked in a batch every 3 merges). The text says "the deliverable is never `guard_pending`", but does not say what to do:
+  - fall back to the last checked baseline?
+  - or run the missing checks outside the budget? If so, whose capacity do they use, and is it the same in every arm?
+- **When the final spot check happens.** Before or after the missing checks?
+- **Data for attribution.** Attribution (removing approaches one at a time) is outside the budget and needs at least one eval per approach, but the text does not say which data it uses. Using `holdout_verdict` would break "touched only once in the whole experiment".
+- **Switching to the strict version.** D74 says "switch to the strict version when more than 40% of the budget is expected to go unused". This switches rules during the run:
+  - the pilot measured noise under the default rule, so after a switch the preregistered power calculation no longer holds;
+  - if one arm switches and another does not, the arms differ again.
 
-> **例子：** 缓存命中率问题里，最有用的共享测量是一个按原因拆分缓存未命中的脚本（时间戳、工具顺序、文档位置、截断）。照现在的文字，会建出一个"重跑器"，但没有东西可跑。
-
-**改法**
-- 人在建问题时手写第一批测量脚本，列入 §14 门槛前清单，和 spec.md、首批 approaches 并列。首批 approaches 对照 `map/gap.md` 来写。
-- 重跑由 Integrator 在 `baseline_advanced` 后做（第 3.6 节）。
-- S2 的 worker 可以往 `map/measurements/` 加新脚本，走 `repo_write` 和 CI 的 schema 检查。
-- D58 加一行（第一节表里已列）。
-
----
-
-## 九、【低】文字修正
-
-- **D48（第 891 行）：** "Librarian 每 10 commit"与 P10 和 §6 的"连续跑、不分批"矛盾，删掉。
-- **D14 登记表（第 857 行）：** 失败时"换强模型"在 P10 下已无意义（所有角色都用最强模型）。改为"查 digest 结构，或分方向加 Librarian"。
-- **D74 的"比'复测三次、看 95% 下界'多拿一倍净收益"：** 照模拟（EXP1）改：
-  - 对"复测三次、看 95% 下界"约是 2.9 倍（30.7 / 26.7 / 22.8 对 10.5 / 9.2 / 8.0，σ = 0.3 / 0.6 / 1.0）；
-  - 约 2 倍是对严格版（14.9 / 13.3 / 11.7）；
-  - EXP1b 更接近现实的设定下是 1.2–1.6 倍。
-- **D74 的"接近零的无害补丁"：** 模拟里这些合入略有害，每次运行 −0.3 到 −1.4，改为"略有害的补丁"。
-- **D74 的"超过 1 个标准误"：** 写明是单次配对测量的标准误。基线动过时用复测那次的，没动时用验证那次的。
-- **D72 的"σ\_run 取 1.5 倍（只是 70% 上界）"：** 3 个批次（自由度 2）时，1.5 倍约是 64% 上界；两臂合并估计（自由度 4）约是 78%。
-- **D73 的"任意两个候选的配对差事后就能算"：** 只有同种子下 eval 是确定性的才成立，比如问题 A 的仿真器。问题 B 里有模型调用，仍要同批、同时段跑。
-- **D75 的"声明过的上下文源"：** 没有地方声明。在 `charter/` 加一个 sources 列表，或者放进 `eval/sources/`。
-- **《Research Herd v3 审稿》：** 第 18 行和 D72 末条引用了它。文件已在同一目录（`Research-Herd-v3-Review.md`），引用处写上文件名，方便实现者找到。
+**Fix**
+- **Hard-code the closeout order, the same in every arm:**
+  1. stop accepting;
+  2. run the missing gate checks on all `guard_pending` baselines (a fixed quota outside the budget, the same in every arm; if a problem is found, bisect following the existing process);
+  3. final spot check;
+  4. freeze the deliverable (the last non-`guard_pending` baseline);
+  5. after all runs have ended, evaluate `holdout_verdict` for all of them together.
+- **Attribution:** do it after `holdout_verdict` has been evaluated, using daily data only, with a fixed quota, so it does not affect the verdict.
+- **During the H1 experiment, no rule switching during a run:** choose the acceptance rule at preregistration and write it into the preregistration. If you want the strict version, use the strict version in the pilot too.
 
 ---
 
-## 附：模拟
+## 8. [Medium] Nobody owns the map
 
-- **脚本：** `~/Documents/herd-sim/v22_checks.py`，输出在同目录的 `v22_checks_out.txt`，约 3 秒跑完。
-- **设定：** 沿用 `herd-sim/` 中 EXP1 的设定。增益分布为 60% N(0, 0.3)、25% N(−1, 0.5)、15% 均值 1.5 的指数分布；接收规则为单次测量超过 σ。
+**Problem**
+- D76 says that after each `baseline_advanced`, pure code reruns the measurement scripts in `map/`. But nobody is responsible for writing the first batch of scripts:
+  - they are not among the charter's four hand-written files;
+  - they are not any component's responsibility;
+  - they are not in the weekly plan.
+- D58 has no row for the map either.
 
-**EXP5：抽查误报（没有任何过拟合）**
+> **Example:** In the cache hit rate problem, the most useful shared measurement is a script that breaks down cache misses by cause (timestamps, tool order, document position, truncation). As the text stands now, someone will build a "rerunner" with nothing to run.
 
-| σ | 预算 | 平均合入数 | 本段读法：每次 / 每运行 | 从头读法：每次 / 每运行 | 新测量 2σ√2：每次 / 每运行 |
+**Fix**
+- A human writes the first batch of measurement scripts by hand when building the problem. List them in the §14 before-the-gate checklist, alongside spec.md and the first approaches. Write the first approaches against `map/gap.md`.
+- The Integrator does the rerun after `baseline_advanced` (section 3.6).
+- S2 workers can add new scripts to `map/measurements/`, going through `repo_write` and CI's schema check.
+- Add a row to D58 (already listed in the table in section 1).
+
+---
+
+## 9. [Low] Wording fixes
+
+- **D48 (line 891):** "Librarian every 10 commits" contradicts P10 and §6's "runs continuously, not in batches". Delete it.
+- **D14 register row (line 857):** the on-failure action "switch to a stronger model" no longer means anything under P10 (every role uses the strongest model). Change it to "check the digest structure, or add a Librarian per approach".
+- **D74's "doubles the net gain compared with 'remeasure three times and look at the 95% lower bound'":** correct it according to the simulation (EXP1):
+  - against "remeasure three times and look at the 95% lower bound", it is about 2.9 times (30.7 / 26.7 / 22.8 vs 10.5 / 9.2 / 8.0, at σ = 0.3 / 0.6 / 1.0);
+  - about 2 times is against the strict version (14.9 / 13.3 / 11.7);
+  - under EXP1b's more realistic setting, it is 1.2–1.6 times.
+- **D74's "near-zero harmless patches":** in the simulation these merges are slightly harmful, −0.3 to −1.4 per run. Change it to "slightly harmful patches".
+- **D74's "more than 1 standard error":** state that this is the standard error of a single paired measurement. If the baseline has moved, use the remeasure's; if it has not, use the verification's.
+- **D72's "σ\_run taken as 1.5 times (only a 70% upper bound)":** with 3 batches (2 degrees of freedom), 1.5 times is about a 64% upper bound; with a pooled estimate from both arms (4 degrees of freedom), it is about 78%.
+- **D73's "the paired difference between any two candidates can be computed afterwards":** this holds only if the eval is deterministic under the same seed, as with problem A's simulator. Problem B involves model calls, so they still have to run in the same batch and in the same time window.
+- **D75's "declared context sources":** there is no place to declare them. Add a sources list to `charter/`, or put it in `eval/sources/`.
+- **_Research Herd v3 Review_ (not in the repo):** line 18 and the last item of D72 cite it. The file is already in the same directory (`Research-Herd-v3-Review.md`). Write the filename where it is cited, so implementers can find it.
+
+---
+
+## Appendix: Simulations
+
+- **Script:** `~/Documents/herd-sim/v22_checks.py`. The output is in `v22_checks_out.txt` in the same directory. It takes about 3 seconds to run.
+- **Setup:** reuses the setup of EXP1 in `herd-sim/` (simulation scripts, not in the repo). The gain distribution is 60% N(0, 0.3), 25% N(−1, 0.5), and 15% exponential with mean 1.5. The acceptance rule is a single measurement above σ.
+
+**EXP5: spot-check false alarms (no overfitting at all)**
+
+| σ | Budget | Mean merges | Per-segment reading: per check / per run | From-start reading: per check / per run | New measurement, 2σ√2: per check / per run |
 | --- | --- | --- | --- | --- | --- |
 | 0.3 | 40 | 10.8 | 16% / 58% | 31% / 60% | 2.2% / 11% |
 | 0.3 | 96 | 25.9 | 16% / 70% | 36% / 73% | 2.3% / 15% |
@@ -372,12 +382,12 @@
 | 1.0 | 40 | 7.8 | 33% / 74% | 60% / 83% | 2.4% / 8% |
 | 1.0 | 96 | 18.8 | 33% / 94% | 75% / 99% | 2.3% / 15% |
 
-**EXP6：`interaction_found` 误报（没有任何相互作用）**
+**EXP6: `interaction_found` false alarms (no interaction at all)**
 
-| σ | 70% 规则 | 改用差值 > 2σ√2 |
+| σ | 70% rule | Difference > 2σ√2 instead |
 | --- | --- | --- |
 | 0.3 | 43% | 5.0% |
 | 0.6 | 55% | 6.8% |
 | 1.0 | 65% | 8.6% |
 
-**EXP7：功效表** 见第五节。
+**EXP7: power table** — see section 5.

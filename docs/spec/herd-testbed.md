@@ -1,513 +1,515 @@
-# Herd 测试台：先在两个小问题上验证 herd 的行为
+# Herd Testbed: validating the herd's behavior on two small problems
 
-Research Herd 的测试台：在便宜的问题上先验证 herd 的行为 · Oct 18, 2026 · @Minyi
+A testbed for Research Herd: validate the herd's behavior on cheap problems first · Oct 18, 2026 · @Minyi
 
-## 0. 一页纸版
+*English translation of the Chinese original (`zh/herd-testbed.md`). IDs, numbers and section numbers are unchanged.*
 
-想象一下最坏的情况：herd 搭好了，直接挂到一个真项目上，跑了两天，最后发现 worker 之间根本没有互相用上对方的发现——每个人各干各的，最后交上来的就是跑得最好的那一个人的结果。这两天白花了，而且我们说不清是哪一环坏的。
+## 0. The one-page version
 
-测试台就是为了避免这件事。它用一个便宜的小问题，复刻真问题的三个特征——**可以试的方向很多、每试一次要等很久、最后的好结果要由不同方向的改进拼起来**——然后让 herd 在上面跑几个小时到两天，告诉我们：herd 的行为像不像我们设计的那样。
+Imagine the worst case. The herd is built and plugged straight into a real project. It runs for two days, and at the end we find that the workers never used each other's findings at all. Everyone worked in isolation, and what came back was just the result of whichever single worker ran best. Those two days were wasted, and we can't tell which link broke.
 
-它不是什么：不是 herd 的一部分，不是防作弊的安全系统，不是性能 benchmark。它是我们自己设计的护栏。
+The testbed exists to prevent this. It takes a cheap small problem that reproduces three features of the real problem: **there are many approaches to try, each attempt takes a long wait, and the final good result has to be combined from improvements in different approaches**. Then it lets the herd run on it for a few hours to two days, and tells us whether the herd behaves the way we designed it to.
 
-两个问题。**A 是仿真器里的集群调度策略**：方向多（排队、准入、放置、抢占、按站点调），每次正式评测 10 分钟、全队每小时只有 2 次，噪声我们说了算，每次评测免费。**B 是一个故意弄坏了五处的 coding agent harness**：就是我们最终要用 herd 干的事的缩小版，每次评测要花真钱、噪声大。先 A 后 B：A 便宜，管道有问题几小时就能看出来；B 真实，A 过了再上。
+What it is not: it is not part of the herd, not an anti-cheating security system, and not a performance benchmark. It is a guardrail of our own design.
 
-怎么算过：同样的正式评测配额、同样的时间，herd 要赢过"一个 agent 单干"和"N 个 agent 各干各的"两个对照组，而且第 6 节记分卡上的行为指标达标。赢了但行为不对，等于没赢。
+Two problems. **A is a cluster scheduling policy in a simulator.** It has many approaches (queueing, admission, placement, preemption, per-site tuning). Each formal eval takes 10 minutes, the whole team gets only 2 per hour, we control the noise, and every eval is free. **B is a coding agent harness deliberately broken in five places.** It is a scaled-down version of what we ultimately want to use the herd for. Each eval costs real money and is noisy. A first, then B: A is cheap, so plumbing problems show up within a few hours; B is realistic, and we move to it once A passes.
 
-读法：第 1 到 5 节给人看，讲为什么和是什么；第 6 到 10 节讲怎么量、怎么建、先怎么定；第 11 节是给实现的 agent 的规格，仓库结构、接口、字段、埋坑的具体做法、怎么验收测试台自己，都在那里。附录说明它是从上一版"Ledger"砍出来的，砍了什么。
+What counts as passing: with the same formal eval quota and the same time, the herd must beat two control groups, "a single agent working alone" and "N isolated agents". The behavior metrics on the §6 scorecard must also meet target. A win with the wrong behavior counts as no win.
 
-## 1. 什么问题才值得拿来测 herd
+How to read this: §1–5 are for humans and explain why and what. §6–10 cover how to measure, how to build, and what to settle on for now. §11 is the spec for the implementing agent: repo structure, interfaces, fields, the concrete way to plant bugs, and how to accept the testbed itself are all there. The appendix explains that this was cut down from the previous version, "Ledger", and what was cut.
 
-一开始我们以为"材料多到一个 agent 读不完"就够了。错了。一个会用 grep、会抽样、会写脚本的 agent 对付几十万 token 的材料并不难，强模型第一反应就是这么干。拿这种问题测，单 agent 会表现得很好，herd 赢不了，我们还以为是 herd 的问题。
+## 1. What kind of problem is worth testing the herd on
 
-站得住的理由只有一个：**要迭代才知道行不行的方向数 × 每一轮要等的时间，超过了可用的墙钟时间。** 一个 agent 只能一个方向一个方向串行试；10 个方向、每个要 5 轮、每轮等 10 分钟，再加上思考和写代码，48 小时根本不够。herd 能并行。
+At first we thought "more material than one agent can read" was enough. It wasn't. An agent that can grep, sample and write scripts has no trouble with a few hundred thousand tokens of material, and that is exactly what a strong model does first. Test on such a problem and the single agent does very well, the herd can't win, and we would conclude that the herd is at fault.
 
-但光并行不够——N 个互不通信的 agent 也能并行，这正是对照组之一。herd 要赢它，只能靠三件事：不同方向找到的改进**能拼到一个交付里**；一个人撞过的死胡同**别人不再撞**；全队共享的评测配额**往有苗头的方向倾斜**。所以问题还得满足：改进确实可组合（有的组合加分，有的打架），确实有陷阱（看起来好其实坏），确实有配额压力。
+Only one reason holds up: **the number of approaches that need iteration before you know whether they work, × the wait per round, exceeds the available wall-clock time.** One agent can only try approaches serially, one at a time. With 10 approaches, 5 rounds each, and 10 minutes of waiting per round, plus thinking and writing code, 48 hours is nowhere near enough. The herd can work in parallel.
 
-另外两条：eval 得能模拟成"贵、慢、少"；我们得知道答案，至少知道一部分，否则没法判断 herd 的行为是对是错，只能看分数高低。
+But parallelism alone is not enough. N agents that don't communicate can also run in parallel, and that is exactly one of the control groups. The herd can beat it only through three things: improvements found in different approaches **can be combined into one deliverable**; a dead end one worker hit **is not hit again by others**; and the team's shared eval quota **tilts toward approaches that show promise**. So the problem must also satisfy these: the improvements really are composable (some combinations add up, some conflict); there really are traps (things that look good but are actually bad); and there really is quota pressure.
 
-按这几条，之前的三个候选都淘汰了：合成的 80 个旋钮、埋了慢点的代码库、多服务事故归因——它们的难点都是"材料多"，一个 agent 用工具都能搞定。
+Two more conditions. The eval must be something we can simulate as "expensive, slow, scarce". And we must know the answer, at least part of it. Otherwise we can't judge whether the herd's behavior is right or wrong; we can only see whether the score is high or low.
 
-## 2. 测试台的五个零件
+By these criteria, all three earlier candidates were eliminated: 80 synthetic knobs, a codebase with planted slow spots, and multi-service incident attribution. Their difficulty was always "lots of material", which one agent with tools can handle.
 
-&#91;embedded content: 测试台 · 五个零件和三个臂\]
+## 2. The testbed's five parts
 
-先看图。worker 本地刷快档，正式分数只从右边的慢档来；三个框做的每件事都落进下面的记录器，记分卡只从记录器算，三个臂并排比。
+&#91;embedded content: Testbed · five parts and three arms\]
 
-**被优化的东西。** 一个目录，agent 拿到的就是它加一段 PI prompt。里面分清楚哪些能改、哪些不能改，附基线版本和基线分数。问题 A 是仿真器加策略，问题 B 是 harness 加题集。
+Look at the figure first. Workers run the fast tier locally over and over; formal scores come only from the slow tier on the right. Everything the three boxes do lands in the recorder below. The scorecard is computed only from the recorder, and the three arms are compared side by side.
 
-**快档 eval。** worker 在自己机器上跑的一条命令。免费、不限次、用公开数据、结果抖。就像工程师本地跑测试：便宜，但不算数。
+**The thing being optimized.** A directory. What the agent receives is this directory plus a PI prompt. It clearly separates what may be changed from what may not, and includes the baseline version and the baseline score. For problem A it is the simulator plus a policy; for problem B it is the harness plus a task set.
 
-**慢档 eval。** 一个 HTTP 服务，是 herd 眼里的"外部 eval"，和将来接真项目时平台组的 benchmark 一个样子。它排队、按全队共享的配额放行、用 worker 看不到的隐藏数据、跑多个种子或多遍、10 分钟后出结果，结果里带置信区间和逐项明细。接口只有三个：
+**Fast-tier eval.** A command a worker runs on its own machine. Free, unlimited, uses public data, noisy results. Like an engineer running tests locally: cheap, but it doesn't count.
+
+**Slow-tier eval.** An HTTP service. It is the "external eval" from the herd's point of view, and it looks the same as the platform team's benchmark will when we hook up a real project later. It queues submissions and releases them according to a quota shared by the whole team. It uses hidden data that workers can't see, runs multiple seeds or multiple passes, and returns results after 10 minutes, with confidence intervals and per-item breakdowns. It has only three interfaces:
 
 ```
-submit(candidate, predicted_score, note) -> ticket     # 提交，必须带预测分数
+submit(candidate, predicted_score, note) -> ticket     # submit; must include a predicted score
 status(ticket) -> queued | running | {score, ci, per_item, constraint_ok}
-history() -> 已用配额、历史提交和结果（各干各的臂只看自己的）          # 另有 runs / events / meta / final，见 11.3
+history() -> quota used, past submissions and results (the isolated arm sees only its own)          # also runs / events / meta / final, see 11.3
 ```
 
-**记录器。** 一个只追加的 jsonl 文件，三处来源自动写入：慢档服务写每次提交和结果；herd 的工具层写每次黑板读写、fork、分配、放弃；worker 自报每次快档运行。记分卡全部从这个文件算，不靠人翻日志。
+**Recorder.** An append-only jsonl file, written automatically from three sources. The slow-tier service writes every submission and result. The herd's tool layer writes every blackboard read and write, fork, allocation and abandon. Workers self-report every fast-tier run. The scorecard is computed entirely from this file, not by someone reading through logs.
 
-**记分卡和对照组。** 跑完以后一个脚本从记录器算出第 6 节的指标，三个臂并排。
+**Scorecard and control groups.** After a run, a script computes the §6 metrics from the recorder, with the three arms side by side.
 
-防作弊只留三条，够用就行：隐藏数据和打分代码只在慢档服务的机器上，worker 的机器上没有；每次运行用全新的仓库和命名空间，上一次的东西带不过来；worker 没有 git push 权限，只能通过 herd 的工具写黑板。
+Anti-cheating keeps only three rules, which is enough. Hidden data and scoring code live only on the slow-tier service's machine, not on worker machines. Every run uses a fresh repo and namespace, so nothing carries over from the previous run. Workers have no git push permission and can write to the blackboard only through the herd's tools.
 
-**和 herd 的接口。** herd 的 Eval service 就是慢档服务的一个客户端，一两百行。因为接口和真外部 eval 一样，将来换真项目时 herd 一行不改，只换慢档服务后面的实现。
+**Interface with the herd.** The herd's Eval service is just a client of the slow-tier service, one or two hundred lines. Because the interface is the same as a real external eval, when we switch to a real project later the herd doesn't change a line; only the implementation behind the slow-tier service changes.
 
-## 3. 问题 A：仿真器里的调度策略
+## 3. Problem A: a scheduling policy in a simulator
 
-**是什么。** 一个用 SimPy 写的集群调度仿真器，源码公开。6 个数据中心，每个几十台机器、两天的任务流。worker 要写的是调度策略：一个 Python 文件实现四个钩子，加一个参数文件。
+**What it is.** A cluster scheduling simulator written in SimPy, with public source. 6 data centers, each with a few dozen machines and a two-day job stream. What workers write is the scheduling policy: one Python file that implements four hooks, plus a parameter file.
 
 ```
-order(queue, state)       -> 排队顺序
-admit(job, state)         -> 现在放不放进来
-place(job, free, state)   -> 放到哪台机器
-preempt(running, state)   -> 要不要抢占谁
-params.yaml               -> 上面四个钩子用的数字
+order(queue, state)       -> queue order
+admit(job, state)         -> whether to let it in now
+place(job, free, state)   -> which machine to put it on
+preempt(running, state)   -> whether to preempt anyone
+params.yaml               -> the numbers used by the four hooks above
 ```
 
-策略在子进程里跑，只能看到当前时刻的队列和机器状态，看不到未来的任务；每步决策限时 50 毫秒，超时这一步按基线处理，超时超过 1% 整次作废。
+The policy runs in a subprocess. It can see only the queue and machine state at the current moment, not future jobs. Each decision step is limited to 50 ms. A step that times out is handled as the baseline would handle it; if more than 1% of steps time out, the whole run is void.
 
-**目标。** 平均任务等待时间越低越好。硬约束：6 个站点里任何一个的 p99 等待时间不能比基线差；违反的候选分数作废，结果里标"违约"。
+**Objective.** Lower mean job wait time is better. Hard constraint: no one of the 6 sites may have a p99 wait time worse than the baseline's. A candidate that violates this has its score voided, and its result is marked "violated".
 
-**6 个站点各不一样，这就是埋进去的答案。** 每个站点的负载特征对应一种有效做法，一共 5 种配料，分属不同方向：
+**The 6 sites all differ, and that is the planted answer.** Each site's load characteristic matches one effective technique. There are 5 ingredients in total, belonging to different approaches:
 
-| 站点 | 负载特征 | 对它有效的做法 |
+| Site | Load characteristic | What works for it |
 | --- | --- | --- |
-| 1 | 任务时长重尾，少数任务占大头 | 回填：让短任务绕过排在前面的长任务 |
-| 2 | 早晚两个高峰，其余时间空 | 准入平滑：高峰时限流，别让机器过载变慢 |
-| 3 | 任务带数据亲和，放错机器慢 3 倍 | 就近放置 |
-| 4 | 海量小任务 | 打包：同一用户的小任务放同一台机器，省启动开销 |
-| 5、6 | 普通，但任务自带时长估计 | 按预估时长排序（全局配料） |
+| 1 | Heavy-tailed job durations; a few jobs account for most of the load | Backfill: let short jobs bypass long jobs queued ahead of them |
+| 2 | Two peaks, morning and evening; idle the rest of the time | Admission smoothing: throttle at peaks so machines don't overload and slow down |
+| 3 | Jobs have data affinity; on the wrong machine they run 3× slower | Locality-aware placement |
+| 4 | Huge numbers of small jobs | Packing: put the same user's small jobs on the same machine to save startup overhead |
+| 5, 6 | Ordinary, but jobs come with their own duration estimates | Order by estimated duration (a global ingredient) |
 
-另外埋两样东西。一个**陷阱**：极端的"最短任务优先"能把平均等待压得很低，但站点 1 的长任务会饿死，p99 爆掉——快档单种子看不出来，慢档一跑就违约。一对**冲突**：激进回填和严格的按用户公平配额同时开会互相抵消，各开一个都比两个一起开好。
+Two more things are planted. One **trap**: an extreme "shortest job first" can push mean wait very low, but site 1's long jobs starve and p99 blows up. The single-seed fast tier can't see this; the slow tier flags a violation the first time it runs it. One **conflict**: aggressive backfill and strict per-user fair-share quotas cancel each other out when both are on; either one alone beats both together.
 
-我们手搓一个开了全部 5 种配料、参数粗调过的参考策略。它的分数定义为"100% 可吃到的改进"，herd 吃到几成就看它。
+We hand-build a reference policy with all 5 ingredients on and roughly tuned parameters. Its score is defined as "100% of the available improvement", and the herd's share of available gain captured is measured against it.
 
-**两档评测。** 快档：`tb fast <candidate_dir> --seed 1`，公开 trace，一分钟以内，本地，不限次。慢档：隐藏 trace、20 个种子、全队每小时 2 次、提交后 10 分钟出结果（算力其实一两分钟，故意等到 10 分钟，模拟真实排队）。结果带均值、95% 区间、每站 p99、是否违约。
+**Two eval tiers.** Fast tier: `tb fast <candidate_dir> --seed 1`, public trace, under a minute, local, unlimited. Slow tier: hidden traces, 20 seeds, 2 per hour for the whole team, results 10 minutes after submission. (The compute actually takes a minute or two; it deliberately waits until 10 minutes to simulate real queueing.) Results include the mean, the 95% interval, per-site p99, and whether the constraint was violated.
 
-**配料探测器。** 不看代码，看行为。每种配料对应一个构造的小场景：比如给策略一个明显的回填机会，看它回不回填。跑 5 个场景就知道最终策略里有几种配料，不管 agent 用什么写法。
+**Ingredient detectors.** They look at behavior, not code. Each ingredient has a small constructed scenario. For example, give the policy an obvious backfill opportunity and see whether it backfills. Running the 5 scenarios tells how many ingredients the final policy contains, no matter how the agent wrote it.
 
-**上 herd 之前先预检。** 第 3 天拿参考策略和基线各跑 20 个种子，要求：差距至少 5 倍噪声标准差；5 种配料单独开各有可见收益；陷阱确实违约；冲突确实抵消。哪条不过就改仿真器，不动 herd。
+**Precheck before the herd.** On day 3, run the reference policy and the baseline on 20 seeds each. Requirements: the gap is at least 5× the noise standard deviation; each of the 5 ingredients turned on alone gives a visible gain; the trap really violates the constraint; the conflict really cancels out. If any one fails, change the simulator, not the herd.
 
-**PI prompt。**
+**PI prompt.**
 
 ```
-sim/ 是调度器的仿真环境（源码可读），policy/ 是线上现用的策略：一个 Python 文件 + 一个参数文件。
-sites/ 是 6 个数据中心的负载画像和公开 trace，特征各不一样。
+sim/ is the scheduler's simulation environment (source readable); policy/ is the policy currently in production: one Python file + one parameter file.
+sites/ holds load profiles and public traces for 6 data centers, each with different characteristics.
 
-目标：平均任务等待时间越低越好，但任何一个站点的 p99 不能比现在差。
-本地可以用公开 trace 随便跑单种子版（一分钟以内，抖）。正式评测是平台组的服务，用你们看不到的 trace
-跑 20 个种子，10 分钟出结果，全队每小时最多 2 次，只有正式评测的数算数。你有 48 小时。
+Goal: lower mean job wait time is better, but no site's p99 may get worse than it is now.
+Locally you can run single-seed versions on the public traces as much as you like (under a minute, noisy). The formal eval is the platform team's service; it uses traces you can't see,
+runs 20 seeds, returns results in 10 minutes, at most 2 per hour for the whole team, and only formal eval numbers count. You have 48 hours.
 
-我在意的：别被单种子的好结果骗了；每次正式提交前先说你预期多少分，事后对比；
-最后交给我的是一个策略，不是五个候选；哪个方向值得多投人你自己判断，但要留痕。
+What I care about: don't be fooled by good single-seed results; before every formal submission, say what score you expect, and compare afterward;
+what you hand me at the end is one policy, not five candidates; you decide which approaches deserve more people, but leave a trail.
 
-先对齐：你打算分哪几个方向、各派几个人、慢档配额怎么分、什么情况下你会调整。
+Align first: which approaches you plan to split the work into, how many people on each, how you'll divide the slow-tier quota, and under what circumstances you'll adjust.
 ```
 
-**48 小时大概会怎么过。** 不是预言，是让读者有个画面。头两个小时 PI 和人对齐，分出七八个方向，每个方向 1 到 2 个 worker。worker 先读自己站点的画像，本地快档刷。第五六个小时，回填方向在站点 1 上看到大幅改进，慢档确认，广播；PI 把一个闲下来的 worker 调过去调参数。第十个小时，有人试了极端最短任务优先，快档漂亮，慢档违约，在黑板上记成死胡同；之后没人再提交它。第二十个小时开始拼：有人开一个"组合"任务，把四个站点的配料合到一个策略里，发现回填和公平配额打架，在黑板上记下取舍。最后 8 小时只做验证和收尾，交一个策略。记录器里应该能看到以上每一步。
+**Roughly how the 48 hours might go.** This is not a prediction; it is meant to give the reader a picture. In the first two hours the PI aligns with the human and splits out seven or eight approaches, with 1 to 2 workers each. Workers first read the profiles of their sites and run the fast tier locally. Around hours 5–6, the backfill approach sees a big improvement on site 1; the slow tier confirms it, and it is broadcast. The PI moves an idle worker over to tune its parameters. Around hour 10, someone tries extreme shortest-job-first: it looks great in the fast tier, violates the constraint in the slow tier, and is recorded on the blackboard as a dead end. After that no one submits it again. From hour 20, combining begins. Someone opens a "composition" task that merges the ingredients for four sites into one policy, finds that backfill and fair-share quotas conflict, and records the trade-off on the blackboard. The last 8 hours are only verification and closeout, and one policy is delivered. Every one of these steps should be visible in the recorder.
 
-## 4. 问题 B：故意弄坏了五处的 harness
+## 4. Problem B: a harness deliberately broken in five places
 
-**是什么。** 一个几百行的 coding agent harness：system prompt、三四个工具（读文件、写文件、跑测试）、主循环、上下文裁剪、重试。模型固定用 haiku。题集 `tasks/dev` 60 道，每道是一个小 Python 项目加一个失败的测试，目标是让测试通过；`tasks/holdout` 另外 60 道，worker 看不到，只在最后判定用。
+**What it is.** A coding agent harness of a few hundred lines: a system prompt, three or four tools (read file, write file, run tests), a main loop, context trimming, and retries. The model is fixed to haiku. The task set `tasks/dev` has 60 tasks. Each is a small Python project plus a failing test, and the goal is to make the test pass. `tasks/holdout` has another 60 tasks that workers can't see, used only for the final verdict.
 
-**能改什么。** harness 的任何代码和 prompt。不能换模型，不能在 harness 里写死和题目有关的任何东西（这条靠人工 review 加 holdout 兜底）。
+**What may be changed.** Any of the harness's code and prompts. The model may not be swapped, and nothing task-specific may be hard-coded into the harness (this rule is backstopped by human review plus the holdout).
 
-**埋的五个坑。** 从一个还不错的 harness 出发，在五个不同维度各弄坏一处，每个坑看起来都像真实的 bug 或者欠考虑：
+**The five planted bugs.** Start from a reasonably good harness and break one thing in each of five different dimensions. Each planted bug looks like a real bug or an oversight:
 
-| 坑 | 长什么样 | 哪个维度 |
+| Planted bug | What it looks like | Dimension |
 | --- | --- | --- |
-| 工具描述误导 | `run_tests` 的描述说"只跑指定文件"，其实跑全部，agent 据此误判 | 工具 |
-| 裁剪截错地方 | 上下文满了就从末尾截，恰好把错误栈最有用的最后几行截掉 | 上下文管理 |
-| 不重试 | 工具偶发失败（我们注入 5% 的随机失败）直接放弃 | 流程 |
-| 一条坏指令 | system prompt 里写着"不要读超过 100 行的文件" | prompt |
-| 解析 bug | 多文件 diff 只应用第一个文件 | 代码 |
+| Misleading tool description | The description of `run_tests` says "runs only the specified file", but it actually runs everything, and the agent misjudges because of it | Tools |
+| Trimming cuts in the wrong place | When the context fills up, it cuts from the end, which happens to remove the last few lines of the error stack, the most useful part | Context management |
+| No retry | When a tool fails intermittently (we inject 5% random failures), it just gives up | Flow |
+| One bad instruction | The system prompt says "don't read files longer than 100 lines" | Prompt |
+| Parsing bug | A multi-file diff applies only the first file | Code |
 
-弄坏前后的通过率之差就是"100% 可吃到的改进"，预期 15 到 25 个点，预检确认。陷阱和冲突这里不用埋，会自然出现：往 prompt 里塞 dev 题常见库的提示，dev 涨 holdout 不涨，记分卡的"泛化"一行会抓到；"多读文件"和"裁剪更狠"天然打架。
+The pass-rate difference before and after breaking it is "100% of the available improvement", expected at 15 to 25 points and confirmed by the precheck. Traps and conflicts don't need to be planted here; they appear naturally. Stuffing hints about libraries common in the dev tasks into the prompt raises dev but not holdout, which the scorecard's "generalization" row catches. "Read more files" and "trim more aggressively" naturally conflict.
 
-**噪声是这个问题的头号敌人。** 60 道题、通过率 40%，单次评测的标准差约 6 个点——什么都没改，两次差 10 个点很正常。对策三条：慢档返回逐题结果，所有比较都和基线做配对（同一道题过没过），配对能压掉大半噪声；慢档每次跑 60 题 × 2 遍；快档用固定的 15 题子集跑 1 遍，5 分钟，本地不限。
+**Noise is this problem's number-one enemy.** With 60 tasks and a 40% pass rate, the standard deviation of a single eval is about 6 points. With nothing changed, a 10-point gap between two runs is normal. Three countermeasures. First, the slow tier returns per-task results, and every comparison is paired against the baseline (did the same task pass or not); pairing removes most of the noise. Second, the slow tier runs 60 tasks × 2 passes each time. Third, the fast tier runs a fixed 15-task subset once: 5 minutes, local, unlimited.
 
-**两档评测。** 快档：15 题子集，本地，约 5 分钟，不限。慢档：60 题 × 2 遍，30 分钟，全队每小时 2 次，返回配对后相对基线的提升和区间，外加逐题明细。
+**Two eval tiers.** Fast tier: 15-task subset, local, about 5 minutes, unlimited. Slow tier: 60 tasks × 2 passes, 30 minutes, 2 per hour for the whole team. It returns the paired improvement over the baseline with its interval, plus a per-task breakdown.
 
-**钱。** 每道题 haiku agent 跑一次大约几美分到两毛美元，一次慢档 120 次运行大约 5 到 25 美元；48 小时最多 96 次慢档，加上快档，一臂一轮 500 到 2500 美元上下。三臂各跑两遍，总共几千到一万多美元。这是 B 要放在 A 后面的原因。
+**Money.** One haiku agent run on one task costs roughly a few cents to twenty cents, so one slow-tier eval of 120 runs costs about $5 to $25. 48 hours allow at most 96 slow-tier evals; adding the fast tier, one run of one arm comes to roughly $500 to $2,500. Three arms, two runs each, total a few thousand to over ten thousand dollars. This is why B comes after A.
 
-**配料探测器。** 每个坑一个探针测试：构造一个会踩到这个坑的情境，跑 harness，看坑还在不在。5 个探针跑完就知道修了几个。
+**Ingredient detectors.** One probe test per planted bug: construct a situation that will hit that bug, run the harness, and see whether the bug is still there. After running the 5 probes you know how many were fixed.
 
-**预检。** 原版和埋坑版各跑 3 遍，差距至少 3 倍配对噪声；5 个坑单独修回各有可见收益。
+**Precheck.** Run the original and the bugged version 3 passes each. The gap must be at least 3× the paired noise, and fixing each of the 5 planted bugs alone must give a visible gain.
 
-**PI prompt。**
+**PI prompt.**
 
 ```
-harness/ 是我们的 coding agent，模型固定 haiku，不许换。tasks/dev 有 60 道题，现在通过率 41%。
-目标：把通过率提上去。最后用你们没见过的 60 道 holdout 判定。
+harness/ is our coding agent; the model is fixed to haiku and may not be swapped. tasks/dev has 60 tasks; the current pass rate is 41%.
+Goal: raise the pass rate. The final verdict uses 60 holdout tasks you have never seen.
 
-本地可以用 tasks/dev 里固定的 15 题子集随便跑（约 5 分钟，抖）。正式评测跑全部 60 题两遍，30 分钟，
-全队每小时最多 2 次，返回和基线的配对比较，只有它的数算数。你有 48 小时。
+Locally you can run the fixed 15-task subset in tasks/dev as much as you like (about 5 minutes, noisy). The formal eval runs all 60 tasks twice, 30 minutes,
+at most 2 per hour for the whole team, and returns a paired comparison against the baseline; only its numbers count. You have 48 hours.
 
-不许在 harness 里写死和题目有关的任何东西。
+Do not hard-code anything task-specific into the harness.
 
-我在意的：每个改动说清楚为什么有效，dev 涨了 holdout 没涨我会认为是过拟合；
-别被一次 15 题的结果骗了；每次正式提交前先说你预期的 dev 通过率，事后对比；最后交一个 harness，不是五个。
+What I care about: for every change, explain clearly why it works; if dev goes up and holdout doesn't, I'll treat it as overfitting;
+don't be fooled by a single 15-task result; before every formal submission, state the dev pass rate you expect, and compare afterward; at the end, deliver one harness, not five.
 
-先对齐：你打算从哪几个维度改，各派几个人，怎么判断一个改动是真提升还是噪声。
+Align first: which dimensions you plan to change, how many people on each, and how you'll tell whether a change is a real improvement or noise.
 ```
 
-## 5. 对照组和怎么判
+## 5. Control groups and how to judge
 
-三个臂，同样的问题目录、同样的 PI prompt、同样的正式评测配额、同样的时间：
+Three arms, with the same problem directory, the same PI prompt, the same formal eval quota and the same time:
 
-| 臂 | 是什么 | 它代表的假设 |
+| Arm | What it is | The hypothesis it represents |
 | --- | --- | --- |
-| 单干 | 一个 agent，独占全部配额；它的合格候选也由合并器合入（它看得见自己的基线） | "一个强 agent 够了" |
-| 各干各的 | N 个 agent，拿同样的 prompt，互相看不见，配额 N 等分；合格候选由和 herd 同一份、同配置的合并器在运行中合入基线，但 agent 收不到基线前进、一直在原始基线上干；用合并器最后一版基线来判；最好的单个提交另作诊断 | "并行就够了，不需要通信" |
-| herd | N 个 worker 加 PI 和黑板 | 我们的设计 |
+| Single agent | One agent with the entire quota to itself; its qualifying candidates are also merged in by the merger (it can see its own baseline) | "One strong agent is enough" |
+| Isolated | N agents with the same prompt, unable to see each other, quota split N ways; qualifying candidates are merged into the baseline during the run by a merger that is the same one, with the same configuration, as the herd's, but the agents don't receive baseline advances and keep working on the original baseline throughout; the arm is judged on the merger's last baseline version; the best single submission is reported separately as a diagnostic | "Parallelism is enough; no communication is needed" |
+| herd | N workers plus a PI and a blackboard | Our design |
 
-N 取 herd 的 worker 数。每个臂跑 2 遍，因为噪声。
+N equals the herd's number of workers. Each arm runs 2 times, because of noise.
 
-判定看两样：holdout 上的最终分数（报效应量和配对区间，不设"3 次里赢 3 次"之类的硬杠），以及第 6 节的记分卡。
+The verdict looks at two things: the final score on holdout (report the effect size and the paired interval; no hard bar such as "win 3 out of 3"), and the §6 scorecard.
 
-结果怎么读——这是失败以后知道该改哪的地方：
+How to read the results. This is where, after a failure, you learn what to change:
 
-| 分数 | 行为 | 意思 | 下一步 |
+| Score | Behavior | Meaning | Next step |
 | --- | --- | --- | --- |
-| herd 赢 | 达标 | 设计成立 | 上问题 B，再上真项目 |
-| herd 赢 | 不达标 | 赢得可疑，可能是人多多试了几次撞上的 | 查记录器，看分数从哪来 |
-| 平或输 | 达标 | herd 行为对，但问题里"拼"的分量不够，或者对照组太强 | 改问题：加强配料的可组合性，不改 herd |
-| 平或输 | 不达标 | 看哪一行红 | 广度低 → PI 分方向的 prompt；拼装少 → 组合任务没触发；死胡同重撞 → 黑板读取或死胡同广播；配额纪律差 → 提交前预测没起作用；倾斜没发生 → 分配器；泛化差 → 快档过拟合 |
+| herd wins | Meets target | The design holds | Move to problem B, then to a real project |
+| herd wins | Misses target | A suspicious win; maybe more agents just made more attempts and got lucky | Check the recorder to see where the score came from |
+| Tie or loss | Meets target | The herd behaves correctly, but "combining" doesn't carry enough weight in the problem, or the control groups are too strong | Change the problem: make the ingredients more composable; don't change the herd |
+| Tie or loss | Misses target | See which row is red | Low breadth → the PI's prompt for splitting approaches; little composition → composition tasks didn't trigger; dead ends re-hit → blackboard reads or dead-end broadcast; poor quota discipline → pre-submission prediction didn't work; no tilt → the allocator; poor generalization → overfitting to the fast tier |
 
-最后一行每个箭头后面对应 herd 文档里的一个具体部分，改完重跑同一个问题。
+Each arrow in the last row points to a specific part of the herd design doc. After fixing it, rerun the same problem.
 
-## 6. 记分卡
+## 6. Scorecard
 
-| 指标 | 怎么从记录器算 | A 的目标 | B 的目标 |
+| Metric | How it is computed from the recorder | Target for A | Target for B |
 | --- | --- | --- | --- |
-| 广度 | 前 25% 时间内碰过慢档的不同方向数 | ≥ 5（单干约 2 到 3） | ≥ 4 |
-| 拼装 | 最终交付里探测到的配料数 | ≥ 3 | ≥ 3 |
-| 吃到几成 | (最终 − 基线) ÷ (参考 − 基线)，见 11.5 | ≥ 70% | ≥ 60% |
-| 死胡同重撞 | 同一个被标为死胡同的想法被其他人再次提交慢档的次数 | 0 | 0 |
-| 冲突处理 | 两个冲突配料是否同时开着；或黑板上有取舍记录 | 否，或有记录 | 不适用 |
-| 配额纪律 | 慢档提交里，快档结果已经为正的占比 | ≥ 80% | ≥ 80% |
-| 预测误差 | 提交时预测分和实际分之差，后半程比前半程 | 缩小 | 缩小 |
-| 倾斜 | 某方向出现大改进后 2 小时内，它的 worker 数有没有增加 | 有 | 有 |
-| 泛化 | 隐藏数据和公开数据上的分数差 | 小于噪声 | 小于 1 倍配对噪声 |
+| Breadth | Number of distinct approaches that reached the slow tier within the first 25% of the time | ≥ 5 (single agent about 2 to 3) | ≥ 4 |
+| Composition | Number of ingredients detected in the final deliverable | ≥ 3 | ≥ 3 |
+| Share of available gain captured | (final − baseline) ÷ (reference − baseline), see 11.5 | ≥ 70% | ≥ 60% |
+| Dead-end re-hits | Number of times an idea marked as a dead end was submitted to the slow tier again by someone else | 0 | 0 |
+| Conflict handling | Whether the two conflicting ingredients are both on; or whether there is a trade-off record on the blackboard | No, or there is a record | N/A |
+| Quota discipline | Among slow-tier submissions, the share whose fast-tier result was already positive | ≥ 80% | ≥ 80% |
+| Prediction error | Difference between the score predicted at submission and the actual score, second half vs. first half | Shrinks | Shrinks |
+| Tilt | Within 2 hours after a big improvement appears in an approach, whether its number of workers increased | Yes | Yes |
+| Generalization | Score difference between hidden data and public data | Less than the noise | Less than 1× the paired noise |
 
-阈值是猜的，第一次跑完就校准。
+The thresholds are guesses. Calibrate them after the first run.
 
-## 7. 建造顺序
+## 7. Build order
 
-| 天 | 做什么 | 结束时能看到什么 |
+| Day | What to do | What you can see at the end |
 | --- | --- | --- |
-| 1 | 仿真器、6 个站点的负载生成、基线策略、快档命令 | 本地一分钟内跑出一个分数 |
-| 2 | 慢档服务（排队、配额、隐藏 trace、20 种子、区间）、记录器、配料探测器、记分卡脚本 | 提交一个策略，10 分钟后拿到结果，记录器里有一行 |
-| 3 | 预检：参考策略对基线；再跑"单干"臂 24 小时 | 预检四条全过；单干臂的记分卡 |
-| 4 | 合并器（11.8.1）：先进先出、rebase、配对复测、接收规则、抽查、回退、收尾；再跑"各干各的"臂 24 小时 | 合并器的脚本化测试全绿；两个对照臂的记分卡 |
-| 5 到 6 | herd 接上，跑 A，两遍 | 三臂对比表 |
-| 7 到 8 | 问题 B：harness、埋坑、题集、探针、预检 | 原版对埋坑版的差距确认 |
-| 之后 | herd 跑 B |  |
+| 1 | Simulator, load generation for the 6 sites, baseline policy, fast-tier command | A score produced locally within one minute |
+| 2 | Slow-tier service (queue, quota, hidden traces, 20 seeds, intervals), recorder, ingredient detectors, scorecard script | Submit a policy, get the result 10 minutes later, and see one line in the recorder |
+| 3 | Precheck: reference policy vs. baseline; then run the "single agent" arm for 24 hours | All four precheck conditions pass; the single-agent arm's scorecard |
+| 4 | Merger (11.8.1): FIFO, rebase, paired remeasure, acceptance rule, spot check, revert, closeout; then run the "isolated" arm for 24 hours | The merger's scripted tests are all green; scorecards for both control arms |
+| 5 to 6 | Hook up the herd, run A, twice | Three-arm comparison table |
+| 7 to 8 | Problem B: harness, planted bugs, task set, probes, precheck | Gap between the original and the bugged version confirmed |
+| After that | The herd runs B |  |
 
-和 herd 文档的对接：herd 文档第 14 节的"第 1 周"从这里的第 4 天之后开始（合并器建好以后），herd 第 1 周需要的 eval 就是这里的慢档服务。
+Hand-off to the herd design doc: "Week 1" in §14 of the herd design doc starts after day 4 here (once the merger is built). The eval that the herd's week 1 needs is the slow-tier service here.
 
-## 8. 先这么定的默认选择
+## 8. Defaults we are going with for now
 
-下面这些还没有拍板，先按最便宜的定，改起来都不贵：
+None of the following is settled yet. For now we take the cheapest option; none of them is expensive to change:
 
-| 事项 | 默认 | 为什么 | 改的代价 |
+| Item | Default | Why | Cost to change |
 | --- | --- | --- | --- |
-| 策略形式 | 代码 + 参数 | 纯参数方向太少，撑不起"方向多" | 小 |
-| 仿真器 | 自己写 SimPy，约 500 行 | 能埋结构、能控噪声 | 第二阶段换 Batsim 这类真实仿真器 |
-| 仿真器源码 | worker 可读 | 真实情况工程师看得到；藏的只有正式评测的 trace | 小 |
-| 预算 | 48 小时、慢档全队每小时 2 次、快档不限 | 和 PI prompt 一致 | 改数字 |
-| B 的模型 | haiku | 便宜；要测的是 harness 不是模型 | 改一行 |
-| B 的题集 | 从公开的 Python 小 bug 数据集抽一半，LLM 造一半，全部带测试 | 快 | 换题集 |
-| 慢档延迟 | 人为撑到 10 分钟 | 模拟排队 | 改一个数 |
-| 对照组的 N | 等于 herd 的 worker 数 | 公平 | 改一个数 |
-| 每臂遍数 | 2 | 噪声 | 钱 |
+| Policy form | Code + parameters | Parameters alone give too few approaches to support "many approaches" | Small |
+| Simulator | Our own, in SimPy, about 500 lines | Lets us plant structure and control noise | In phase two, swap in a realistic simulator such as Batsim |
+| Simulator source | Readable by workers | In real life engineers can see it; the only hidden thing is the formal eval's traces | Small |
+| Budget | 48 hours; slow tier 2 per hour for the whole team; fast tier unlimited | Consistent with the PI prompt | Change the numbers |
+| B's model | haiku | Cheap; what we are testing is the harness, not the model | Change one line |
+| B's task set | Half drawn from a public dataset of small Python bugs, half made by an LLM, all with tests | Fast | Swap the task set |
+| Slow-tier latency | Artificially stretched to 10 minutes | Simulates queueing | Change one number |
+| N for the control groups | Equal to the herd's number of workers | Fair | Change one number |
+| Runs per arm | 2 | Noise | Money |
 
-## 9. 已知的坑
+## 9. Known pitfalls
 
-- agent 钻仿真器空子：靠隐藏 trace、子进程沙箱、每步限时；另外慢档分数异常高于参考策略时自动复核
-- 埋的坑被识破：坑要像真实 bug，不留注释；埋完以后 squash git 历史
-- 噪声吃掉信号：第 3 天和第 7 天的预检就是为这个，不过不往下走
-- herd 内部抢配额：这是 herd 自己要解决的事（PI 分配），记分卡"配额纪律"会照出来
-- 快档过拟合公开数据：记分卡"泛化"一行
-- 成本失控：慢档有硬上限
-- "各干各的"定义不公平：它们拿同样的 PI prompt、同样的总配额，合格候选由和 herd 同一个合并器合入——合并器各臂相同，herd 赢它才说明赢在共享，不是赢在合并器
-- 单干臂赢了 herd：这本身就是结论，先看记分卡找原因，不要急着把问题加大来"让 herd 赢"
+- Agents exploit loopholes in the simulator: countered by hidden traces, the subprocess sandbox, and the per-step time limit; in addition, a slow-tier score abnormally higher than the reference policy's triggers an automatic review
+- The planted bugs are seen through: they must look like real bugs, with no comments; squash the git history after planting them
+- Noise swamps the signal: this is what the day 3 and day 7 prechecks are for; if they fail, don't go further
+- Quota contention inside the herd: this is the herd's own problem to solve (PI allocation); the scorecard's "quota discipline" row will expose it
+- The fast tier overfits the public data: the scorecard's "generalization" row
+- Cost runs away: the slow tier has a hard cap
+- The "isolated" definition is unfair: they get the same PI prompt and the same total quota, and their qualifying candidates are merged in by the same merger as the herd's. The merger is identical across arms, so only if the herd beats this arm does it show the win comes from sharing, not from the merger
+- The single-agent arm beats the herd: that is a conclusion in itself. First look at the scorecard for the reason; don't rush to make the problem bigger to "let the herd win"
 
-## 10. 复用什么开源
+## 10. What open source to reuse
 
-| 要解决的事 | 用什么 | 备注 |
+| What needs solving | What to use | Notes |
 | --- | --- | --- |
-| 仿真 | SimPy | 几百行就够 |
-| 慢档服务 | FastAPI + Redis | 队列和配额 |
-| 跑三臂、记日志、看回放 | Inspect AI（可选） | 第一版可以只用 jsonl 加一个脚本；要并排看 transcript 时再上 |
-| 真实仿真器（第二阶段） | Batsim | 真实但埋不了结构 |
-| 不用 | HPOBench 之类查表 benchmark | 策略空间太小，方向不够多 |
+| Simulation | SimPy | A few hundred lines is enough |
+| Slow-tier service | FastAPI + Redis | Queue and quota |
+| Running the three arms, logging, viewing replays | Inspect AI (optional) | The first version can use just jsonl plus a script; bring it in when we need to view transcripts side by side |
+| Realistic simulator (phase two) | Batsim | Realistic, but we can't plant structure in it |
+| Don't use | Table-lookup benchmarks such as HPOBench | The policy space is too small; not enough approaches |
 
-## 11. 给实现者的规格
+## 11. Spec for implementers
 
-这一节是给动手建测试台的 agent 看的。前面没定的细节这里定；这里和前面有出入的，以这里为准（11.5 是记分卡的唯一权威定义，第 6 节的表只是摘要）。这里还没定的，实现者自己定，写进仓库根目录的 `DECISIONS.md`（一行一条：定了什么、为什么、改起来贵不贵），不要回来问。记分卡的定义和三条防作弊规则不得自行改动。所有时间单位是秒，时间戳是 epoch 秒。
+This section is for the agent that builds the testbed. Details left open earlier are settled here. Where this section differs from earlier ones, this section wins (11.5 is the only authoritative definition of the scorecard; the table in §6 is just a summary). Anything not yet settled here, the implementer decides and writes into `DECISIONS.md` at the repo root (one line each: what was decided, why, and whether it is expensive to change); don't come back to ask. The scorecard definitions and the three anti-cheating rules must not be changed on your own. All time units are seconds; timestamps are epoch seconds.
 
-### 11.1 仓库结构
+### 11.1 Repo structure
 
-独立仓库 `herd-testbed`，不依赖 herd 仓库；herd 将来只通过 HTTP 和几个命令行工具连它。
+A standalone repo, `herd-testbed`, with no dependency on the herd repo. The herd will later connect to it only through HTTP and a few command-line tools.
 
 ```
 herd-testbed/
   README.md  DECISIONS.md
   testbed/
-    problem_api.py     # Problem 协议（11.2）
-    slow_eval/         # 慢档：FastAPI；队列、配额、运行注册用 Redis（单机开发可用 sqlite）
+    problem_api.py     # Problem protocol (11.2)
+    slow_eval/         # slow tier: FastAPI; queue, quota and run registry in Redis (sqlite is fine for single-machine dev)
     cli/               # tb fast / submit / status / history / final / pack-problem / run
-    recorder/          # 事件 schema、追加写入
-    scorecard/         # metrics.py：每个指标一个函数；report.py：三臂并排
-    sandbox/           # 跑候选的子进程封装；B 的 test runner 也在这里（不在候选里）
-    arms/              # single.py  isolated.py  herd.py（后接）  scripted/
-    integrator/        # 合并器核心（11.8.1）：三个臂共用；herd 的 Integrator 也调它
+    recorder/          # event schema, append-only writes
+    scorecard/         # metrics.py: one function per metric; report.py: three arms side by side
+    sandbox/           # subprocess wrapper for running candidates; B's test runner is here too (not in the candidate)
+    arms/              # single.py  isolated.py  herd.py (hooked up later)  scripted/
+    integrator/        # merger core (11.8.1): shared by all three arms; the herd's Integrator calls it too
   problems/
-    sched/             # 问题 A：sim/  sites/  policy/{baseline.py,params.yaml}  map/  reference/  probes/  hidden/  problem.yaml
-    harness/           # 问题 B：harness/  map/  tasks/dev  tasks/holdout  planted/  probes/  problem.yaml
+    sched/             # problem A: sim/  sites/  policy/{baseline.py,params.yaml}  map/  reference/  probes/  hidden/  problem.yaml
+    harness/           # problem B: harness/  map/  tasks/dev  tasks/holdout  planted/  probes/  problem.yaml
   tests/
 ```
 
-`hidden/`、`reference/`、`tasks/holdout`、`planted/`、每道题的 `tests/test_hidden.py`、慢档机器上的 `problem.yaml`（含隐藏种子）和配料探测器 probes/ 只存在于慢档服务的机器。发给 worker 的问题目录由 `tb pack-problem` 生成：排除上述全部，加入 `baseline_scores.json`（公开种子 1 到 5 上基线的快档分）和 map/（公开的第一批测量脚本：A 按站点、按作业类拆 wait time 和 p99，B 按题类拆失败；这就是设计文档 D76 机会地图的初始脚本，读快档的 per\_item 输出 gap.md）。有一个测试断言排除干净了。另有 problems/stub/，只给 11.9 的脚本化自测用：evaluate 按 manifest 里声明的配料返回固定分（score = −1000 + 100 × 配料数，含 trap\_sjf 时 constraint\_ok = false），probes 直接读 manifest，参考 = 五种配料全开。
+`hidden/`, `reference/`, `tasks/holdout`, `planted/`, each task's `tests/test_hidden.py`, the `problem.yaml` on the slow-tier machine (which contains the hidden seeds), and the ingredient detectors in probes/ exist only on the slow-tier service's machine. The problem directory sent to workers is generated by `tb pack-problem`. It excludes all of the above, and adds `baseline_scores.json` (the baseline's fast-tier scores on public seeds 1 to 5) and map/. map/ holds the first batch of public measurement scripts: for A, wait time and p99 broken down by site and by job class; for B, failures broken down by task class. These are the initial scripts for the design doc's D76 opportunity map; they read the fast tier's per\_item output and write gap.md. One test asserts that the exclusion is clean. There is also problems/stub/, used only for the scripted self-check in 11.9: evaluate returns a fixed score based on the ingredients declared in the manifest (score = −1000 + 100 × number of ingredients; constraint\_ok = false when trap\_sjf is included), probes read the manifest directly, and the reference = all five ingredients on.
 
-### 11.2 问题包协议和候选格式
+### 11.2 Problem pack protocol and candidate format
 
 ```python
 class Problem(Protocol):
     name: str
-    ingredients: list[str]      # 受控词表。A = [backfill, admission, locality, packing, est_order, trap_sjf, fairshare]
+    ingredients: list[str]      # controlled vocabulary. A = [backfill, admission, locality, packing, est_order, trap_sjf, fairshare]
     public_seeds: list[int]     # A = [1,2,3,4,5]
     def evaluate(self, candidate_dir: Path, tier: Literal['fast','slow'], seed: int, timeout: bool = True) -> Result: ...
-    def aggregate(self, results: list[Result]) -> Agg: ...            # 多种子或多遍 -> 一个数
+    def aggregate(self, results: list[Result]) -> Agg: ...            # multiple seeds or passes -> one number
     def constraint_ok(self, agg: Agg, baseline_agg: Agg) -> bool: ...
-    def probes(self, candidate_dir: Path) -> dict[str, bool]: ...     # 配料名 -> 在不在，键正好是 ingredients
+    def probes(self, candidate_dir: Path) -> dict[str, bool]: ...     # ingredient name -> present or not; the keys are exactly ingredients
 
-Result = {'score': float | None,                         # None = 作废（超时或崩溃），原因在 extra
-          'per_item': [{'id': str, 'value': float}],     # A: site1.mean, site1.p99, ...；B: 题号 -> 0 / 0.5 / 1
-          'extra': dict}                                 # A: timed_out, timeout_ratio；B: tokens
-Agg    = {'score': float | None, 'ci': [lo, hi], 'n': int, 'per_seed': [float], 'per_item': [...], 'extra': dict}   # per_seed：逐种子（B 是逐遍）的 score，任何两个候选的配对差都能事后算，不再花 T2
+Result = {'score': float | None,                         # None = void (timeout or crash); the reason is in extra
+          'per_item': [{'id': str, 'value': float}],     # A: site1.mean, site1.p99, ...; B: task id -> 0 / 0.5 / 1
+          'extra': dict}                                 # A: timed_out, timeout_ratio; B: tokens
+Agg    = {'score': float | None, 'ci': [lo, hi], 'n': int, 'per_seed': [float], 'per_item': [...], 'extra': dict}   # per_seed: the score per seed (per pass for B), so the paired difference between any two candidates can be computed after the fact without spending more T2
 ```
 
-`score` 越高越好。A 的 score = −（六站 mean wait 的等权平均，秒）；B 的 score = 通过率。`ci` 始终是 score 自己的 95% bootstrap 区间（A 按种子重抽，B 按题重抽）；B 另在 extra 里给 `delta_vs_baseline: {mean, ci}`（逐题配对）。
+Higher `score` is better. A's score = −(equal-weight average of the six sites' mean wait, in seconds); B's score = pass rate. `ci` is always the 95% bootstrap interval of score itself (A resamples by seed, B by task). B additionally gives `delta_vs_baseline: {mean, ci}` in extra (paired per task).
 
-候选 = 一个目录。A 是 `policy.py` + `params.yaml`；B 是整个 `harness/`。`tb submit <dir> --predict X --note ... [--parents h1,h2] [--direction 标签]` 负责生成并覆盖 `manifest.yaml`（actor 从环境变量取），打成 zip（上限 5 MB）。hash = 按相对路径排序后每个文件 `path\0bytes` 拼起来，再加上目标 baseline 的标识，一起做 sha256，忽略 `__pycache__`、`*.pyc` 和 manifest 本身。`direction` 只用于展示；记分卡的"方向"一律是探针算出的配料集合。
+A candidate = a directory. For A it is `policy.py` + `params.yaml`; for B it is the whole `harness/`. `tb submit <dir> --predict X --note ... [--parents h1,h2] [--direction label]` generates and overwrites `manifest.yaml` (actor is taken from an environment variable) and packs it into a zip (5 MB limit). hash = sort the files by relative path, concatenate `path\0bytes` for each file, append the identifier of the target baseline, and take the sha256 of the whole, ignoring `__pycache__`, `*.pyc` and the manifest itself. `direction` is for display only; an "approach" in the scorecard is always the ingredient set computed by the probes.
 
-### 11.3 慢档服务
+### 11.3 Slow-tier service
 
 ```
-POST /runs            {run_id, arm, problem, N, overrides?}      # 臂运行器先调；慢档写一条 calibration 事件
-                      之后所有请求必带 header  X-TB-Run: <run_id>，配额、队列、记录都按 run 隔开
-POST /submit          {zip_b64, dataset?: dev|audit|judge}                                    # actor、预测、parents 都在 manifest 里
+POST /runs            {run_id, arm, problem, N, overrides?}      # the arm runner calls this first; the slow tier writes a calibration event
+                      every request after this must carry the header  X-TB-Run: <run_id>; quota, queue and records are all separated per run
+POST /submit          {zip_b64, dataset?: dev|audit|judge}                                    # actor, prediction and parents are all in the manifest
   200 {ticket, position, visible_at}
-  200 {ticket, duplicate: true, of: <ticket>}      # 同 hash 已有票（含还在排队的）：不扣配额，记 submit(duplicate=true)；per_actor_share 下 duplicate 和 /status 的可见范围都按 (actor, hash) 算
+  200 {ticket, duplicate: true, of: <ticket>}      # a ticket with the same hash already exists (including one still queued): no quota charged, records submit(duplicate=true); under per_actor_share, both duplicate and what /status shows are keyed by (actor, hash)
   429 {reason: 'quota', next_slot_at}
   400 {reason: 'invalid_candidate' | 'too_large' | 'missing_prediction'}
 GET  /status/{ticket} {state: 'queued'|'running'|'done'|'failed', result?: Agg + {constraint_ok}}
-                      visible_at 之前不返回 result
+                      no result is returned before visible_at
 GET  /history         {quota: {per_hour, used_this_hour, total, used_total}, items: [...]}
-                      items 字段：ticket, actor, ts_submit, visible_at, hash, predicted_score, direction, note,
-                      score, ci, constraint_ok（visible_at 之前这三个为 null）。per_actor_share 时只返回本 actor 的 items
-GET  /meta            {baseline: Agg（隐藏种子上的基线，可公开）, public_seeds, constraint_rule}
-POST /events          {events: [...]}                              # 任何类型都收，追加到本 run 的记录器
-POST /final           {hash | ticket}                              # tb final 调；per_actor_share 下记为 actor_final，run 级 final 由运行器结束时写；没有 result 的候选在配额外补跑一次
+                      items fields: ticket, actor, ts_submit, visible_at, hash, predicted_score, direction, note,
+                      score, ci, constraint_ok (these three are null before visible_at). Under per_actor_share, only this actor's items are returned
+GET  /meta            {baseline: Agg (the baseline on the hidden seeds; safe to expose), public_seeds, constraint_rule}
+POST /events          {events: [...]}                              # accepts any type; appended to this run's recorder
+POST /final           {hash | ticket}                              # called by tb final; under per_actor_share it is recorded as actor_final, and the run-level final is written by the runner at the end; a candidate with no result gets one extra run outside the quota
 ```
 
-**配额。** 固定窗口，窗口起点 = `/runs` 的时刻：每个整小时窗口全队 2 次，总上限 96；第一个窗口就有 2 次。`per_actor_share: true`（各干各的臂）时改成每个 actor 每 ceil(N/2) 小时 1 次、总额 ceil(96/N)。dataset 默认 dev；audit 和 judge 只有臂运行器能提交，各有单独上限（audit 每 run 10 次），不占每小时 2 次，用各自的 trace（四份：public、dev、audit、judge，同一生成器不同种子）。`visible_at = max(ts_submit + visible_delay_s, 算完的时刻)`。
+**Quota.** Fixed windows; window start = the time of `/runs`. Each full-hour window gives the whole team 2 submissions, with a total cap of 96; the first window already has 2. With `per_actor_share: true` (the isolated arm), it becomes 1 per actor every ceil(N/2) hours, total ceil(96/N). dataset defaults to dev. Only the arm runner can submit audit and judge; each has its own cap (audit: 10 per run), doesn't count against the 2 per hour, and uses its own traces (four sets: public, dev, audit, judge; same generator, different seeds). `visible_at = max(ts_submit + visible_delay_s, the time the computation finishes)`.
 
-**评测。** A：对 20 个隐藏种子各跑一次 `evaluate(tier='slow')`。隐藏种子是 20 个 64 位随机数，只写在慢档机器的 `problem.yaml` 里；快档只接受公开种子 1 到 5。B：dev 60 题跑 2 遍。服务启动时对每个问题把基线和参考（A）或干净版（B）在隐藏数据上各跑一遍并缓存：基线的 Agg 给 constraint\_ok 和 `/meta` 用；参考的 Agg 只写进 calibration 事件，任何接口都不返回。
+**Evaluation.** A: run `evaluate(tier='slow')` once on each of the 20 hidden seeds. The hidden seeds are 20 random 64-bit numbers, written only in the `problem.yaml` on the slow-tier machine; the fast tier accepts only public seeds 1 to 5. B: run the 60 dev tasks, 2 passes. When the service starts, for each problem it runs the baseline and the reference (A) or the clean version (B) once each on the hidden data and caches the results. The baseline's Agg is used for constraint\_ok and `/meta`. The reference's Agg is written only into the calibration event and is never returned by any endpoint.
 
-**可调的时间旋钮**（`problem.yaml` 默认，`/runs` 的 overrides 可改）：`quota_per_hour=2`、`quota_total=96`、`visible_delay_s=600`、`slow_seeds=20`、`tilt_window_s=7200`。没有 token 上限：token 不是我们要省的东西，也不计入记分卡。合并器的复测配额：quota\_integrator\_total=16、quota\_integrator\_per\_hour=1，三个臂相同（11.8.1）。测试台自测（11.9）用 `slow_seeds=2, visible_delay_s=1, quota_per_hour=100, tilt_window_s=10`。
+**Adjustable time knobs** (defaults in `problem.yaml`; can be changed through the `overrides` of `/runs`): `quota_per_hour=2`, `quota_total=96`, `visible_delay_s=600`, `slow_seeds=20`, `tilt_window_s=7200`. There is no token cap: tokens are not something we are trying to save, and they don't count toward the scorecard. The merger's remeasure quota: quota\_integrator\_total=16, quota\_integrator\_per\_hour=1, the same for all three arms (11.8.1). The testbed self-check (11.9) uses `slow_seeds=2, visible_delay_s=1, quota_per_hour=100, tilt_window_s=10`.
 
-**命令行。** `tb fast <dir> --seed N`（只许 1 到 5，打印 score 和同种子基线分）、`tb submit`、`tb status`、`tb history`、`tb final <hash|ticket>`。它们从环境变量 `TB_RUN_ID`、`TB_ARM`、`TB_ACTOR`、`TB_SLOW_URL` 取值；`tb fast` 把 fast\_run 事件 POST 到 `/events`，同时追加到 `~/.tb/events.jsonl` 做备份。herd 的 Eval service 将来调的就是这些接口。
+**Command line.** `tb fast <dir> --seed N` (only 1 to 5 allowed; prints the score and the baseline's score on the same seed), `tb submit`, `tb status`, `tb history`, `tb final <hash|ticket>`. They take their values from the environment variables `TB_RUN_ID`, `TB_ARM`, `TB_ACTOR`, `TB_SLOW_URL`. `tb fast` POSTs a fast\_run event to `/events` and also appends it to `~/.tb/events.jsonl` as a backup. These are the interfaces the herd's Eval service will call later.
 
-### 11.4 记录器
+### 11.4 Recorder
 
-一行一条 JSON，只追加，主文件在慢档机器上，每个 run 一个文件：
+One JSON object per line, append-only. The main file lives on the slow-tier machine, one file per run:
 
 ```json
 {"ts": 1760800000.0, "run_id": "r-2026-10-21-a", "arm": "herd", "actor": "worker-07", "type": "...", "data": {...}}
 ```
 
-| type | 谁写 | data |
+| type | Written by | data |
 | --- | --- | --- |
-| calibration | 慢档，`/runs` 时 | baseline\_slow: Agg，reference\_slow: Agg（B 是干净版），baseline\_fast: {seed: score} |
+| calibration | slow tier, at `/runs` | baseline\_slow: Agg, reference\_slow: Agg (for B, the clean version), baseline\_fast: {seed: score} |
 | fast\_run | `tb fast` | hash, seed, score, baseline\_score |
-| submit | 慢档 | ticket, hash, predicted\_score, parents, duplicate, direction |
-| result | 慢档，ts = visible\_at | ticket, hash, score, ci, constraint\_ok, ingredients（慢档对每个候选跑 probes） |
-| quota\_rejected | 慢档 | actor |
-| blackboard\_write | herd 工具层 | kind: claim、dead\_end、insight、compose 之一；id；refs: 候选 hash 列表；hash（dead\_end 必填） |
-| blackboard\_read | herd 工具层 | ids |
-| fork | herd 工具层 | from\_actor, to\_actor, reason |
-| allocation | herd 工具层 | hash（触发这次调整的候选，必填）, workers\_before, workers\_after, reason |
-| abandon | herd 工具层 | hash, reason |
-| final | 慢档，`/final` 时 | hash, ticket |
-| final\_check | 臂运行器 | dataset: A 是 public（种子 1 到 5），B 是 holdout；score, ci |
-| actor\_final | 慢档，per\_actor\_share 下的 /final | actor, hash, ticket；记分卡不用它，只用 run 级 final |
+| submit | slow tier | ticket, hash, predicted\_score, parents, duplicate, direction |
+| result | slow tier, ts = visible\_at | ticket, hash, score, ci, constraint\_ok, ingredients (the slow tier runs probes on every candidate) |
+| quota\_rejected | slow tier | actor |
+| blackboard\_write | herd tool layer | kind: one of claim, dead\_end, insight, compose; id; refs: list of candidate hashes; hash (required for dead\_end) |
+| blackboard\_read | herd tool layer | ids |
+| fork | herd tool layer | from\_actor, to\_actor, reason |
+| allocation | herd tool layer | hash (the candidate that triggered this adjustment; required), workers\_before, workers\_after, reason |
+| abandon | herd tool layer | hash, reason |
+| final | slow tier, at `/final` | hash, ticket |
+| final\_check | arm runner | dataset: public for A (seeds 1 to 5), holdout for B; score, ci |
+| actor\_final | slow tier, /final under per\_actor\_share | actor, hash, ticket; the scorecard doesn't use it, only the run-level final |
 
-T = `/runs` 到 final 事件的时长。单干和各干各的两个臂没有黑板事件，记分卡对应行显示"不适用"；合并器的事件（baseline\_advanced 等）三个臂都有。
+T = the duration from `/runs` to the final event. The single-agent and isolated arms have no blackboard events, so the corresponding scorecard rows show "N/A". Merger events (baseline\_advanced and so on) exist in all three arms.
 
-### 11.5 记分卡的算法（权威定义）
+### 11.5 Scorecard algorithms (authoritative definition)
 
-每个指标是 `scorecard/metrics.py` 里的一个函数，输入是一个 run 的全部事件，别的什么都不读。cal = calibration 事件。
+Each metric is one function in `scorecard/metrics.py`. Its input is all the events of one run, and it reads nothing else. cal = the calibration event.
 
-| 指标 | 算法 |
+| Metric | Algorithm |
 | --- | --- |
-| 广度 | ts < 0.25T 的 result 事件里出现过的不同配料数，7 个都算 |
-| 拼装 | final 指向的 result 的配料数，不含 trap\_sjf |
-| 吃到几成 | (final.score − cal.baseline\_slow.score) / (cal.reference\_slow.score − cal.baseline\_slow.score) |
-| 死胡同重撞 | 对每个 constraint\_ok=false 或 score < cal.baseline\_slow.score 的 result，数它之后配料集合相同的 submit（任何 actor，含同一个，含 duplicate）。herd 臂另加：dead\_end 写入后，配料集合等于其 hash 所指 result 的 submit 数 |
-| 冲突处理 | final 的配料是否同时含 backfill 和 fairshare；若含，是否有 kind 为 insight 或 compose 的 blackboard\_write，其 refs 对应 result 的配料并集包含这两个 |
-| 配额纪律 | submit 中，此前存在同 hash 的 fast\_run 且 score > 该条的 baseline\_score 的占比 |
-| 预测误差 | \|predicted\_score − score\| / \|score\| 的中位数，按提交序号分前后两半；"缩小" = 后半 ≤ 0.8 × 前半 |
-| 倾斜 | 第一个比当时最佳 result 高出 ≥ 1 个 ci 宽度的 result r；其后 tilt\_window\_s 内是否有 allocation，其 hash 的配料与 r 的配料有交集且 workers\_after > workers\_before；非 herd 臂不适用 |
-| 泛化 | (seen − unseen) / final 的 ci 宽度，目标 < 1。A 的 seen = final\_check（公开种子）、unseen = final；B 的 seen = final（dev）、unseen = final\_check（holdout） |
+| Breadth | Number of distinct ingredients appearing in result events with ts < 0.25T; all 7 count |
+| Composition | Number of ingredients of the result that final points to, not counting trap\_sjf |
+| Share of available gain captured | (final.score − cal.baseline\_slow.score) / (cal.reference\_slow.score − cal.baseline\_slow.score) |
+| Dead-end re-hits | For each result with constraint\_ok=false or score < cal.baseline\_slow.score, count the submits after it with the same ingredient set (any actor, including the same one, including duplicates). For the herd arm, also add: after a dead\_end is written, the number of submits whose ingredient set equals that of the result its hash points to |
+| Conflict handling | Whether final's ingredients include both backfill and fairshare; if they do, whether there is a blackboard\_write of kind insight or compose whose refs' corresponding results have an ingredient union that contains both |
+| Quota discipline | Among submits, the share for which an earlier fast\_run with the same hash exists and its score > that entry's baseline\_score |
+| Prediction error | Median of \|predicted\_score − score\| / \|score\|, split into first and second halves by submission sequence number; "shrinks" = second half ≤ 0.8 × first half |
+| Tilt | The first result r that is higher than the best result at that time by ≥ 1 ci width; whether within tilt\_window\_s after it there is an allocation whose hash's ingredients intersect r's ingredients and workers\_after > workers\_before; N/A for non-herd arms |
+| Generalization | (seen − unseen) / final's ci width, target < 1. For A, seen = final\_check (public seeds), unseen = final; for B, seen = final (dev), unseen = final\_check (holdout) |
 
-### 11.6 问题 A 的规格
+### 11.6 Problem A spec
 
-**实体。**
+**Entities.**
 
 ```
-Machine: id, site, rack, cores=8, free_cores, last_user_by_time  (站 4 用)
-Job:     id, site, user, submit_t, cores, true_dur(策略看不到), est_dur, rack_pref(只有站 3 有), state
-State 给策略看的: now, site, queue (Job 公开字段), machines (id, rack, free_cores, recent_users: user -> 最近在该机开始或结束的时刻), running (job id, machine id, user, 已跑时长, est_dur),
+Machine: id, site, rack, cores=8, free_cores, last_user_by_time  (used by site 4)
+Job:     id, site, user, submit_t, cores, true_dur(not visible to the policy), est_dur, rack_pref(only site 3 has it), state
+State shown to the policy: now, site, queue (public Job fields), machines (id, rack, free_cores, recent_users: user -> most recent time that user's job started or ended on that machine), running (job id, machine id, user, elapsed time, est_dur),
          per_user_running, params, site_profile
 ```
 
-**规模。** 站 1、2、3、5、6 各 16 台机器（128 核），站 4 是 4 台（32 核）；仿真 48 小时；到达率由目标利用率反推：率 = 核数 × 利用率 / 平均(cores × true\_dur)；六站合计约 2 万任务。单种子六站并行要在 60 秒内跑完，超了就按比例减机器和到达率。公共参数：cores 分布 1:50%、2:25%、4:15%、8:10%（站 4 全是 1）；每站 20 个用户均匀，站 1 例外；所有站 est\_dur = true\_dur × lognormal(0, 0.3)。
+**Scale.** Sites 1, 2, 3, 5 and 6 have 16 machines each (128 cores); site 4 has 4 machines (32 cores). Simulate 48 hours. The arrival rate is derived from target utilization: rate = cores × utilization / mean(cores × true\_dur). The six sites total about 20,000 jobs. One seed, with the six sites in parallel, must finish within 60 seconds; if it takes longer, scale down machines and arrival rate proportionally. Common parameters: cores distribution 1: 50%, 2: 25%, 4: 15%, 8: 10% (all 1 at site 4); 20 users per site, uniform, except at site 1; at all sites est\_dur = true\_dur × lognormal(0, 0.3).
 
-| 站 | 利用率与到达 | true\_dur | 这个站特有的机制 |
+| Site | Utilization and arrivals | true\_dur | Mechanism specific to this site |
 | --- | --- | --- | --- |
-| 1 | 泊松，0.85 | Pareto α=1.5，最短 10 分钟，最长 12 小时 | 一个大用户占 60% 任务，其余 19 个分剩下的 |
-| 2 | 非齐次泊松：基线 0.5，9 点和 18 点各 1 小时率 × 5 | lognormal，均值 20 分钟，σ\_log = 0.8 | 过载变慢：忙核数 > 90% 时，所有在跑任务的剩余时长按 1.5 倍流逝 |
-| 3 | 泊松，0.8 | lognormal，均值 30 分钟，σ\_log = 0.8 | 4 个 rack 各 4 台；任务有 rack\_pref，放到别的 rack 时长 × 3 |
-| 4 | 泊松，0.7 | 均匀 5 到 15 分钟，cores=1 | 启动开销：任务在某机开始时加 30 秒，除非同用户 10 分钟内在该机跑过 |
-| 5、6 | 泊松，0.8 | lognormal，均值 30 分钟，σ\_log = 0.8 | 无 |
+| 1 | Poisson, 0.85 | Pareto α=1.5, minimum 10 minutes, maximum 12 hours | One big user accounts for 60% of jobs; the other 19 share the rest |
+| 2 | Non-homogeneous Poisson: base 0.5; rate × 5 for 1 hour each at 9:00 and 18:00 | lognormal, mean 20 minutes, σ\_log = 0.8 | Overload slowdown: when busy cores > 90%, the remaining durations of all running jobs elapse at 1.5× |
+| 3 | Poisson, 0.8 | lognormal, mean 30 minutes, σ\_log = 0.8 | 4 racks of 4 machines each; jobs have a rack\_pref; a job placed on another rack takes 3× as long |
+| 4 | Poisson, 0.7 | uniform 5 to 15 minutes, cores=1 | Startup overhead: 30 seconds are added when a job starts on a machine, unless the same user ran on that machine within the last 10 minutes |
+| 5, 6 | Poisson, 0.8 | lognormal, mean 30 minutes, σ\_log = 0.8 | None |
 
-**调度循环。** 每次到达、每次完成、每 60 秒 tick，对该站跑一遍：
+**Scheduling loop.** On every arrival, every completion, and every 60-second tick, run once for that site:
 
 ```
-q = order(queue, state)            # 返回 job id 列表，必须是 queue 的排列；否则视同超时：这次按 FIFO，计入 1%
+q = order(queue, state)            # returns a list of job ids; must be a permutation of queue; otherwise treated as a timeout: FIFO this time, counts toward the 1%
 for job in q:
-    if not admit(job, state): continue        # 留在队里，wait 照算，下次再问
-    m = place(job, free_machines, state)      # 返回 machine id 或 None；返回不在 free_machines 里或装不下的 id，视同超时：这次按基线放，计入 1%
-    if m is None: break                        # 队首阻塞：这是基线没有回填的原因；策略想等本 rack 就得自己承担阻塞
+    if not admit(job, state): continue        # stays in the queue, wait keeps counting, asked again next time
+    m = place(job, free_machines, state)      # returns a machine id or None; returning an id not in free_machines, or one the job doesn't fit on, is treated as a timeout: placed the baseline way this time, counts toward the 1%
+    if m is None: break                        # head-of-line blocking: this is why the baseline doesn't backfill; a policy that wants to wait for the job's own rack has to bear the blocking itself
     start(job, m)
 if event == arrival:
-    for v in preempt(running, state): requeue(v)   # 返回 job id 列表；被抢占的从头重跑
+    for v in preempt(running, state): requeue(v)   # returns a list of job ids; preempted jobs rerun from the start
 ```
 
-策略在 `sandbox/` 的子进程里 import，缺的钩子用基线补。每次钩子调用计子进程 CPU 时间：超 50 ms 的调用结果丢弃改用基线；超时次数 > 总调用数的 1% 时整次 score = None、extra.timed\_out = true。`evaluate(timeout=False)` 关掉这个机制，给确定性测试用。子进程不给网络，cwd 是临时目录；它在一次 evaluate 内常驻，钩子可以用模块级变量存状态，探针每个场景起一个新子进程。任一种子 score 为 None 时，Agg.score = None、constraint\_ok = false、extra.failed\_seeds 列出种子；11.5 把 score = None 视同 constraint\_ok = false，它永远不会被选为 final。
+The policy is imported in a subprocess under `sandbox/`; missing hooks are filled in with the baseline's. Each hook call is charged subprocess CPU time. A call over 50 ms has its result discarded and the baseline's used instead. When the number of timeouts > 1% of total calls, the whole run gets score = None, extra.timed\_out = true. `evaluate(timeout=False)` turns this mechanism off, for deterministic tests. The subprocess gets no network, and its cwd is a temporary directory. It stays resident for the length of one evaluate, so hooks can keep state in module-level variables; the probes start a new subprocess for each scenario. When any seed's score is None, Agg.score = None, constraint\_ok = false, and extra.failed\_seeds lists the seeds. 11.5 treats score = None the same as constraint\_ok = false, so such a candidate is never chosen as final.
 
-**分数和约束。** wait = 一个任务所有排队区间之和（被抢占再排队的时间累计）。score = −（六站 mean wait 的等权平均）。`per_item` = 每站 `siteK.mean`、`siteK.p99`。aggregate 把 20 个种子的所有 wait 合池算每站 p99。constraint\_ok = 每站合池 p99 ≤ 基线合池 p99 + 容差，容差 = max(基线合池 p99 的 2%，基线逐种子 p99 的标准差)。
+**Score and constraint.** wait = the sum of all of a job's queueing intervals (time requeued after preemption accumulates). score = −(equal-weight average of the six sites' mean wait). `per_item` = each site's `siteK.mean` and `siteK.p99`. aggregate pools all waits from the 20 seeds to compute each site's p99. constraint\_ok = every site's pooled p99 ≤ the baseline's pooled p99 + tolerance, where tolerance = max(2% of the baseline's pooled p99, the standard deviation of the baseline's per-seed p99).
 
-**基线。** FIFO，全收，first-fit（按机器 id 找第一台装得下的），不抢占。
+**Baseline.** FIFO, admit everything, first-fit (the first machine, by machine id, that the job fits on), no preemption.
 
-**配料、陷阱、冲突的探针。** 探针直接调钩子或跑一遍调度循环，不跑完整仿真；每个 50 个随机实例取比例。
+**Probes for the ingredients, the trap and the conflict.** A probe calls the hooks directly or runs one pass of the scheduling loop; it doesn't run a full simulation. Each probe uses 50 random instances and takes the proportion.
 
-| 名字 | 它在哪里赚 | 探针（通过条件） |
+| Name | Where it earns | Probe (pass condition) |
 | --- | --- | --- |
-| backfill | 站 1 | 队首 8 核 6 小时，队二 2 核 5 分钟，只有 4 核空闲：跑一遍调度循环，短的开始了 ≥ 80% |
-| admission | 站 2 | 忙核 95%、队里 300、1 分钟内再来 500：admit 立即放行的比例 ≤ 0.5 |
-| locality | 站 3 | rack\_pref=r，r 内外各有空机：place 选 r 内 ≥ 90% |
-| packing | 站 4 | m1、m2 上各有一个 u1 的任务在跑，m3、m4 上各有一个 u2 的，u1 和 u2 交替到达 16 个 1 核任务：放到 10 分钟内同用户跑过的机器上的任务数 ÷ 16 ≥ 90%（first-fit 约 50% 到 60%） |
-| est\_order | 站 5、6 | 20 个任务 est\_dur 随机：(输出位次, est\_dur) 的 Kendall τ ≥ +0.5 |
-| trap\_sjf | 陷阱 | est\_order 通过，且：队里一个长任务，每分钟来 3 个短的，模拟 2 小时：长任务始终没开始的比例 ≥ 90% |
-| fairshare | 冲突对之一 | 用户 u 已有 50 个在跑：order 把别人的排在 u 前面 ≥ 90% 且 admit 拒 u 的 ≥ 90% |
+| backfill | Site 1 | Head of queue: 8 cores, 6 hours; second in queue: 2 cores, 5 minutes; only 4 cores free. Run one pass of the scheduling loop: the short one has started ≥ 80% |
+| admission | Site 2 | Busy cores 95%, 300 in the queue, 500 more arriving within 1 minute: the proportion admit lets in immediately ≤ 0.5 |
+| locality | Site 3 | rack\_pref=r, free machines both inside and outside r: place chooses inside r ≥ 90% |
+| packing | Site 4 | m1 and m2 each have one job of u1 running, m3 and m4 each have one of u2; 16 one-core jobs arrive, alternating between u1 and u2: the number of jobs placed on a machine where the same user ran within 10 minutes ÷ 16 ≥ 90% (first-fit gets about 50% to 60%) |
+| est\_order | Sites 5, 6 | 20 jobs with random est\_dur: Kendall τ of (output position, est\_dur) ≥ +0.5 |
+| trap\_sjf | Trap | est\_order passes, and: one long job in the queue, 3 short ones arriving per minute, simulate 2 hours: the proportion in which the long job never starts ≥ 90% |
+| fairshare | One of the conflict pair | User u already has 50 jobs running: order puts others ahead of u ≥ 90%, and admit rejects u ≥ 90% |
 
-基线必须 7 个都不过（first-fit 不看用户、不看 rack，队首阻塞不回填，FIFO 的 τ 约 0）。冲突对 = backfill + fairshare（严格版）：站 1 的大用户占 60% 任务，严格公平把他的短任务压在后面，回填就没东西可填。
+The baseline must fail all 7 (first-fit ignores users and racks; head-of-line blocking means no backfill; FIFO's τ is about 0). Conflict pair = backfill + fairshare (the strict version): at site 1 the big user accounts for 60% of jobs, strict fairness pushes that user's short jobs to the back, and so backfill has nothing to fill in.
 
-**参考策略。** `reference/policy.py`：backfill（窗口 = 队首任务的 est\_dur）+ admission（忙核 > 90% 时只放 est\_dur 最短的）+ locality + packing（优先放同用户 10 分钟内跑过的机器，新用户优先放空机）+ est\_order 加老化（等待超过 30 分钟的按等待时间提前），不开 fairshare。它必须过 5 个配料探针、不过 trap\_sjf 和 fairshare。
+**Reference policy.** `reference/policy.py`: backfill (window = the est\_dur of the job at the head of the queue) + admission (when busy cores > 90%, admit only the ones with the shortest est\_dur) + locality + packing (prefer machines where the same user ran within 10 minutes; new users prefer empty machines) + est\_order with aging (jobs that have waited more than 30 minutes are moved forward by wait time), with fairshare off. It must pass the 5 ingredient probes and fail trap\_sjf and fairshare.
 
-**预检（第 3 天）的四条。** 基线和参考各 20 种子：(1) (参考.score − 基线.score) / 基线逐种子标准差 ≥ 5；(2) 五个配料各自单独开，在自己站点的 mean wait 改进 ≥ 1σ；(3) 纯 SJF 策略在慢档 constraint\_ok=false；(4) backfill + fairshare 比单开 backfill 差 ≥ 1σ。写成 `tests/test_precheck_sched.py`，慢，打标记单跑；不过就调生成参数，把前后的数写进 DECISIONS.md。
+**The four precheck conditions (day 3).** Baseline and reference, 20 seeds each: (1) (reference.score − baseline.score) / the baseline's per-seed standard deviation ≥ 5; (2) each of the five ingredients, turned on alone, improves mean wait at its own site by ≥ 1σ; (3) a pure SJF policy gets constraint\_ok=false in the slow tier; (4) backfill + fairshare is worse than backfill alone by ≥ 1σ. Write this as `tests/test_precheck_sched.py`; it is slow, so mark it and run it separately. If it fails, tune the generation parameters and write the before-and-after numbers into DECISIONS.md.
 
-### 11.7 问题 B 的规格
+### 11.7 Problem B spec
 
-**harness。** Python：`agent.py`（主循环，最多 25 轮）、`tools.py`（read\_file、write\_file、list\_files、run\_tests）、`prompts.py`、`context.py`（超 60k token 裁剪）、`model.py`（haiku，temperature 0）。`run.py <task_dir> --out result.json`。`run_tests` 必须调测试台装在沙箱镜像里的 `tb-pytest`（不在候选目录里），5% 的随机 TransientError 在 `tb-pytest` 里注入，所以 worker 删不掉。
+**harness.** Python: `agent.py` (main loop, at most 25 turns), `tools.py` (read\_file, write\_file, list\_files, run\_tests), `prompts.py`, `context.py` (trims above 60k tokens), `model.py` (haiku, temperature 0). `run.py <task_dir> --out result.json`. `run_tests` must call the `tb-pytest` that the testbed installs in the sandbox image (not in the candidate directory). The 5% random TransientError is injected inside `tb-pytest`, so workers can't remove it.
 
-**题。** 一道题 = `repo/`（50 到 300 行）+ `tests/test_visible.py`（现在失败）+ `tests/test_hidden.py`（只在慢档机器，评分用）+ `task.md`。生成 150 道：LLM 写模块和测试，再注入一个 bug（边界、符号、异常处理、调用顺序、多文件不一致五类各 30）。保留条件：原版过全部测试；注入后 visible 和 hidden 都失败；干净 harness 用 haiku 跑 3 遍的通过率在 30% 到 90% 之间。按 bug 类型分层抽 60/60 做 dev/holdout。
+**Tasks.** One task = `repo/` (50 to 300 lines) + `tests/test_visible.py` (currently failing) + `tests/test_hidden.py` (only on the slow-tier machine, used for scoring) + `task.md`. Generate 150: an LLM writes the module and tests, then one bug is injected (five classes, 30 each: boundary, sign, exception handling, call order, multi-file inconsistency). Keep a task only if: the original passes all tests; after injection, both visible and hidden fail; and the clean harness running haiku, 3 runs, has a pass rate between 30% and 90%. Stratify by bug type and draw 60/60 as dev/holdout.
 
-**五个坑。** 每个是 `planted/` 里的一个 patch，都打上后 squash 成一个 commit。
+**The five planted bugs.** Each is a patch in `planted/`. After all of them are applied, squash them into one commit.
 
-| 坑 | patch | 探针（pytest） |
+| Planted bug | patch | Probe (pytest) |
 | --- | --- | --- |
-| tool\_desc | run\_tests 的描述改成"只运行指定的测试文件"，实现不变（跑全部） | 指定一个测试文件调 run\_tests，看是否只跑了它；或描述与行为一致 |
-| trim\_tail | context.py 改成从工具输出的末尾截（原本保留最后 40 行） | 喏 500 行 traceback，裁剪后含最后 20 行 |
-| no\_retry | tools.py 去掉对 TransientError 的重试 | mock 一次失败后成功，调用次数 ≥ 2 |
-| bad\_rule | system prompt 加"不要读超过 100 行的文件" | 静态：没有这句或等价限制；行为：一道必须读 300 行文件的题，跑一次，read\_file 读了它 |
-| diff\_first | write\_file 的多文件分支只应用第一个文件 | 两文件 diff，两个文件都变了 |
+| tool\_desc | The description of run\_tests is changed to "runs only the specified test file"; the implementation is unchanged (it runs everything) | Call run\_tests with one test file specified and check whether only that file ran; or whether the description matches the behavior |
+| trim\_tail | context.py is changed to cut from the end of tool output (originally it kept the last 40 lines) | Feed it a 500-line traceback; after trimming, the last 20 lines are still there |
+| no\_retry | The retry on TransientError is removed from tools.py | Mock one failure followed by a success; number of calls ≥ 2 |
+| bad\_rule | The system prompt gets "don't read files longer than 100 lines" | Static: this sentence, or an equivalent limit, is absent; behavioral: on a task that requires reading a 300-line file, run once, and read\_file read that file |
+| diff\_first | The multi-file branch of write\_file applies only the first file | Two-file diff; both files changed |
 
-**评测。** `evaluate(tier='slow', seed=s)` 跑 dev 60 题一遍，并行 30，s 是遍号；慢档跑 s = 1、2，aggregate 后 per\_item value = 通过率 0 / 0.5 / 1，ci 是按题 bootstrap，`extra.delta_vs_baseline` 是逐题配对差的均值和区间（基线 = 埋坑版，启动时缓存）。constraint\_ok 对 B 恒为 true。predicted\_score 是 dev 60 题的通过率，0 到 1 的绝对值。快档 = 前 15 题 1 遍。每次 run 限 200k token，超过算该题失败。holdout 只在 final 上由臂运行器跑一次，写 final\_check(dataset=holdout)。
+**Evaluation.** `evaluate(tier='slow', seed=s)` runs the 60 dev tasks once, 30 in parallel; s is the pass number. The slow tier runs s = 1, 2. After aggregate: per\_item value = pass rate 0 / 0.5 / 1; ci is a per-task bootstrap; `extra.delta_vs_baseline` is the mean and interval of the per-task paired differences (baseline = the bugged version, cached at startup). constraint\_ok is always true for B. predicted\_score is the pass rate on the 60 dev tasks, as an absolute value from 0 to 1. Fast tier = the first 15 tasks, 1 pass. Each run is limited to 200k tokens; going over counts as failing that task. holdout runs only once, on final, run by the arm runner, which writes final\_check(dataset=holdout).
 
-**预检（第 7 天）。** 干净版和埋坑版各 3 遍：配对差 ≥ 3 倍配对标准差；五个坑各自单独修回，差值都 > 0；五个探针在干净版全过、埋坑版全不过。
+**Precheck (day 7).** Clean version and bugged version, 3 passes each: the paired difference ≥ 3× the paired standard deviation; fixing each of the five planted bugs alone gives a difference > 0; all five probes pass on the clean version and all fail on the bugged version.
 
-### 11.8 三个臂的运行器
+### 11.8 Runners for the three arms
 
-`tb run --arm single|isolated|herd --problem sched --hours 48 --workers N --run-id r-...`。它做的事：`POST /runs`；`tb pack-problem`；把 PI prompt 模板（第 3 或 4 节那段，`{hours}` 和配额数字是占位符）填好后和问题目录交给 agent，环境变量里给 `TB_*`；agent 问"先对齐"的那个问题时，运行器自动回一句"无人在线，按你的方案执行，把对齐内容写进 PLAN.md"；到时间就停；agent 没调 `tb final` 就由运行器代调；run 级 final = 合并器最后一版基线（11.8.1），agent 自己的 final 记为 actor\_final；跑 final\_check；跑记分卡。所有臂、所有角色用同一个最强模型，不分级。
+`tb run --arm single|isolated|herd --problem sched --hours 48 --workers N --run-id r-...`. What it does: `POST /runs`; `tb pack-problem`; fill in the PI prompt template (the passage in §3 or §4, with `{hours}` and the quota numbers as placeholders) and hand it, with the problem directory, to the agent, with `TB_*` in the environment variables. When the agent asks the "align first" question, the runner automatically replies: "No one is online. Proceed with your plan, and write the alignment into PLAN.md." Stop when time is up. If the agent didn't call `tb final`, the runner calls it on the agent's behalf. Run-level final = the merger's last baseline version (11.8.1); the agent's own final is recorded as actor\_final. Run final\_check. Run the scorecard. All arms and all roles use the same, strongest model, with no tiering.
 
-- single：一个 Claude Code 会话（或 Agent SDK），全部配额；合并器照跑，它自己就是作者，看得见基线前进
-- isolated：N 个会话，同一段 prompt，各自的容器和工作目录，`per_actor_share`；合并器（11.8.1）把每个 agent 通过慢档的候选先进先出合入该臂的基线，agent 收不到 baseline\_advanced、一直在原始基线上干；每个 agent 的 tb final 记为 actor\_final；run 级 final = 合并器最后一版基线；最好的单个候选另记 actor\_best 作诊断。不再有结束后 git apply 贪心合并那一步：那样 herd 赢了分不清是赢在共享还是赢在合并器
-- herd：调 herd 仓库的入口，传慢档地址和 run\_id；第 4 天之前只需要存在并报"未接"
+- single: one Claude Code session (or Agent SDK), the whole quota; the merger runs as usual, and since the agent is itself the author, it sees the baseline advance
+- isolated: N sessions, the same prompt, each with its own container and working directory, `per_actor_share`. The merger (11.8.1) merges each agent's candidates that pass the slow tier into this arm's baseline, FIFO. The agents don't receive baseline\_advanced and keep working on the original baseline throughout. Each agent's tb final is recorded as actor\_final; run-level final = the merger's last baseline version; the best single candidate is recorded separately as actor\_best, as a diagnostic. There is no longer a post-run greedy git-apply merge step: with that step, if the herd won, we couldn't tell whether it won through sharing or through the merger
+- herd: calls the herd repo's entry point, passing the slow-tier address and run\_id; before day 4 it only needs to exist and report "not hooked up"
 
-### 11.8.1 合并器（tb integrate，三个臂共用）
+### 11.8.1 Merger (tb integrate, shared by all three arms)
 
-一个纯代码进程，每个 run 一个，和臂一起启动；三个臂同一份代码、同一份配置。它维护该 run 的基线分支 baseline@k（被优化系统的仓库，不是记录器），每版写 `baseline/<k>.json`：含哪些候选、配对结果、constraint\_ok。herd 的 Integrator（设计文档 D74）就是它外面包一层黑板事件和任务队列，核心不另写。这是"不建 herd 的任何部分"的唯一例外，因为两个对照臂也要用它。
+A pure-code process, one per run, started together with the arm. All three arms use the same code and the same configuration. It maintains the run's baseline branch baseline@k (in the repo of the system being optimized, not the recorder), and for each version writes `baseline/<k>.json`: which candidates it contains, the paired results, and constraint\_ok. The herd's Integrator (design doc D74) is just this with a layer of blackboard events and a task queue wrapped around it; its core is not written separately. This is the only exception to "don't build any part of the herd", because the two control arms need it too.
 
-**输入**：慢档返回 done 且 constraint\_ok=true 的候选，按结果到达时间先进先出。
+**Input**: candidates for which the slow tier returned done with constraint\_ok=true, first in, first out by result arrival time.
 
-**每个候选**：
+**For each candidate**:
 
-1. 转成对 baseline@0 的 unified diff（policy.py 整文件式的先 diff；params.yaml 按键合并），rebase 到当前的 baseline@k。
-2. 有文本冲突 → 发一个 compose 任务：新开一个不属于任何臂的 agent 会话，给它两个候选和原文，产出一个新候选回慢档排队（hash 含基线标识）；原候选记 integration\_failed(reason=conflict)。三个臂都这么做，各干各的臂的 agent 碰不到它。
-3. 无冲突且 k 就是候选验证时的基线 → 直接用验证那次的分；k 动过 → 对 baseline@k 提交一次配对复测（`/submit`，dataset=dev，manifest.target = baseline@k），走合并器自己的配额。
-4. 接收：配对增益（候选减 baseline@k，逐种子差的均值）超过 1 个标准误（逐种子差的标准误）且 constraint\_ok → 合入，k+1，写 `baseline/<k+1>.json`，往记录器写 baseline\_advanced{baseline, candidate, files\_changed, paired}；否则写 integration\_failed(reason=below\_1se | constraint)。早先增益减复测增益超过 2σ√2 → 另写一条 interaction\_found。
-5. 问题 A 同种子确定，每版基线的逐种子分在它被合入时就有了，不用再测；问题 B 有模型调用，复测要真跑。
+1. Convert it into a unified diff against baseline@0 (policy.py, which is a whole-file candidate, is diffed first; params.yaml is merged by key), and rebase it onto the current baseline@k.
+2. Textual conflict → issue a compose task: open a new agent session that belongs to no arm, give it the two candidates and the original text, and have it produce a new candidate that goes back into the slow-tier queue (its hash includes the baseline identifier). The original candidate is recorded as integration\_failed(reason=conflict). All three arms do this; the agents of the isolated arm never touch it.
+3. No conflict, and k is the baseline the candidate was validated against → use the score from that validation directly. k has moved → submit one paired remeasure against baseline@k (`/submit`, dataset=dev, manifest.target = baseline@k), using the merger's own quota.
+4. Acceptance: paired gain (candidate minus baseline@k, mean of the per-seed differences) exceeds 1 standard error (the standard error of the per-seed differences) and constraint\_ok → merge, k+1, write `baseline/<k+1>.json`, and write baseline\_advanced{baseline, candidate, files\_changed, paired} to the recorder. Otherwise write integration\_failed(reason=below\_1se | constraint). Earlier gain minus remeasured gain exceeds 2σ√2 → also write an interaction\_found.
+5. In problem A the same seed is deterministic, so each baseline version's per-seed scores already exist when it is merged and need not be measured again. Problem B involves model calls, so remeasures must really be run.
 
-**抽查**：每合入 2 次，对这一段（上次抽查的 j 到现在的 k）在 dev 种子和 audit 种子上各算一次 baseline@k 减 baseline@j 的逐种子差（audit 那次走 dataset=audit，占抽查配额），两者之差超过 2.5·σ√2 → 二分这段里的合入找到肇事者，写一版排除它的新基线（baseline\_reverted，旧记录不动），候选标 quarantined。σ 在第 3 天预检时算好：参考策略对基线的逐种子差的标准差除以√种子数，dev 和 audit 各一个。抽查每 run ≤ 10 次，留 3 次给二分和最终抽查。为什么不拿合入时的增益去比：那些是过了门槛才留下的测量，本来就偏高，模拟里没人作弊也会频繁报警。
+**Spot check**: after every 2 merges, take this segment (from j, at the last spot check, to the current k) and compute the per-seed difference baseline@k minus baseline@j once on the dev seeds and once on the audit seeds (the audit one uses dataset=audit and counts against the spot-check quota). If the two differ by more than 2.5·σ√2 → bisect the merges in this segment to find the culprit, write a new baseline version that excludes it (baseline\_reverted; old records are left unchanged), and mark the candidate quarantined. σ is computed during the day 3 precheck: the standard deviation of the reference policy's per-seed differences against the baseline, divided by √(number of seeds), one for dev and one for audit. Spot checks per run ≤ 10, keeping 3 for bisection and the final spot check. Why not compare against the gains measured at merge time? Those are measurements that were kept because they passed the gate, so they are biased high to begin with; in simulation they raise frequent alarms even when no one is cheating.
 
-**收尾**（到时间或配额用完）：停止接收 → 最终抽查 → 冻结交付物 = 最后一版基线 → 运行器拿它调 tb final 和 final\_check。两个问题在测试台里都没有贵的 gate，所以没有 guard\_pending，设计文档收尾顺序里的补检一步为空。
+**Closeout** (when time is up or the quota is used up): stop accepting → final spot check → freeze the deliverable = the last baseline version → the runner uses it to call tb final and final\_check. Neither problem has an expensive gate in the testbed, so there is no guard\_pending, and the catch-up check step in the design doc's closeout order is empty.
 
-**配额**：合并器的复测走慢档的独立份额，每 run quota\_integrator\_total=16、每小时 1 次 \[默认\]，三个臂相同；worker 的 2/小时、96 总不变。配额用完，合并器只合基线没动过的候选，其余排队等下一个窗口。
+**Quota**: the merger's remeasures use a separate share of the slow tier, quota\_integrator\_total=16 per run and 1 per hour \[Default\], the same for all three arms. The workers' 2/hour and 96 total are unchanged. When the quota runs out, the merger merges only candidates whose baseline hasn't moved; the rest wait in the queue for the next window.
 
-**各臂的差别只有一处**：baseline\_advanced 推不推给 agent。single：agent 自己就是作者，它看得见；isolated：不推，agent 一直在 baseline@0 上干，合并器在后台合；herd：推。
+**The arms differ in only one place**: whether baseline\_advanced is pushed to the agents. single: the agent is itself the author, so it sees it. isolated: not pushed; the agents keep working on baseline@0, and the merger merges in the background. herd: pushed.
 
-**测试**（脚本化，不用 LLM）：3 个互不冲突的候选 → 3 版基线、3 条 baseline\_advanced；第 2 个候选和第 1 个冲突 → 发 compose 任务、第 2 个记 integration\_failed；基线动过的候选 → 恰好一次复测提交；增益不到 1 个标准误 → 不合入；一个脚本化的"只在 dev 种子上好"的候选 → 抽查标记、回退、quarantined；一次干净的运行 7 次抽查不报警；三个臂的合并器配置逐项相等。
+**Tests** (scripted, no LLM): 3 mutually non-conflicting candidates → 3 baseline versions and 3 baseline\_advanced events; the 2nd candidate conflicts with the 1st → a compose task is issued and the 2nd is recorded as integration\_failed; a candidate whose baseline has moved → exactly one remeasure submission; gain under 1 standard error → not merged; a scripted candidate that is "good only on the dev seeds" → the spot check flags it, it is reverted, and it is quarantined; a clean run with 7 spot checks raises no alarm; the merger configurations of the three arms are equal field by field.
 
-### 11.9 测试台自己的验收（不用 LLM）
+### 11.9 Acceptance of the testbed itself (no LLM)
 
-`arms/scripted/` 里三个脚本化的"假 herd"，用 11.3 的压缩旋钮和 problems/stub 跑，候选的分数和配料由 manifest 决定，几分钟跑完，红绿只取决于脚本行为：
+`arms/scripted/` holds three scripted "fake herds". They run with the compressed knobs from 11.3 and problems/stub. Candidates' scores and ingredients are determined by the manifest. They finish in a few minutes, and red or green depends only on the script's behavior:
 
-| 脚本 | 剧本 | 记分卡应该 |
+| Script | Scenario | The scorecard should show |
 | --- | --- | --- |
-| perfect\_herd | 6 个 actor，前 25% 时间碰 5 种配料；陷阱交一次后写 dead\_end（带 hash）且没人再交；每次提交前有正的 fast\_run；大改进后有带 hash 的 allocation；预测后半更准；final 含 4 种配料不含 fairshare | 全绿 |
-| lone\_wolf | 1 个 actor，两种配料，陷阱连交两次 | 广度红、死胡同重撞红、拼装红 |
-| quota\_hog | 6 个 actor，没有 fast\_run 就提交，预测全填 0 | 配额纪律红、预测误差不缩小 |
+| perfect\_herd | 6 actors; touch 5 ingredients in the first 25% of the time; after the trap is submitted once, a dead\_end (with hash) is written and no one submits it again; every submission is preceded by a positive fast\_run; after a big improvement there is an allocation with a hash; predictions are more accurate in the second half; final contains 4 ingredients and not fairshare | All green |
+| lone\_wolf | 1 actor, two ingredients, submits the trap twice in a row | Breadth red, dead-end re-hits red, composition red |
+| quota\_hog | 6 actors; submit without any fast\_run; all predictions filled in as 0 | Quota discipline red, prediction error doesn't shrink |
 
-再加这些测试：一个窗口内第 3 次提交被 429；`visible_at` 前 `status` 不给结果；同 hash（含排队中）不扣配额但记 submit；缺 `X-TB-Run` 的请求被拒；`tb pack-problem` 的输出里没有 hidden/、reference/、holdout、planted/、probes/、test\_hidden.py；`timeout=False` 下同种子两次结果字节相同；单种子六站并行 < 60 秒；参考策略过 5 个配料探针、不过 trap\_sjf 和 fairshare；基线 7 个都不过；超时超过 1% 的策略 score 为 None。
+Also add these tests: the 3rd submission within one window gets a 429; `status` gives no result before `visible_at`; the same hash (including one still queued) charges no quota but records a submit; requests missing `X-TB-Run` are rejected; the output of `tb pack-problem` contains no hidden/, reference/, holdout, planted/, probes/ or test\_hidden.py; with `timeout=False`, two runs on the same seed give byte-identical results; one seed with the six sites in parallel takes < 60 seconds; the reference policy passes the 5 ingredient probes and fails trap\_sjf and fairshare; the baseline fails all 7; a policy with more than 1% timeouts gets score None.
 
-### 11.10 完成定义
+### 11.10 Definition of done
 
-第 7 节的每一天结束时，对应的测试全绿，`README` 里有一条能复制粘贴的命令把当天的产出跑出来。第 3 天结束的标志：预检四条的数印在终端上、都达标；`tb run --arm single --hours 24` 在问题 A 上跑完，记分卡有数。第 4 天结束的标志：合并器的脚本化测试全绿；各干各的臂 5 个 worker 跑 24 小时跑完，对比表里有两个臂。到这里测试台就可以交给 herd 那边接了。
+At the end of each day in §7, the corresponding tests are all green, and the `README` has a copy-pasteable command that reproduces that day's output. Day 3 is done when: the numbers for the four precheck conditions are printed in the terminal and all meet target; and `tb run --arm single --hours 24` finishes on problem A and the scorecard has numbers. Day 4 is done when: the merger's scripted tests are all green; and the isolated arm with 5 workers finishes its 24-hour run, so the comparison table has two arms. At that point the testbed can be handed over to the herd side to hook up.
 
-不要做的：不建 herd 的任何部分（合并器核心例外，它是纯代码、三个臂共用，住在测试台里）；不加鉴权、签名、用户系统；不做网页界面；不为了好看换掉 SimPy；不在预检不过时调记分卡阈值让它过。
+Don't: build any part of the herd (except the merger core, which is pure code, shared by all three arms, and lives in the testbed); add authentication, signing or a user system; build a web UI; replace SimPy to make things look nicer; adjust scorecard thresholds so that a failing precheck passes.
 
-### 11.11 交给实现 agent 的起步 prompt
+### 11.11 Starting prompt for the implementing agent
 
 ```
-读《Herd 测试台》全文，第 11 节是你的规格，和前面有出入以第 11 节为准。建一个新仓库 herd-testbed，
-按第 7 节的顺序做，先做第 1 到 3 天（问题 A 和测试台本体），问题 B 等我说再开始。
+Read all of "Herd Testbed". §11 is your spec; where it differs from earlier sections, §11 wins. Build a new repo, herd-testbed,
+following the order in §7. Do days 1 to 3 first (problem A and the testbed itself); don't start problem B until I tell you to.
 
-规则：文档没定的你自己定，写进 DECISIONS.md，不要停下来问；11.5 的记分卡定义和三条防作弊规则不改；
-每天结束时 11.9 里对应的测试必须绿；预检不过就改仿真器参数，把改了什么和前后的数写进 DECISIONS.md。
-第 3 天的单干臂之前不要用任何 LLM。
+Rules: decide anything the document leaves open yourself, write it into DECISIONS.md, and don't stop to ask; don't change the scorecard definitions in 11.5 or the three anti-cheating rules;
+at the end of each day, the corresponding tests in 11.9 must be green; if the precheck fails, change the simulator parameters, and write what you changed and the before-and-after numbers into DECISIONS.md.
+Don't use any LLM before the single-agent arm on day 3.
 
-每天给我一段话：做完了什么、测试是否全绿、DECISIONS.md 新增了哪几条、下一天做什么。
+Every day, give me one paragraph: what got done, whether the tests are all green, which entries were added to DECISIONS.md, and what you will do the next day.
 ```
 
-## 附：从"Ledger"到"测试台"
+## Appendix: from "Ledger" to "testbed"
 
-上一版把这份东西写成了一个 eval 信任层：威胁模型、带签名的账本、断路器、回放器、12 个攻击脚本、Critic 搬进信任区。那是在防作弊的 agent。测试台的对手不是作弊的 agent，是我们自己设计里的错误，所以全部砍掉。留下来的变成了第 2 节的三条规则和记录器：隐藏数据不在 worker 机器上、每次运行新仓库、worker 不能 push、记录只追加、公开和隐藏两份数据、提交前要预测。真要防作弊是接真项目时的事，到时候再加，而且加的时候这份记录器就是起点。
+The previous version wrote this document as an eval trust layer: a threat model, a signed ledger, a circuit breaker, a replayer, 12 attack scripts, and moving the Critic into the trust zone. That was defending against cheating agents. The testbed's adversary is not a cheating agent but errors in our own design, so all of that was cut. What remained became the three rules in §2 and the recorder: hidden data is not on worker machines, every run gets a new repo, workers can't push, records are append-only, there are two sets of data (public and hidden), and you predict before you submit. Real anti-cheating is a matter for when we hook up a real project. We will add it then, and when we do, this recorder is the starting point.
 
-同样被改掉的还有选题标准：上一版的测试问题是 80 个旋钮加卷宗，理由是"材料超过一个上下文"。第 1 节说了为什么这个理由不成立。
+The criteria for choosing the problem were changed as well. The previous version's test problem was 80 knobs plus case files, on the grounds that "the material exceeds one context". §1 explains why that reasoning doesn't hold.

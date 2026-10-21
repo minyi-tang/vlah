@@ -1,55 +1,57 @@
-# Research Herd：一页对齐
+# Research Herd: One-page Alignment
 
-2026-10-19 · Minyi · 这一页读完就够开工；《Research Herd 设计文档》和《Herd 测试台》是参考书，按编号查，不用读完。
+2026-10-19 · Minyi · Reading this page is enough to start work. *Research Herd Design* (file `research-herd-design-v2.2.md`) and *Herd Testbed* (`herd-testbed.md`) are reference books: look things up by number; you don't need to read them through.
 
-## 1. 我们在做什么
+*English translation of the Chinese original (`zh/one-page-alignment.md`).*
 
-有一个外部裁判，很慢、很少、不能骗。有一个方向空间，没人能事先列全。有一群 agent 和一段有限的墙钟。目标：在同样的墙钟和同样的裁判次数下，交出比任何一个 agent 单独做都好的结果。
+## 1. What we are building
 
-对照组不是"一个 agent"，是"一群 token 无限但互不通气的 agent"。要赢的是结构，不是算力。现在"能赢"还是假设，测试台就是用来验证它的。
+There is an external judge that is slow, scarce and cannot be fooled. There is a space of approaches that nobody can list in full in advance. There is a herd of agents and a limited amount of wall-clock time. Goal: with the same wall-clock time and the same number of judge calls, deliver a better result than any single agent could produce alone.
 
-## 2. 不能改的
+The control group is not "one agent". It is "a herd of agents with unlimited tokens that don't talk to each other". What has to win is the structure, not the compute. Right now "it can win" is still a hypothesis; the testbed exists to test it.
 
-四个不变量，任何版本的 herd 都必须成立：
+## 2. What cannot change
 
-1. 不丢：学到的东西都留着，别人需要时拿得到。
-2. 不重：没有人在不知情的情况下重走已经走过的路。
-3. 不浪费裁判：每一次稀缺评测都落在能改变下一步决定的地方。
-4. 能拼：交付物是所有有效尝试的组合，不是最好的单个。
+Four invariants. Every version of the herd must satisfy them:
 
-环境给的约束，跟模型多强无关：裁判稀缺；每个 agent 的上下文有限；人的注意力每天 30 分钟；评测定义和隐藏数据 worker 看不见；出网只走白名单。
+1. No loss: everything learned is kept, and others can get it when they need it.
+2. No repetition: nobody unknowingly re-walks a path that has already been walked.
+3. No wasted judging: every scarce eval lands where it can change the next decision.
+4. Combinable: the deliverable is the combination of all valid attempts, not the best single one.
 
-记分卡量什么不变：广度、拼装、吃到几成、死胡同重撞、冲突处理、配额纪律、预测误差、倾斜、泛化。怎么做到可以变。
+Constraints set by the environment, independent of how strong the model is: the judge is scarce; each agent's context is limited; human attention is 30 minutes a day; workers cannot see the eval definitions or the hidden data; egress goes only through the allowlist.
 
-## 3. 可以改的
+What the scorecard measures does not change: breadth, composition, share of available gain captured, dead-end re-hits, conflict handling, quota discipline, prediction error, tilt, generalization. How we achieve these can change.
 
-设计文档里所有 D 编号的决定和所有带"默认"的数字。角色（PI、Planner、Critic、Librarian、Scout）、黑板布局、路由规则、分配公式，都是今天的模型需要的脚手架，不是定义。更强的模型来了，先砍再加，用测试台验证砍得对不对。
+## 3. What can change
 
-## 4. 三条做事原则
+Every D-numbered decision in the design doc and every number marked "default". The roles (PI, Planner, Critic, Librarian, Scout), the blackboard layout, the routing rules and the allocation formula are scaffolding that today's models need, not definitions. When a stronger model arrives, cut first and add later, and use the testbed to check that the cuts were right.
 
-**模型和 token 不是约束（P10）。** 不为省 token 加机制，不为省钱用弱模型，所有角色同一个最强模型。只花模型调用、不花 eval 的事都可以做冗余。
+## 4. Three working principles
 
-**只管边界，不管路径（P11，待你点头）。** harness 强制的只有这些：eval 配额和队列；按哈希去重；记录只追加；合并器（各臂同一份、同配置）和它合入前的 gate、配对复测；评测定义不可见；出网白名单；lease 作为"我在做这个"的声明；提交带预测。agent 怎么探索、读什么、什么时候读、失败了干什么，一律只是建议，写在 prompt 里，可以不听。规则按失败加，不按想象加：只有记分卡某一项明确输给"各干各的"，才针对那一项加一条强制，一次只加一条，加完重跑。
+**Models and tokens are not constraints (P10).** Don't add mechanisms to save tokens. Don't use weaker models to save money. Every role uses the same strongest model. Anything that spends only model calls and no evals can be done redundantly.
 
-**自我改进是第三步，不是第一步。** herd 自己就是一个问题包（问题 C）：候选 = 对 herd 代码的一个改动；快档 = 单元测试和脚本自测；慢档 = 用这版 herd 在问题 A、B 上跑一遍测试台。裁判在它手外，合进主干人看一眼，换了更强的模型后第一个任务是砍掉不需要的东西。
+**Govern the boundaries, not the paths (P11, pending your approval).** The harness enforces only these: the eval quota and the queue; dedup by hash; append-only records; the merger (the same copy in every arm, with the same configuration), plus its pre-merge gates and paired remeasure; invisible eval definitions; the egress allowlist; the lease as a declaration that "I am working on this"; submissions carry predictions. How agents explore, what they read, when they read it, and what they do after a failure are all only suggestions. They are written in the prompt and can be ignored. Add rules in response to failures, not to imagination: only when a scorecard item clearly loses to "isolated" do you add one mandatory rule for that item. Add one at a time, and rerun after each one.
 
-## 5. 落地顺序
+**Self-improvement is step three, not step one.** The herd itself is a problem pack (problem C): candidate = a change to the herd code; fast tier = unit tests and scripted self-tests; slow tier = a testbed run on problems A and B using that version of the herd. The judge is out of its hands. A human takes a look before anything merges into trunk. After switching to a stronger model, the first task is to cut what is no longer needed.
 
-每一步都有"算完成"的标准，没达到不进下一步。
+## 5. Build order
 
-1. **测试台**。《Herd 测试台》第 11 节可以直接交给 coding agent。完成：合并器（三个臂共用的纯代码）建好并过脚本化测试；"独狼"和"各干各的"两个臂在问题 A 上跑通，记分卡自动出，三个脚本自测（完美 herd、独狼、配额大户）结果符合预期。
-2. **最小 herd（待你点头）**。只做第 4 节强制清单里的东西，加一块共享黑板、N 个带建议 prompt 的 worker；合并器直接用测试台那份，只是把"基线前进"推给 worker。没有 Planner、Librarian、Scout，先看缺了它们记分卡哪一项掉下来。完成：herd 臂在问题 A 上跑通。
-3. **三臂对照**。问题 A 上同配额同时间跑三臂，按判定协议（设计文档 D72：先试点再定次数）。完成：herd 在拼装、死胡同重撞、配额倾斜三项上赢"各干各的"。输了就回第 2 步，按失败加一条规则。
-4. **问题 B**，同上。
-5. **真项目**。这时才需要 PI 和人的对齐协议（设计文档第 10 节）。
-6. **问题 C**：让 herd 改自己。
+Every step has a "done" criterion. Don't move to the next step until it is met.
 
-## 6. 还要你拍板的三件事
+1. **Testbed.** *Herd Testbed* §11 can be handed directly to a coding agent. Done: the merger (pure code shared by all three arms) is built and passes scripted tests; the "lone wolf" and "isolated" arms run end to end on problem A; the scorecard is produced automatically; and the three scripted self-tests (perfect herd, lone wolf, quota hog) give the expected results.
+2. **Minimal herd (pending your approval).** Build only what is on the mandatory list in §4, plus one shared blackboard and N workers with advisory prompts. Use the testbed's merger as is; the only change is that it pushes "baseline advanced" to the workers. No Planner, Librarian or Scout. First see which scorecard item drops without them. Done: the herd arm runs end to end on problem A.
+3. **Three-arm comparison.** Run the three arms on problem A with the same quota and the same time, following the verdict protocol (design doc D72: pilot first, then set the number of runs). Done: the herd beats "isolated" on three items: composition, dead-end re-hits and quota tilt. If it loses, go back to step 2 and add one rule based on the failure.
+4. **Problem B**, same as above.
+5. **Real project.** Only at this point do we need the PI and the human alignment protocol (design doc §10).
+6. **Problem C**: let the herd change itself.
 
-1. P11 的强制 / 建议分法（第 4 节）。认可后我把设计文档里越线的几条降成建议。
-2. 最小 herd 从零角色开始（第 5 节第 2 步）。这和设计文档现在写的"第一周就有 PI 和 Librarian"不一样。
-3. 问题 C 放第六步，前面五步不碰。
+## 6. Three things still waiting for your call
 
-## 7. 参考书怎么查
+1. P11's split between mandatory and suggested (§4). Once you approve it, I will downgrade the few items in the design doc that cross the line to suggestions.
+2. The minimal herd starts with zero roles (§5 step 2). This differs from what the design doc says now: "PI and Librarian exist from week one".
+3. Problem C goes in step six; the first five steps don't touch it.
 
-《Research Herd 设计文档》：第 0.1 节是我们为什么这样决定的轨迹，按轮次查；第 9 节是 eval 怎么用；第 14 节是验证计划；末尾的决策登记表按 D 编号查，每条写了失败信号和改什么。《Herd 测试台》：第 6 节记分卡，第 11 节实现者规格。
+## 7. How to use the reference books
+
+*Research Herd Design*: §0.1 is the trail of why we decided things the way we did; look it up by round. §9 is how evals are used. §14 is the validation plan. The decision register at the end is indexed by D number; each entry lists its failure signal and what to change. *Herd Testbed*: §6 is the scorecard; §11 is the implementer spec.
