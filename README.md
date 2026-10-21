@@ -193,6 +193,8 @@ The most useful contribution right now is a real problem. [Open an issue](https:
 
 Real cases shape the testbed and the API before either is fixed.
 
+To change code or docs, read [CONTRIBUTING.md](CONTRIBUTING.md) for the lint setup and the pull request guidelines.
+
 ## License
 
 [MIT](LICENSE)
