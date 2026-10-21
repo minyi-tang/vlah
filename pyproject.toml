@@ -1,0 +1,72 @@
+[project]
+name = "vlah"
+version = "0.0.1"
+description = "VLAH: Very Large Agent Herd. Many LLM agents on one hard optimization problem, with a scarce judge."
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.11"
+dependencies = [
+    "pydantic>=2.7",
+    "pyyaml>=6.0",
+]
+
+[project.scripts]
+vlah = "vlah.cli:main"
+
+[dependency-groups]
+dev = [
+    "hypothesis>=6.100",
+    "pre-commit>=3.8",
+    "pyright>=1.1.380",
+    "pytest>=8.2",
+    "pytest-timeout>=2.3",
+    "ruff>=0.6",
+]
+
+[build-system]
+requires = ["hatchling>=1.25"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["vlah"]
+
+# The testbed (testbed/, problems/, tests/testbed/) is built by separate agents; see issue #10.
+# When testbed/pyproject.toml exists, the testbed PR adds it as a workspace member:
+#   [tool.uv.workspace]
+#   members = ["testbed"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = ["--strict-markers", "-ra", "-m", "not slow"]
+timeout = 60
+markers = [
+    "l0: one of the 20 L0 plumbing assertions (v2.2 section 14.1)",
+    "smoke: the seeded in-memory toy loop; must stay green on every PR",
+    "contract: cross-package contract tests (for example the candidate hash vs the testbed)",
+    "slow: long or real-time tests; excluded by default, run with -m slow",
+    "blackboard: W1-01 #11",
+    "indexer: W1-02 #12",
+    "queue: W1-03 #13",
+    "eval: W1-04 #14",
+    "router: W1-05 #15",
+    "tools: W1-06 #16",
+    "executor: W1-07 #17",
+    "harness: W1-08 #18",
+    "integrator: W1-09 #19",
+    "budget: W1-10 #20",
+    "runtime: W1-11 #21",
+    "egress: W1-12 #22",
+    "cli: W1-13 #23",
+]
+
+# Formatting is black + isort and linting is ruff with its default rules, all via pre-commit
+# (.pre-commit-config.yaml).
+[tool.ruff]
+target-version = "py311"
+
+[tool.pyright]
+include = ["vlah", "tests"]
+pythonVersion = "3.11"
+typeCheckingMode = "basic"
+strict = ["vlah/core/types", "vlah/ports"]
+reportMissingTypeStubs = false

@@ -23,7 +23,7 @@ Guide: CONTRIBUTING.md, section "Writing the description".
 
 ## Open Questions
 
-<!-- Optional. Assumptions to confirm, risks, breaking changes, or decisions you want the reviewer to make. -->
+<!-- Optional. Assumptions to confirm, risks, breaking changes, or decisions you want the reviewer to make. List every [proposed] choice you kept or changed, and every gap you filled (also recorded in docs/DECISIONS.md). -->
 
 ## Checklist
 
@@ -31,4 +31,6 @@ Guide: CONTRIBUTING.md, section "Writing the description".
 - [ ] Added or updated tests for changed behavior.
 - [ ] Updated documentation, docstrings, and examples as needed.
 - [ ] The description makes sense to someone who has not seen the work.
+- [ ] Touches only the paths my issue owns (see AGENTS.md), plus my own tests.
+- [ ] If this changes a frozen contract (an `api.py`, `vlah/core/types/`, `vlah/ports/`, `vlah/arms/config.py`), it changes nothing else and has the `contract` label.
 - [ ] For reviewers: If you haven't made any contributions to this PR and are only assisting with merging the main branch, please remove yourself as a co-author when merging the PR.

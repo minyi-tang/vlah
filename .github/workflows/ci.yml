@@ -1,0 +1,64 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # Lint and formatting run in lint.yaml (pre-commit).
+  types:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+      - run: uv sync --locked
+      - run: uv run pyright
+
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.11", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: ${{ matrix.python }}
+      - run: uv sync --locked
+      # Default selection is `-m "not slow"` (pyproject). Testbed tests run in their own job.
+      - run: uv run pytest --ignore=tests/testbed
+
+  # Filled in by the testbed agents (issue #10): TB section 11.9 scripted self-checks, no LLM.
+  testbed-selfcheck:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+      - run: uv sync --locked --all-packages
+      - name: Testbed self-checks
+        run: |
+          if [ -d tests/testbed ]; then
+            uv run pytest tests/testbed
+          else
+            echo "tests/testbed does not exist yet (see issue #10); skipping."
+          fi
+
+  # Guardrail for issue #10: hidden testbed material must never be committed.
+  no-hidden-material:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check that git tracks no hidden testbed files
+        run: |
+          bad=$(git ls-files | grep -E '(^|/)(hidden|holdout|planted)/|^problems/.*/(probes|reference)/|(^|/)test_hidden\.py$|^private/' || true)
+          if [ -n "$bad" ]; then
+            echo "These files must not be committed (see issue #10):"
+            echo "$bad"
+            exit 1
+          fi
