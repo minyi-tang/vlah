@@ -1,106 +1,197 @@
-# VLAH: Very Large Agent Herd
+<div align="center">
 
-VLAH runs many LLM agents together on one hard, wide optimization problem, for cases where the only trustworthy judge is slow and scarce. The design documents call it Research Herd.
+# VLAH
 
-> **Status:** design phase. The first code will be the testbed (see [Roadmap](#roadmap)).
+**Very Large Agent Herd**
 
-## The problem
+**Point a herd of AI agents at a hard optimization problem.<br>Come back to the changes that actually move your metric, already combined.**
 
-Some optimization problems are too big for one agent:
+[![status: pre-alpha](https://img.shields.io/badge/status-pre--alpha-orange)](#status-and-roadmap)
+[![license: MIT](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 
-- **They are wide.** Five to ten different areas could each improve the goal, and nobody can list them all in advance.
-- **They need a lot of context.** Understanding one area takes more reading than fits in one agent's context window.
-- **The judge is scarce.** The evaluation that counts is slow, rate-limited and hard to fool, for example a 30-minute benchmark that can run twice an hour.
-- **The answer is a combination.** The best result usually combines improvements from several areas, rather than being the single best attempt.
+[Quickstart](docs/quickstart.md) •
+[Why a herd](#why-a-herd) •
+[How it works](#how-it-works) •
+[Python SDK](docs/sdk.md) •
+[Design](docs/design.md)
 
-**Example:** raise an agent harness's prompt-cache hit rate. Several changes each help a little, and some of them overlap:
+</div>
 
-- reordering the prompt;
-- making tool definitions deterministic;
-- stripping timestamps;
-- moving retrieved documents later in the prompt;
-- cache-aware truncation.
+---
 
-The deliverable is the set of changes that work together.
+> [!NOTE]
+> **VLAH is pre-alpha.** The design is written and the code is being built now. The quickstart and SDK on this page show the interface we are building toward. They don't run yet. If it doesn't fit your problem, [tell us](#contributing) now, while it's cheap to change.
 
-## The idea
+You have a metric that matters: a prompt-cache hit rate, p99 latency, or a pass rate on a benchmark you can't fake. Moving it takes changes in five different places, and each needs its own deep dive. The only number you trust comes from a benchmark that takes 30 minutes and can run twice an hour.
 
-A herd of agents shares what it learns while it works, and plain code, not an agent, guards the scarce judge.
+One agent can't hold all of that in its head. Ten agents working separately repeat each other's dead ends and burn your benchmark runs on duplicates.
 
-- **Each worker takes one direction and attacks the whole problem.** The directions are a portfolio, not fixed lanes.
-- **A shared blackboard.** Every result, insight and dead end is written as a claim to an append-only repository. Workers can search it, and relevant updates are routed to them.
-- **The judge is rationed by code.** An eval service owns the quota. It drops duplicates, runs cheap checks before expensive ones, measures each candidate paired against the current baseline, and enforces gates.
-- **The baseline ratchets forward.** Verified improvements are merged one at a time onto a moving baseline. Each one is re-measured and kept only if it still helps, so the deliverable is a combination of improvements.
-- **Agents judge; code keeps the books.** Plain code decides who sees what and what counts, so those decisions can be audited.
+**VLAH runs the agents as a team.** Each one takes a different direction, and they share everything they learn on a common blackboard. Plain code spends your scarce benchmark runs only where a result could change the next decision. Verified wins are stacked one at a time, and each is kept only if it still helps. You come back to one patch that combines everything that works together, and to a record of everything that didn't.
 
-## What must always hold
+## What you come back to
 
-Any version of VLAH must keep four invariants:
+Here is a mock-up of the report after an overnight run on a prompt-cache problem. The numbers are illustrative:
 
-1. **Nothing learned is lost.** Everything learned is kept, and anyone who needs it can find it.
-2. **No path is unknowingly walked twice.** No one retraces a path someone already walked without knowing it.
-3. **No judge call is wasted.** Every scarce evaluation goes where it can change the next decision.
-4. **Results combine.** The deliverable combines every improvement that works with the others, not just the best single attempt.
+```console
+$ vlah report cache-hit
 
-Some constraints come from the environment and hold however strong the model is:
+  Goal     prompt-cache hit rate on harness-bench          (higher is better)
+  Run      14h · 8 workers · 5 directions
+  Judge    26 of 28 runs used · 9 duplicates skipped · 31 candidates stopped by cheap checks
 
-- the judge is scarce;
-- each agent's context window is finite;
-- human attention is about 30 minutes a day;
-- workers can't see the evaluation definition or the hidden data;
-- network egress is restricted to an allowlist.
+  Baseline 41.2%  ->  63.5%   (+22.3 pts, paired, re-measured on held-out traces)
 
-Tokens are not a constraint. Every role uses the strongest model. Anything that costs model calls but no judge calls can be done redundantly.
+  Stacked, in the order merged (gain on the moving baseline)
+    +11.8  stable tool-definition ordering               tools.py
+    + 6.1  retrieved documents after the static prefix   context.py
+    + 3.0  strip per-request timestamps                  prompt_builder.py
+    + 1.4  cache-aware truncation                        context.py
 
-Everything else is scaffolding for today's models, and should shrink as models get stronger. That includes the roles, the blackboard layout, the routing rules and the default values.
+  Helped alone, dropped when stacked
+     reorder system-prompt sections (+2.2 alone)      ->  absorbed by stable tool ordering
 
-## The hypothesis
+  Dead ends (recorded, never retried)
+     compress tool schemas       hit rate unchanged, latency +9%
+     pin model per session       no effect
 
-The core claim is not yet proven. **With the same wall-clock time and the same number of judge calls, agents that share during the run should beat the same number of agents that work in isolation and are merged by the same procedure.**
-
-The baseline to beat is not one agent. It is a herd with unlimited tokens whose members don't talk to each other. The bet is on structure, not on compute.
-
-## How we'll know
-
-1. **Testbed.** Two synthetic problems built so that sharing should matter:
-   - A, a scheduling policy for a simulator;
-   - B, an agent harness with planted structure.
-
-   Both use artificial scarcity: a slow judge with about 2 calls per hour for the whole herd. An automatic scorecard measures:
-   - breadth and composition;
-   - how much of the available gain was captured;
-   - repeated dead ends and conflict handling;
-   - quota discipline and prediction error;
-   - generalization.
-2. **Controlled comparison.** A single agent, isolated agents and the herd each get the same quota and the same time. Steps:
-   1. Run a pilot to measure noise.
-   2. Pre-register the effect size and the number of runs.
-   3. Score each arm's final deliverable on a sealed holdout with a one-sided paired test.
-3. **Real problems,** only after the herd wins on the testbed.
-
-## Architecture
-
-VLAH is a standalone runtime. It reaches the outside world only through ports, so it can be connected to any cluster, agent harness or storage stack.
-
-```
-L3  Problem instance   charter, spec, eval sources, initial directions     one per problem
-L2  Herd runtime       blackboard, claims and events, task queue,
-                       eval service, integrator, routing, stop rules,
-                       roles                                               what we build
-L1  Ports              Executor, Harness, SignalSource, Store, Human, Model
-L0  Adapters           local process / k8s / Ray; Claude Code / Agent SDK;
-                       git / Redis / S3; CLI / Slack                       swappable
+  -> report/combined.patch   report/attribution.md   report/merge-log.md
 ```
 
-Every port has an in-memory adapter, so the whole herd can run a toy problem in one process in seconds. That run is the regression test for every change.
+## Why a herd
 
-## Roadmap
+- **Covers the whole problem.** Workers spread across directions, such as prompt order, tool definitions and context layout, instead of all piling onto the first idea.
+- **Nothing learned is lost.** Every result, insight and dead end is written to an append-only blackboard that any worker can search. Relevant updates are routed to the workers who need them.
+- **Nobody walks the same dead end twice.** A worker can't spend a judge run without first being shown similar candidates and known dead ends.
+- **Your judge is never wasted.** An eval service owns the quota. It drops duplicates, runs cheap checks before expensive ones, and measures each candidate paired against the current baseline.
+- **Wins stack.** Improvements merge one at a time onto a moving baseline and are re-measured there. The deliverable is the combination, not the best single attempt.
+- **You stay in charge with about 30 minutes a day.** You agree a charter with a lead agent before the run. Anything big comes back to you as a question with options and a safe default.
+- **Bring your own agent and your own infrastructure.** Any harness that speaks MCP can be a worker. Workers can run on your laptop, Kubernetes or Ray, and state can live in git, Redis or S3.
+- **Every decision can be audited.** Agents do the thinking, and plain code decides what counts. Every decision is in the log.
 
-1. **Testbed:** problem A runs end to end, and the scorecard is produced automatically.
-2. **Minimal herd:** the smallest set of components that keeps the four invariants, running on problem A.
-3. **Controlled comparison:** run on problem A first, then on problem B.
-4. **Real problems,** together with the human alignment loop.
-5. **Self-improvement:** the herd optimizes its own code, judged by the testbed.
+## Is VLAH right for your problem?
+
+| Your problem looks like… | Reach for |
+| --- | --- |
+| One obvious lever, and a fast evaluation | One coding agent in a loop, for example [autoresearch](https://github.com/karpathy/autoresearch) |
+| One program or function, scored by a fast automatic evaluator you can call hundreds of times | LLM-guided evolutionary search: [AlphaEvolve](https://deepmind.google/discover/blog/alphaevolve-a-gemini-powered-coding-agent-for-designing-advanced-algorithms/), [OpenEvolve](https://github.com/algorithmicsuperintelligence/openevolve), [ShinkaEvolve](https://github.com/SakanaAI/ShinkaEvolve) |
+| **Many areas of a real codebase, more context than one agent can hold, and a trusted evaluation that is slow and rationed** | **VLAH** |
+
+Good fits include:
+- prompt-cache hit rate of an agent harness;
+- end-to-end latency of a service;
+- pass rate on a gated benchmark;
+- a scheduler or placement policy scored by a slow simulator.
+
+## Quickstart
+
+> Preview: this is the planned interface. See the [full quickstart](docs/quickstart.md).
+
+```bash
+git clone https://github.com/minyi-tang/vlah && cd vlah
+uv sync
+
+uv run vlah demo     # a toy problem, fully in memory: about 10 seconds, no API keys
+```
+
+Point it at your own problem:
+
+```bash
+uv run vlah init cache-hit --repo ~/code/my-harness   # scaffold a problem folder
+$EDITOR cache-hit/herd.yaml                           # connect your judge; workers never see this file
+uv run vlah chat cache-hit                            # agree the goal and directions, then sign
+uv run vlah run cache-hit --workers 8                 # start the herd
+uv run vlah report cache-hit                          # read the result; apply report/combined.patch
+```
+
+### Use it from Python
+
+```python
+import vlah
+from vlah.adapters import executors, harnesses, stores
+
+herd = vlah.Herd(
+    problem="cache-hit/",
+    workers=8,
+    executor=executors.Kubernetes(namespace="herd"),
+    harness=harnesses.ClaudeCode(),
+    store=stores.Stack(
+        versioned=stores.Git("git@github.com:you/cache-hit-herd.git"),
+        kv=stores.Redis("redis://redis:6379"),
+        objects=stores.S3("herd-traces"),
+    ),
+)
+
+run = herd.start()
+for event in run.events():          # baseline_advanced, dead_end, escalation, ...
+    print(event)
+
+run.report().patch.write("cache-hit.patch")
+```
+
+The [SDK guide](docs/sdk.md) covers how to plug in your own judge, agent harness or infrastructure.
+
+## How it works
+
+```mermaid
+flowchart LR
+    you([You]) -->|goal, codebase, judge| pi[Lead agent]
+    pi -->|signed charter and directions| workers[Workers, one direction each]
+    workers <-->|results, insights, dead ends| board[(Shared blackboard)]
+    workers -->|candidates| eval{Eval service}
+    eval -->|only what is worth a run| judge[[Your judge]]
+    judge -->|paired scores| integ[Integrator]
+    integ -->|kept only if it still helps| base[(Moving baseline)]
+    base -->|new starting point| workers
+    pi -->|report and questions| you
+```
+
+1. **Align.** You describe the problem to a lead agent. It repeats the problem back in its own words, lists the assumptions it made, and proposes three to five directions. Nothing starts until you sign the charter.
+2. **Explore.** Each worker attacks the whole problem from one direction, with full access to the code and the blackboard. Workers test ideas against cheap local proxies as often as they like.
+3. **Spend the judge carefully.** To use a real judge run, a worker must predict the score and explain why. The eval service rejects duplicates and runs cheap checks first. Only the survivors reach your judge.
+4. **Stack.** The integrator merges verified wins one at a time onto the baseline and re-measures each one there. Every worker then builds on the new baseline.
+
+The [design overview](docs/design.md) explains why the system is built this way and how we will test that it works.
+
+## Runs on your stack
+
+VLAH is a standalone runtime that touches the outside world only through six ports. Each port has an in-memory adapter, so the whole herd runs in one process for tests.
+
+| Port | What it is for | Adapters (planned) |
+| --- | --- | --- |
+| **Executor** | where workers run | local processes, Kubernetes, Ray |
+| **Harness** | which agent does the work | Claude Code, Claude Agent SDK, OpenHands, your own loop |
+| **SignalSource** | your judges, from unit tests to a slow benchmark to a human | any command, an HTTP service, a query |
+| **Store** | blackboard, queues, artifacts | git, Redis, S3, sqlite-vec |
+| **Human** | your channel to the lead agent | CLI, Slack |
+| **Model** | which LLM each role uses | any provider; every role uses the strongest model |
+
+## Status and roadmap
+
+VLAH is built on a bet that hasn't been proven yet: **with the same time and the same judge budget, agents that share what they learn will beat the same agents working alone and merged the same way.** The first thing we ship is the experiment that tests this bet. We will publish the result whichever way it comes out.
+
+- [x] Design ([overview](docs/design.md))
+- [ ] Testbed: two synthetic problems with a deliberately slow judge, and an automatic scorecard
+- [ ] Minimal herd running on the testbed, with in-memory and local adapters
+- [ ] Head-to-head: one agent vs. isolated agents vs. the herd, pre-registered and scored on a sealed holdout
+- [ ] Kubernetes, Redis and S3 adapters, plus the lead agent and Slack
+- [ ] Real problems
+- [ ] The herd improves its own code, scored by the testbed
+
+## Related work
+
+VLAH builds on these:
+- [autoresearch](https://github.com/karpathy/autoresearch), which is one agent improving one training script overnight. VLAH asks what changes when you add many agents and the evaluation becomes scarce.
+- LLM-guided evolutionary search: [FunSearch](https://github.com/google-deepmind/funsearch), [AlphaEvolve](https://deepmind.google/discover/blog/alphaevolve-a-gemini-powered-coding-agent-for-designing-advanced-algorithms/), [OpenEvolve](https://github.com/algorithmicsuperintelligence/openevolve) and [ShinkaEvolve](https://github.com/SakanaAI/ShinkaEvolve).
+- The classic blackboard architecture from early AI systems, in which many specialists cooperate through one shared workspace.
+
+## Contributing
+
+The most useful contribution right now is a real problem. [Open an issue](https://github.com/minyi-tang/vlah/issues/new) and describe:
+- the metric;
+- the judge and how scarce it is;
+- the areas you think matter.
+
+Real cases shape the testbed and the API before either is fixed.
 
 ## License
 
