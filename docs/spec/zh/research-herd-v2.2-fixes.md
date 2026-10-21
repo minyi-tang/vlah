@@ -1,3 +1,5 @@
+# Research Herd v2.2 修改清单
+
 ```
 给 Fable 的修改清单：Research Herd v2.2
 结论： 方向对。保留 v2 的任务形态、不按杠杆派活是对的。问题在于 D72 到 D78 是以独立段落加进来的，没有接进 schema、组件表、臂开关表、周计划、L0 测试和附录 C。实现者照 §5、§6、§14 和附录 C 做，会得到一个没有 Integrator 的系统；照 D74 做，Integrator 又只在 S2 里有。

@@ -16,6 +16,7 @@ vlah = "vlah.cli:main"
 [dependency-groups]
 dev = [
     "hypothesis>=6.100",
+    "pre-commit>=3.8",
     "pyright>=1.1.380",
     "pytest>=8.2",
     "pytest-timeout>=2.3",
@@ -27,7 +28,7 @@ requires = ["hatchling>=1.25"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/vlah"]
+packages = ["vlah"]
 
 # The testbed (testbed/, problems/, tests/testbed/) is built by separate agents; see issue #10.
 # When testbed/pyproject.toml exists, the testbed PR adds it as a workspace member:
@@ -58,20 +59,14 @@ markers = [
     "cli: W1-13 #23",
 ]
 
+# Formatting is black + isort and linting is ruff with its default rules, all via pre-commit
+# (.pre-commit-config.yaml).
 [tool.ruff]
-line-length = 110
 target-version = "py311"
-src = ["src", "tests"]
-# Docs show the planned interface in code blocks; do not reformat them.
-extend-exclude = ["*.md"]
-
-[tool.ruff.lint]
-select = ["E", "F", "W", "I", "B", "UP", "SIM", "RUF"]
-ignore = ["E501"]
 
 [tool.pyright]
-include = ["src", "tests"]
+include = ["vlah", "tests"]
 pythonVersion = "3.11"
 typeCheckingMode = "basic"
-strict = ["src/vlah/core/types", "src/vlah/ports"]
+strict = ["vlah/core/types", "vlah/ports"]
 reportMissingTypeStubs = false

@@ -1,6 +1,6 @@
 # Specs
 
-These are the design documents VLAH is built from. The files in this folder are **English translations**. The Chinese originals are in [`zh/`](zh/), unchanged.
+These are the design documents VLAH is built from. The files in this folder are **English translations**. The Chinese originals are in [`zh/`](zh/), unchanged, except for one title line added to `zh/research-herd-v2.2-fixes.md` so it passes the docs heading check.
 
 The translations are faithful and complete, and every ID and section number is unchanged: D1–D79, H#, P#, C#, §, TB§. The issues therefore cite the same numbers in both languages. Each issue also quotes, in English, the parts its component needs. Come here when an issue cites an ID and you want the full context.
 
