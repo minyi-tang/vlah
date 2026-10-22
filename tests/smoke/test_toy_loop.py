@@ -17,16 +17,14 @@ pytestmark = pytest.mark.smoke
 STEP_SECONDS = 300.0
 
 
-@pytest.mark.parametrize(
-    "is_store_blackboard", [False, True], ids=["fake", "real_blackboard"]
-)
+@pytest.mark.parametrize("use_real_components", [False, True], ids=["fakes", "real"])
 def test_results_return_to_their_submitters(
-    tmp_path: Path, is_store_blackboard: bool
+    tmp_path: Path, use_real_components: bool
 ) -> None:
-    """The real_blackboard variant runs every write check, so a write the herd needs but
-    the rules reject (a dangling evidence pointer, say) fails here first."""
+    """The real variant runs every Wave-1 component that has landed, so a mismatch
+    between two real components fails here first."""
     toy = make_toy_herd(
-        tmp_path, PRESETS["S2"], is_store_blackboard=is_store_blackboard
+        tmp_path, PRESETS["S2"], use_real_components=use_real_components
     )
     for _ in range(4):
         toy.herd.step(STEP_SECONDS)
