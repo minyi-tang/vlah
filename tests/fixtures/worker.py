@@ -225,6 +225,9 @@ class MemorySessionFiles:
         spec = self.executor.processes[handle.handle_id].spec
         return Path(spec.env[TRANSCRIPT_VARIABLE])
 
+    def base_revision(self, agent: ActorId, task_id: str) -> str:
+        return "main"
+
 
 @dataclass(frozen=True, kw_only=True)
 class WorkerHarness:

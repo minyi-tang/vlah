@@ -34,13 +34,13 @@ class RestartParts:
     tool_calls: tuple[str, ...]
 
 
-def working_directory_diff(target: Path, target_ref: str) -> str:
-    """Changes since the baseline ref, committed or not, and the new files' names."""
+def working_directory_diff(target: Path, base_revision: str) -> str:
+    """Changes since the task's base, committed or not, and the new files' names."""
     if not target.is_dir():
         return "There is no working directory yet."
     else:
         diff = subprocess.run(
-            ["git", "-C", str(target), "diff", target_ref],
+            ["git", "-C", str(target), "diff", base_revision],
             capture_output=True,
             text=True,
             timeout=GIT_TIMEOUT_SECONDS,
