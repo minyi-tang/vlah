@@ -44,10 +44,12 @@ class SlowTierModel(BaseModel):
 
 
 class SlowTierAggregate(SlowTierModel):
+    """A seed the candidate failed (crashed, timed out) has a null score (TB 11.3)."""
+
     score: float | None
-    ci: tuple[float, float] | None = None
+    ci: tuple[float | None, float | None] | None = None
     n: int
-    per_seed: tuple[float, ...] = ()
+    per_seed: tuple[float | None, ...] = ()
     per_item: tuple[PerItemScore, ...] = ()
     extra: dict[str, JsonValue] = {}
     constraint_ok: bool | None = None
@@ -112,7 +114,11 @@ class SlowTierClient:
                 reply_body: object = json.loads(response.read() or b"null")
                 return HttpReply(status=response.status, body=reply_body)
         except urllib.error.HTTPError as error:
-            error_body: object = json.loads(error.read() or b"null")
+            raw_body = error.read()
+            try:
+                error_body: object = json.loads(raw_body or b"null")
+            except json.JSONDecodeError:
+                error_body = raw_body.decode("utf-8", "replace")
             return HttpReply(status=error.code, body=error_body)
 
 
@@ -142,15 +148,26 @@ def candidate_zip(candidate: CandidateRef, actor: ActorId, baseline: str) -> byt
 
 
 def score_from_aggregate(aggregate: SlowTierAggregate) -> ScoreResult:
-    return ScoreResult(
-        value=aggregate.score,
-        n=aggregate.n,
-        ci=aggregate.ci,
-        per_item=aggregate.per_item,
-        per_seed=aggregate.per_seed,
-        constraint_ok=aggregate.constraint_ok,
-        extra=aggregate.extra,
-    )
+    """A run with a failed seed is void: no score, and its constraints are not met."""
+    seeds = [seed for seed in aggregate.per_seed if seed is not None]
+    if aggregate.score is None or len(seeds) != len(aggregate.per_seed):
+        return ScoreResult(
+            value=None,
+            n=max(aggregate.n, 1),
+            constraint_ok=False,
+            extra=aggregate.extra,
+        )
+    else:
+        low, high = aggregate.ci if aggregate.ci is not None else (None, None)
+        return ScoreResult(
+            value=aggregate.score,
+            n=aggregate.n,
+            ci=None if low is None or high is None else (low, high),
+            per_item=aggregate.per_item,
+            per_seed=tuple(seeds),
+            constraint_ok=aggregate.constraint_ok,
+            extra=aggregate.extra,
+        )
 
 
 class SlowTierSource:
@@ -185,6 +202,11 @@ class SlowTierSource:
             else:
                 # No next slot: this quota is used up for the rest of the run.
                 raise JudgeBusyError(math.inf)
+        elif reply.status >= 500:
+            raise RuntimeError(
+                f"the slow tier failed to take the candidate ({reply.status}): "
+                f"{reply.body}"
+            )
         else:
             raise ValueError(
                 f"the slow tier refused the candidate ({reply.status}): {reply.body}"
@@ -203,7 +225,9 @@ class SlowTierSource:
             if status.state == "done" and status.result is not None:
                 return score_from_aggregate(status.result)
             elif status.state == "failed":
-                return ScoreResult(value=None, n=1, constraint_ok=False)
+                # The testbed's own infrastructure failed; the candidate is not judged.
+                error = status.result.extra.get("error") if status.result else None
+                raise ValueError(f"the slow tier could not run {job_id}: {error}")
             else:
                 return None
 
@@ -242,9 +266,12 @@ class SlowTierBaselineScores:
         if baseline == BASELINE_ZERO:
             if self.baseline_zero is None:
                 reply = self.client.call("GET", "/meta", None)
-                self.baseline_zero = MetaReply.model_validate(
-                    reply.body
-                ).baseline.per_seed
+                per_seed = MetaReply.model_validate(reply.body).baseline.per_seed
+                seeds = tuple(seed for seed in per_seed if seed is not None)
+                if len(seeds) != len(per_seed):
+                    raise ValueError("the slow tier's baseline has a void seed")
+                else:
+                    self.baseline_zero = seeds
             else:
                 pass
             return self.baseline_zero

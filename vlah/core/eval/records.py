@@ -7,6 +7,7 @@ dead ends, lineage, result.json and events.
 
 import json
 import logging
+import threading
 from pathlib import Path
 from typing import Literal
 
@@ -31,7 +32,7 @@ class LevelResult(FrozenModel):
     score: float | None
     n: int
     per_seed: tuple[float, ...]
-    paired: Paired
+    paired: Paired | None
     predicted: float | None
     prediction_error: float | None
     constraint_ok: bool | None
@@ -62,6 +63,8 @@ class EvalRecords:
         self.clock = clock
         self.event_count = len(blackboard.list_paths(f"events/{EVAL_SERVICE}/", None))
         self.claim_count = len(blackboard.list_paths(f"claims/{EVAL_SERVICE}/", None))
+        # Requests and tick write from different threads; numbers must not collide.
+        self.lock = threading.Lock()
 
     def write_candidate(
         self, writer: ActorId, candidate_directory: Path, hash_value: str
@@ -120,30 +123,31 @@ class EvalRecords:
         body: str,
         tags: tuple[str, ...] = (),
     ) -> str:
-        self.claim_count += 1
-        claim = Claim(
-            id=format_claim_id(EVAL_SERVICE, self.claim_count),
-            type=claim_type,
-            status="proposed",
-            approach=approach,
-            author=EVAL_SERVICE,
-            tags=tags,
-            evidence=(evidence,),
-            body=body,
-        )
-        require_merged(
-            self.blackboard.write(
-                EVAL_SERVICE,
-                {
-                    f"claims/{EVAL_SERVICE}/{claim.id}.md": render_claim(claim).encode(
-                        "utf-8"
-                    )
-                },
-                f"{claim_type} claim {claim.id}",
-            ),
-            f"claim {claim.id}",
-        )
-        return claim.id
+        with self.lock:
+            self.claim_count += 1
+            claim = Claim(
+                id=format_claim_id(EVAL_SERVICE, self.claim_count),
+                type=claim_type,
+                status="proposed",
+                approach=approach,
+                author=EVAL_SERVICE,
+                tags=tags,
+                evidence=(evidence,),
+                body=body,
+            )
+            require_merged(
+                self.blackboard.write(
+                    EVAL_SERVICE,
+                    {
+                        f"claims/{EVAL_SERVICE}/{claim.id}.md": render_claim(
+                            claim
+                        ).encode("utf-8")
+                    },
+                    f"{claim_type} claim {claim.id}",
+                ),
+                f"claim {claim.id}",
+            )
+            return claim.id
 
     def write_gate_dead_end(
         self, approach: str, hash_value: str, gate_name: str, output: str
@@ -166,6 +170,26 @@ class EvalRecords:
         from_status: str | None = None,
         to_status: str | None = None,
         source: str | None = None,
+    ) -> Event:
+        with self.lock:
+            return self.write_event_locked(
+                event_type,
+                target=target,
+                data=data,
+                from_status=from_status,
+                to_status=to_status,
+                source=source,
+            )
+
+    def write_event_locked(
+        self,
+        event_type: EventType,
+        *,
+        target: str,
+        data: EventPayload | None,
+        from_status: str | None,
+        to_status: str | None,
+        source: str | None,
     ) -> Event:
         self.event_count += 1
         event = Event.model_validate(
