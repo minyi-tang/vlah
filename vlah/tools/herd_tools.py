@@ -41,9 +41,20 @@ from vlah.core.types.interrupts import Interrupt
 from vlah.core.types.params import Params
 from vlah.ports.store import ObjectStore
 from vlah.tools.api import Recorder
-from vlah.tools.evidence import candidate_hashes, parse_claims, write_event_data
+from vlah.tools.evidence import (
+    CLAIM_ID_PATTERN,
+    candidate_hashes,
+    evidence_pointers,
+    parse_claims,
+    write_event_data,
+)
 from vlah.tools.recording import PendingEvent, RecorderClient
-from vlah.tools.scope import may_read, resolve_candidate_directory, write_gate
+from vlah.tools.scope import (
+    PRIVATE_POINTER_PREFIX,
+    may_read,
+    resolve_candidate_directory,
+    write_gate,
+)
 
 OBJECT_POINTER_PREFIX = "object://"
 CLAIM_NUMBER_PATTERN = re.compile(r"c-.+-(?P<number>\d+)\.md")
@@ -224,6 +235,14 @@ class HerdTools:
             if (error := write_gate(self.arm, agent, path))
         ]
         claims, parse_errors = parse_claims(files)
+        # Refused before the blackboard looks the pointer up, so the receipt never
+        # tells a worker which private keys exist (D63).
+        private_evidence = [
+            f"{claim.id}: evidence {pointer} is private; workers never cite private data"
+            for claim in claims
+            for pointer in evidence_pointers(claim)
+            if pointer.startswith(PRIVATE_POINTER_PREFIX)
+        ]
         hashes_by_claim = {
             claim.id: candidate_hashes(self.blackboard, claim) for claim in claims
         }
@@ -232,8 +251,10 @@ class HerdTools:
             for claim in claims
             if claim.type == "dead_end" and not hashes_by_claim[claim.id]
         ]
-        if gate_errors or parse_errors:
-            return {"error": "; ".join(gate_errors + parse_errors)}, []
+        if gate_errors or parse_errors or private_evidence:
+            return {
+                "error": "; ".join(gate_errors + parse_errors + private_evidence)
+            }, []
         elif missing_hash:
             return {
                 "error": f"dead ends {missing_hash} must cite the candidate they tested "
@@ -407,9 +428,32 @@ class HerdTools:
     def hook_check(self, agent: ActorId) -> Interrupt | None:
         return self.router.check(agent)
 
-    def hook_ack(self, agent: ActorId, interrupt_id: str) -> None:
-        self.router.acknowledge(agent, interrupt_id)
+    def hook_ack(self, agent: ActorId, interrupt_id: str) -> bool:
+        """Acknowledge the interrupt pending for this agent; any other id is refused."""
+        pending = self.router.check(agent)
+        if pending is None or pending.id != interrupt_id:
+            return False
+        else:
+            self.router.acknowledge(agent, interrupt_id)
+            return True
 
     def claims_written(self, agent: ActorId, task_id: str) -> tuple[str, ...]:
+        """Claims booked here, plus those the lease kept for the task (D4).
+
+        The lease outlives this object, so a tool server rebuilt over the same leases
+        still reports them. Only ids the agent authored count: the lease also carries
+        the task's refs, which name other writers' claims and candidates.
+        """
         with self.lock:
-            return tuple(self.claims_by_task.get((agent, task_id), []))
+            booked = list(self.claims_by_task.get((agent, task_id), []))
+        lease = self.leases.get(agent)
+        if lease is not None and lease.task_id == task_id:
+            booked.extend(
+                claim_id
+                for claim_id in lease.target_claims
+                if (match := CLAIM_ID_PATTERN.fullmatch(claim_id)) is not None
+                and match.group("author") == agent
+            )
+        else:
+            pass
+        return tuple(dict.fromkeys(booked))
