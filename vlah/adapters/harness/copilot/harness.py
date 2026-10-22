@@ -17,8 +17,11 @@ Flags and keys follow Copilot CLI 1.0.102 and were checked by running it. File
 access stays inside the working directory (the sandbox), which is Copilot's default.
 Copilot compacts the conversation itself at 80% of the window and the CLI cannot
 turn that off; the hook asks the agent to wrap up at context_restart_fraction (70%)
-first. The model comes from configuration, but an administrator-managed setting can
-override it; the transcript records the model actually used.
+first. Once a compaction has happened, usage() reports the window as full: the
+context is lossy, so the hook keeps the agent on its wrap-up tools and the loop
+replaces the session from the D77 pack. The model comes from configuration, but an
+administrator-managed setting can override it; the transcript records the model
+actually used.
 """
 
 import json
@@ -178,6 +181,8 @@ class CopilotHarness:
                 f"{transcript_path} does not say the context window; set "
                 "context_window_tokens"
             )
+        elif reading.compacted:
+            return ContextUsage(used_tokens=window, window_tokens=window)
         else:
             return ContextUsage(used_tokens=reading.used_tokens, window_tokens=window)
 
