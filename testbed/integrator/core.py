@@ -363,7 +363,7 @@ class IntegratorCore:
                 "dev",
                 f"remeasure {c.hash[:12]} on baseline@{self.k}",
                 parents=[c.hash],
-                predicted=(self.versions[self.k].score or 0.0) + earlier["mean"],
+                predicted=c.score,  # its own score; earlier is relative to v_t, not v_k
             )
         except QuotaExhausted as q:
             self.queue.appendleft(c)
