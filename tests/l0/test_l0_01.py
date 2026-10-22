@@ -46,8 +46,10 @@ def test_l0_01_claim_task_order() -> None:
     queue.maintain({"a-01": 3, "a-02": 1})
     for queued in queue.queued_tasks():
         store.sorted_remove("queue", queued[0].id)
-    queue.put(task("t-a01-low", "a-01", priority=2))
+    # a-02's task goes in first, so first-in-first-out alone would pick it: only the
+    # slot-gap rule picks a-01's.
     queue.put(task("t-a02-low", "a-02", priority=2))
+    queue.put(task("t-a01-low", "a-01", priority=2))
     queue.put(task("t-a01-high", "a-01", priority=1))
     queue.put(task("t-for-02", "a-02", priority=2, for_agent="worker-02"))
 

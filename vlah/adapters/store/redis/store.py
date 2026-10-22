@@ -6,6 +6,7 @@ Redis's own key expiry is also set, but only so abandoned keys are cleaned up.
 """
 
 import math
+import re
 
 import redis
 from redis.client import Pipeline
@@ -27,6 +28,14 @@ def response_bytes(response: object) -> bytes | None:
         return response.encode("utf-8")
     else:
         raise TypeError(f"unexpected Redis reply type {type(response).__name__}")
+
+
+GLOB_CHARACTERS = re.compile(r"[*?\[\]\\]")
+
+
+def escape_glob(text: str) -> str:
+    """Make a key prefix literal in a Redis MATCH pattern."""
+    return GLOB_CHARACTERS.sub(r"\\\g<0>", text)
 
 
 class RedisKeyValueStore:
@@ -113,7 +122,9 @@ class RedisKeyValueStore:
         pattern_prefix = self.value_key("")
         keys = [
             (response_bytes(full_key) or b"").decode()[len(pattern_prefix) :]
-            for full_key in self.client.scan_iter(match=f"{self.value_key(prefix)}*")
+            for full_key in self.client.scan_iter(
+                match=f"{escape_glob(self.value_key(prefix))}*"
+            )
         ]
         return tuple(sorted(key for key in keys if self.get(key) is not None))
 
