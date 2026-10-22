@@ -13,9 +13,14 @@ tick then walks each request up the ladder. Each measured level gets a
 claim_status event: "verified:<level>" means validly measured, not improved, and
 a gate or constraint failure means "refuted". One result_ready (or, for the
 Integrator, one remeasure_ready) is written when the ladder ends.
+
+request, remeasure and tick hold one lock, so dedup, quota and judge spend stay
+consistent when several workers ask at once. A request holds it while its
+pre-submit gates run.
 """
 
 import logging
+import threading
 from pathlib import Path
 from random import Random
 from typing import Literal
@@ -110,6 +115,8 @@ class LadderEvalService:
         self.jobs_by_hash: dict[str, EvalJob] = {}
         self.confirm_tokens: dict[str, ConfirmToken] = {}
         self.request_count = 0
+        # The tool server calls request from several threads while the runtime ticks.
+        self.lock = threading.RLock()
 
     def current_baseline(self) -> str:
         records = self.blackboard.list_paths("baseline/", None)
@@ -171,26 +178,29 @@ class LadderEvalService:
             return None
 
     def request(self, request: EvalRequest, caller: ActorId) -> EvalResponse:
-        baseline = request.baseline or self.current_baseline()
-        error = self.validation_error(request)
-        if error is not None:
-            return self.response("invalid_request", baseline, error=error)
-        else:
-            hash_value = candidate_hash(request.candidate_directory, baseline)
-            original = self.jobs_by_hash.get(hash_value)
-            # Exact duplicates are caught before the similarity round-trip: an identical
-            # payload is also maximally similar.
-            if self.arm.hash_dedup and original is not None:
-                self.records.write_event(
-                    "dedup_hit",
-                    target=hash_value,
-                    data=DedupHit(
-                        candidate=hash_value, original_claim=original.claim_id
-                    ),
-                )
-                return self.response("dedup_hit", baseline, claim_id=original.claim_id)
+        with self.lock:
+            baseline = request.baseline or self.current_baseline()
+            error = self.validation_error(request)
+            if error is not None:
+                return self.response("invalid_request", baseline, error=error)
             else:
-                return self.confirm_and_queue(request, caller, baseline, hash_value)
+                hash_value = candidate_hash(request.candidate_directory, baseline)
+                original = self.jobs_by_hash.get(hash_value)
+                # Exact duplicates are caught before the similarity round-trip: an identical
+                # payload is also maximally similar.
+                if self.arm.hash_dedup and original is not None:
+                    self.records.write_event(
+                        "dedup_hit",
+                        target=hash_value,
+                        data=DedupHit(
+                            candidate=hash_value, original_claim=original.claim_id
+                        ),
+                    )
+                    return self.response(
+                        "dedup_hit", baseline, claim_id=original.claim_id
+                    )
+                else:
+                    return self.confirm_and_queue(request, caller, baseline, hash_value)
 
     def similar_items(self, caller: ActorId, text: str) -> tuple[SimilarItem, ...]:
         threshold = self.params.similarity_threshold
@@ -336,27 +346,28 @@ class LadderEvalService:
         return job
 
     def remeasure(self, request: RemeasureRequest) -> str:
-        manifest = load_manifest(request.candidate_directory)
-        hash_value = candidate_hash(request.candidate_directory, request.baseline)
-        self.records.write_candidate(
-            INTEGRATOR, request.candidate_directory, hash_value
-        )
-        job = self.create_job(
-            NewJob(
-                kind="remeasure",
-                caller=INTEGRATOR,
-                candidate_directory=request.candidate_directory,
-                manifest=manifest,
-                baseline=request.baseline,
-                hash_value=hash_value,
-                parents=(request.parent_candidate,),
-                predictions={},
-                levels=(self.ladder[-1],),
-                parent_candidate=request.parent_candidate,
-                rationale=f"Integrator remeasure of {request.parent_candidate} on {request.baseline}.",
+        with self.lock:
+            manifest = load_manifest(request.candidate_directory)
+            hash_value = candidate_hash(request.candidate_directory, request.baseline)
+            self.records.write_candidate(
+                INTEGRATOR, request.candidate_directory, hash_value
             )
-        )
-        return job.request_id
+            job = self.create_job(
+                NewJob(
+                    kind="remeasure",
+                    caller=INTEGRATOR,
+                    candidate_directory=request.candidate_directory,
+                    manifest=manifest,
+                    baseline=request.baseline,
+                    hash_value=hash_value,
+                    parents=(request.parent_candidate,),
+                    predictions={},
+                    levels=(self.ladder[-1],),
+                    parent_candidate=request.parent_candidate,
+                    rationale=f"Integrator remeasure of {request.parent_candidate} on {request.baseline}.",
+                )
+            )
+            return job.request_id
 
     def submit(self, job: EvalJob) -> None:
         level = job.levels[job.level_index]
@@ -387,20 +398,21 @@ class LadderEvalService:
             )
 
     def tick(self) -> tuple[Event, ...]:
-        events: list[Event] = []
-        for job in [job for job in self.jobs if not job.is_finished]:
-            if job.held_score is not None:
-                events.extend(self.score_level(job))
-            elif job.job_id is None:
-                self.submit(job)
-            else:
-                score = job.levels[job.level_index].poll(job.job_id)
-                if score is not None:
-                    job.held_score = score
+        with self.lock:
+            events: list[Event] = []
+            for job in [job for job in self.jobs if not job.is_finished]:
+                if job.held_score is not None:
                     events.extend(self.score_level(job))
+                elif job.job_id is None:
+                    self.submit(job)
                 else:
-                    pass
-        return tuple(events)
+                    score = job.levels[job.level_index].poll(job.job_id)
+                    if score is not None:
+                        job.held_score = score
+                        events.extend(self.score_level(job))
+                    else:
+                        pass
+            return tuple(events)
 
     def score_level(self, job: EvalJob) -> list[Event]:
         """Pair a level's score with the baseline, run post-result gates, and move on."""
