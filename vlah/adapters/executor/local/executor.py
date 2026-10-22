@@ -296,18 +296,29 @@ class LocalExecutor:
             logs=session.process.logs,
         )
         restarted = self.restart_with_hint(session) if should_restart else None
-        write_trace(
-            self.blackboard,
-            self.objects,
-            ended,
-            needs_stub=not has_claim and restarted is None,
-        )
+        # Book the outcome before the trace, so a failing trace write can neither
+        # leave a finished session running nor start the restart a second time.
         if restarted is not None:
             session.ended_processes.append(session.process)
             session.process = restarted
         else:
             session.exit_info = exit_info
-            session.finished.set()
+        try:
+            write_trace(
+                self.blackboard,
+                self.objects,
+                ended,
+                needs_stub=not has_claim and restarted is None,
+            )
+        except Exception:
+            logger.exception(
+                f"could not archive the trace of {handle.task_id} for {handle.agent}"
+            )
+        finally:
+            if restarted is None:
+                session.finished.set()
+            else:
+                pass
 
     def restart_with_hint(self, session: Session) -> AgentProcess | None:
         files = with_notice(

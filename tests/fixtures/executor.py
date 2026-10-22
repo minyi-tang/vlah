@@ -133,10 +133,11 @@ def running_executor(
     grace_seconds: float = 0.5,
     inherited_environment: dict[str, str] | None = None,
     sandbox_root: Path | None = None,
+    objects: MemoryObjectStore | None = None,
 ) -> Iterator[ExecutorHarness]:
     blackboard = open_blackboard(tmp_path / "runs", "run-1", "blackboard")
     blackboard.write(ActorId("human"), {"spec.md": b"the spec"}, "spec")
-    objects = MemoryObjectStore()
+    objects = objects or MemoryObjectStore()
     claims = RecordingClaims()
     executor = LocalExecutor(
         sandbox_root=sandbox_root or tmp_path / "sandboxes",
