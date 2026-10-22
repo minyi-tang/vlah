@@ -22,6 +22,7 @@ from vlah.core.blackboard.api import (
     Violation,
     WriteReceipt,
 )
+from vlah.core.budget.api import BudgetView
 from vlah.core.eval.api import EvalRequest, EvalResponse, RemeasureRequest
 from vlah.core.indexer.api import (
     ApproachState,
@@ -38,6 +39,7 @@ from vlah.core.types.clock import Clock
 from vlah.core.types.events import Event, ResultReady, event_from_json, event_to_json
 from vlah.core.types.ids import (
     ActorId,
+    Role,
     format_claim_id,
     format_event_local_id,
     format_task_id,
@@ -516,6 +518,30 @@ class FakeEvalService:
                 events.append(event)
         self.pending = still_pending
         return tuple(events)
+
+
+@dataclass(kw_only=True)
+class RecordingBudget:
+    """A BudgetMeter that only records, until W1-10 (#20) lands."""
+
+    records: list[tuple[str, str | None, str, float]] = field(
+        default_factory=list[tuple[str, str | None, str, float]]
+    )
+
+    def record(
+        self, role: Role, approach: str | None, source: str, machine_hours: float
+    ) -> None:
+        self.records.append((role, approach, source, machine_hours))
+
+    def spent(self) -> BudgetView:
+        total = sum(record[3] for record in self.records)
+        return BudgetView(
+            total_machine_hours=total,
+            machine_hours_by_role={},
+            machine_hours_by_approach={},
+            machine_hours_by_source={},
+            fraction_of_limit=0.0,
+        )
 
 
 class FakeRouter:

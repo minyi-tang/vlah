@@ -33,16 +33,16 @@ def test_results_return_to_their_submitters(
     assert submitted_actors == ["worker-01", "worker-02"]
 
     blackboard = toy.herd.components.blackboard
-    assert blackboard.head_sequence() == 2
-    result_events = [
+    all_events = [
         event_from_json(blackboard.read(pointer_path, None).decode("utf-8"))
         for pointer_path in [
             blackboard.read(f"events/_seq/{sequence}", None).decode("utf-8")
-            for sequence in (1, 2)
+            for sequence in range(1, blackboard.head_sequence() + 1)
         ]
     ]
+    result_events = [event for event in all_events if event.type == "result_ready"]
+    assert len(result_events) == 2
     for event in result_events:
-        assert event.type == "result_ready"
         assert isinstance(event.data, ResultReady)
         assert event.data.level == TOY_SOURCE.id
         assert event.data.paired.n_items == 5
