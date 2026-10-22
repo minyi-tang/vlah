@@ -2,7 +2,8 @@
 
 Every write is checked synchronously before anything is committed:
 - the path is allowed for the writer;
-- nothing that exists is changed;
+- nothing that exists is changed, and no file takes a directory's name or sits
+  inside a file's name (git would delete what is there);
 - claims, events and manifests parse;
 - every evidence pointer resolves.
 
@@ -17,6 +18,7 @@ import threading
 from collections import deque
 from collections.abc import Mapping
 from dataclasses import dataclass, field
+from pathlib import PurePosixPath
 from typing import Protocol
 
 import yaml
@@ -130,7 +132,7 @@ class StoreBlackboard:
         violations: list[Violation] = []
         checked = CheckedFiles()
         for path, content in sorted(files.items()):
-            violation = self.check_one(actor, path, content, checked)
+            violation = self.check_one(actor, path, content, files, checked)
             if violation is not None:
                 violations.append(violation)
             else:
@@ -150,7 +152,12 @@ class StoreBlackboard:
         return tuple(violations), checked
 
     def check_one(
-        self, actor: ActorId, path: str, content: bytes, checked: CheckedFiles
+        self,
+        actor: ActorId,
+        path: str,
+        content: bytes,
+        files: Mapping[str, bytes],
+        checked: CheckedFiles,
     ) -> Violation | None:
         try:
             is_allowed = may_create(actor, path)
@@ -166,6 +173,18 @@ class StoreBlackboard:
             return Violation(
                 path=path, rule="file_exists", message="files are append-only"
             )
+        elif self.is_directory(path, files):
+            return Violation(
+                path=path,
+                rule="file_exists",
+                message=f"{path} is a directory; files are append-only",
+            )
+        elif (ancestor_file := self.file_among_ancestors(path, files)) is not None:
+            return Violation(
+                path=path,
+                rule="file_exists",
+                message=f"{ancestor_file} is a file; files are append-only",
+            )
         elif CLAIM_PATH_PATTERN.fullmatch(path):
             return self.check_claim(path, content, checked)
         elif EVENT_PATH_PATTERN.fullmatch(path):
@@ -174,6 +193,23 @@ class StoreBlackboard:
             return self.check_manifest(path, content)
         else:
             return None
+
+    def is_directory(self, path: str, files: Mapping[str, bytes]) -> bool:
+        """Whether a file on main or in this write lies under path."""
+        prefix = f"{path}/"
+        return any(written.startswith(prefix) for written in files) or bool(
+            self.store.list_paths(prefix, None)
+        )
+
+    def file_among_ancestors(self, path: str, files: Mapping[str, bytes]) -> str | None:
+        """The nearest directory of path that is already a file, on main or in this write."""
+        for parent in PurePosixPath(path).parents:
+            ancestor = str(parent)
+            if ancestor != "." and (ancestor in files or self.store.exists(ancestor)):
+                return ancestor
+            else:
+                continue
+        return None
 
     def check_claim(
         self, path: str, content: bytes, checked: CheckedFiles
