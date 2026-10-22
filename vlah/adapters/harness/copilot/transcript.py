@@ -20,8 +20,12 @@ TOOL_CALL_TEXT_LIMIT = 300
 
 @dataclass(frozen=True, kw_only=True)
 class ContextReading:
+    """compacted means Copilot compacted the conversation itself, so the counts
+    describe a lossy context that D77 says to replace, not to keep using."""
+
     used_tokens: int
     window_tokens: int | None
+    compacted: bool = False
 
 
 def records(transcript_path: Path) -> Iterator[dict[str, object]]:
@@ -59,6 +63,13 @@ def latest_context(transcript_path: Path) -> ContextReading:
                 window_tokens=(
                     window if isinstance(window, int) and window > 0 else None
                 ),
+                compacted=reading.compacted,
+            )
+        elif record.get("type") == "session.compaction_start":
+            reading = ContextReading(
+                used_tokens=reading.used_tokens,
+                window_tokens=reading.window_tokens,
+                compacted=True,
             )
         else:
             continue
@@ -68,9 +79,12 @@ def latest_context(transcript_path: Path) -> ContextReading:
 def context_fraction(
     transcript_path: Path, fallback_window_tokens: int | None
 ) -> float:
+    """How full the window is; a compacted conversation counts as full (D77)."""
     reading = latest_context(transcript_path)
     window = reading.window_tokens or fallback_window_tokens
-    if window is None or window <= 0:
+    if reading.compacted:
+        return 1.0
+    elif window is None or window <= 0:
         return 0.0
     else:
         return reading.used_tokens / window

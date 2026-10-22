@@ -17,6 +17,8 @@ from vlah.core.types.interrupts import Interrupt
 from vlah.ports.executor import StartPack
 
 CONTEXT_FILE = "CONTEXT.md"
+# Where the harness hook records every interrupt it showed the agent, in the sandbox.
+INTERRUPTS_FILE = ".vlah/interrupts.jsonl"
 GIT_TIMEOUT_SECONDS = 60.0
 RESTART_INTRO = (
     "Your previous session for this task came close to the end of its context "
@@ -32,6 +34,22 @@ class RestartParts:
     interrupt: Interrupt | None
     working_diff: str
     tool_calls: tuple[str, ...]
+
+
+def recorded_interrupts(sandbox: Path) -> tuple[Interrupt, ...]:
+    """The interrupts the hook showed the agent, oldest first; a bad line is skipped."""
+    path = sandbox / INTERRUPTS_FILE
+    if not path.is_file():
+        return ()
+    else:
+        interrupts: list[Interrupt] = []
+        with path.open(encoding="utf-8", errors="replace") as lines:
+            for line in lines:
+                try:
+                    interrupts.append(Interrupt.model_validate_json(line))
+                except ValueError:
+                    continue
+        return tuple(interrupts)
 
 
 def working_directory_diff(target: Path, base_revision: str) -> str:

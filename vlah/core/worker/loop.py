@@ -5,17 +5,20 @@
       start pack by arm (D58)
       start the session; acquire the lease
       while it runs: poll context usage (70% -> restart), deliver overdue interrupts
-      on exit: complete the task only if it has a claim; release the lease
+      on exit: restart from the D77 pack if the context was near its limit;
+               otherwise complete the task only if it has a claim; release the lease
 
 The loop owns its session's handle: an overdue interrupt (D60 layer 3) or a context
 restart replaces the handle here, never behind the loop's back. The runtime posts
-overdue interrupts to an InterruptInbox instead of calling the executor itself.
+overdue interrupts to an InterruptInbox instead of calling the executor itself. If
+the loop itself fails, it kills its session before letting go of the task, so no
+session outlives its lease.
 """
 
 import logging
 import threading
 from collections import defaultdict
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Protocol
 
@@ -25,7 +28,12 @@ from vlah.core.types.clock import Clock
 from vlah.core.types.ids import ActorId
 from vlah.core.types.interrupts import Interrupt
 from vlah.core.types.tasks import Task
-from vlah.core.worker.restart import RestartParts, restart_pack, working_directory_diff
+from vlah.core.worker.restart import (
+    RestartParts,
+    recorded_interrupts,
+    restart_pack,
+    working_directory_diff,
+)
 from vlah.core.worker.start_pack import ContextSources, build_start_pack
 from vlah.ports.executor import Executor, Handle, StartPack
 from vlah.ports.harness import Harness, Workspace
@@ -142,7 +150,12 @@ class TaskRun:
     handle: Handle
     context_restarts: int = 0
     over_threshold_since: float | None = None
+    # The transcript the wrap-up clock refers to; a new one means a new process.
+    watched_transcript: Path | None = None
+    # An overdue interrupt the loop delivered itself, for the next restart pack.
     last_interrupt: Interrupt | None = None
+    # Interrupt ids a restart pack has already carried (D77 part 3).
+    presented_interrupts: set[str] = field(default_factory=set[str])
 
 
 def run_worker(agent: ActorId, deps: WorkerDeps) -> None:
@@ -175,9 +188,20 @@ def run_task(agent: ActorId, task: Task, deps: WorkerDeps, cursor: int) -> int:
     run = TaskRun(agent=agent, task=task, start_pack=start_pack, handle=handle)
     try:
         follow_sessions(run, deps)
+    except BaseException:
+        # The loop failed, not the agent: the session must not outlive the lease.
+        kill_quietly(run, deps)
+        raise
     finally:
         finish_task(run, deps)
     return next_cursor
+
+
+def kill_quietly(run: TaskRun, deps: WorkerDeps) -> None:
+    try:
+        deps.executor.kill(run.handle)
+    except Exception:
+        logger.exception(f"could not kill {run.handle.handle_id} after a loop failure")
 
 
 def start_session(
@@ -209,7 +233,7 @@ def follow_sessions(run: TaskRun, deps: WorkerDeps) -> None:
             log_rate_limits(run, deps)
             if deps.stop.is_set():
                 return
-            elif run.over_threshold_since is not None and should_restart(run):
+            elif ended_near_the_limit(run, deps) and should_restart(run):
                 replace_session(run, deps, context_restart_pack(run, deps))
                 continue
             else:
@@ -242,30 +266,69 @@ def should_restart(run: TaskRun) -> bool:
         return True
 
 
+def context_fraction(run: TaskRun, deps: WorkerDeps) -> float | None:
+    """How full the current session's context is, or None before it has a transcript."""
+    transcript = deps.sessions.transcript_path(run.handle)
+    if not transcript.is_file():
+        return None
+    elif transcript != run.watched_transcript:
+        # A new transcript is a new process, such as the executor's own restart:
+        # the wrap-up clock starts over. A drop within one transcript does not
+        # reset it, because that is the harness compacting, not a fresh context.
+        run.watched_transcript = transcript
+        run.over_threshold_since = None
+        return deps.harness.usage(transcript).fraction
+    else:
+        return deps.harness.usage(transcript).fraction
+
+
 def watch_context(run: TaskRun, deps: WorkerDeps) -> None:
     """Note when usage passes the threshold; stop an agent that does not wrap up.
 
-    Within one process the context only grows, so usage back under the threshold
-    means the process was replaced, for example by the executor's own restart, and
-    the wrap-up clock starts over.
+    Once a transcript has crossed, its clock runs whatever later readings say: a
+    lower reading on the same transcript is the harness compacting (D77).
     """
-    transcript = deps.sessions.transcript_path(run.handle)
-    if not transcript.is_file():
-        return
-    else:
-        fraction = deps.harness.usage(transcript).fraction
-        now_seconds = deps.clock.now_seconds()
-        threshold = deps.context.params.context_restart_fraction
-        if fraction < threshold:
-            run.over_threshold_since = None
-        elif run.over_threshold_since is None:
-            logger.info(f"{run.agent} is at {fraction:.0%} of its context window")
-            run.over_threshold_since = now_seconds
-        elif now_seconds - run.over_threshold_since >= deps.wrap_up_seconds:
+    fraction = context_fraction(run, deps)
+    threshold = deps.context.params.context_restart_fraction
+    now_seconds = deps.clock.now_seconds()
+    if run.over_threshold_since is not None:
+        if now_seconds - run.over_threshold_since >= deps.wrap_up_seconds:
             logger.warning(f"{run.agent} did not wrap up; stopping it for a restart")
             deps.executor.kill(run.handle)
         else:
             pass
+    elif fraction is not None and fraction >= threshold:
+        logger.info(f"{run.agent} is at {fraction:.0%} of its context window")
+        run.over_threshold_since = now_seconds
+    else:
+        pass
+
+
+def ended_near_the_limit(run: TaskRun, deps: WorkerDeps) -> bool:
+    """Read the transcript at exit: a poll may have missed a quick wrap-up (D77)."""
+    fraction = context_fraction(run, deps)
+    threshold = deps.context.params.context_restart_fraction
+    return run.over_threshold_since is not None or (
+        fraction is not None and fraction >= threshold
+    )
+
+
+def restart_interrupt(run: TaskRun, deps: WorkerDeps) -> Interrupt | None:
+    """The interrupt the replaced session was given, once: overdue ones the loop
+    delivered itself, or the latest one the hook showed the agent (D77 part 3)."""
+    recorded = recorded_interrupts(deps.sessions.sandbox_path(run.agent, run.task.id))
+    candidates = [*recorded, *([run.last_interrupt] if run.last_interrupt else [])]
+    run.last_interrupt = None
+    unseen = [
+        interrupt
+        for interrupt in candidates
+        if interrupt.id not in run.presented_interrupts
+    ]
+    if unseen:
+        run.presented_interrupts.update(interrupt.id for interrupt in unseen)
+        return unseen[-1]
+    else:
+        return None
 
 
 def context_restart_pack(run: TaskRun, deps: WorkerDeps) -> StartPack:
@@ -275,7 +338,7 @@ def context_restart_pack(run: TaskRun, deps: WorkerDeps) -> StartPack:
         run.start_pack,
         RestartParts(
             claims=claim_texts(blackboard, run.agent, claim_ids),
-            interrupt=run.last_interrupt,
+            interrupt=restart_interrupt(run, deps),
             working_diff=working_directory_diff(
                 deps.sessions.sandbox_path(run.agent, run.task.id) / "target",
                 deps.sessions.base_revision(run.agent, run.task.id),

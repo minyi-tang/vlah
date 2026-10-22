@@ -137,7 +137,7 @@ def test_run_worker_takes_tasks_until_stopped(tmp_path: Path) -> None:
 
 
 def test_a_replaced_process_starts_the_wrap_up_clock_over(tmp_path: Path) -> None:
-    """The executor's own no-claim restart keeps the handle but starts a fresh context."""
+    """The executor's own no-claim restart keeps the handle but writes a new transcript."""
     holder: list[WorkerHarness] = []
     sessions: list[ScriptedSession] = []
 
@@ -146,7 +146,12 @@ def test_a_replaced_process_starts_the_wrap_up_clock_over(tmp_path: Path) -> Non
         transcript = Path(session.spec.env[TRANSCRIPT_VARIABLE])
         transcript.write_text(assistant_line(190_000, "Bash"))
         yield 60.0
-        transcript.write_text(assistant_line(20_000, "Read"))
+        fresh = transcript.with_name("transcript-attempt-2.jsonl")
+        fresh.write_text(assistant_line(20_000, "Read"))
+        process = holder[0].executor.processes["memory-00001"]
+        process.spec = process.spec.model_copy(
+            update={"env": {**process.spec.env, TRANSCRIPT_VARIABLE: str(fresh)}}
+        )
         yield 1_000.0
         holder[0].write_claim(WORKER, TASK, 1, "Finished in the fresh process.")
 
@@ -154,6 +159,121 @@ def test_a_replaced_process_starts_the_wrap_up_clock_over(tmp_path: Path) -> Non
     holder.append(worker)
     run_task(WORKER, TASK, worker.deps, cursor=0)
     assert len(sessions) == 1, "neither killed nor restarted for context"
+    assert worker.task_queue.completed == [TASK.id]
+
+
+def test_a_drop_within_one_transcript_is_a_compaction_not_a_fresh_context(
+    tmp_path: Path,
+) -> None:
+    """Copilot compacts at 80%: the wrap-up clock keeps running and the session is replaced."""
+    holder: list[WorkerHarness] = []
+    sessions: list[ScriptedSession] = []
+
+    def agent(session: ScriptedSession) -> Iterator[float]:
+        sessions.append(session)
+        transcript = Path(session.spec.env[TRANSCRIPT_VARIABLE])
+        if len(sessions) == 1:
+            transcript.write_text(assistant_line(150_000, "Bash"))
+            yield 60.0
+            with transcript.open("a") as lines:
+                lines.write(assistant_line(165_000, "herd-repo_read"))
+                lines.write(assistant_line(40_000, "Bash"))
+            yield 5_000.0
+            holder[0].write_claim(WORKER, TASK, 1, "Done on a compacted context.")
+        else:
+            holder[0].write_claim(WORKER, TASK, 2, "Continued from the restart.")
+
+    worker = make_worker_harness(tmp_path, PRESETS["S2"], {"agent": agent}, "agent")
+    holder.append(worker)
+    run_task(WORKER, TASK, worker.deps, cursor=0)
+    assert len(sessions) == 2, "killed after the wrap-up time, then restarted"
+    assert worker.clock.now_seconds() < 5_000.0
+    assert "## Context restart" in sessions[1].start_pack.files["CONTEXT.md"]
+    assert worker.task_queue.completed == [TASK.id]
+
+
+def test_a_quick_wrap_up_still_gets_its_restart(tmp_path: Path) -> None:
+    """Crossing the threshold and ending within one poll is still a D77 restart."""
+    holder: list[WorkerHarness] = []
+    sessions: list[ScriptedSession] = []
+
+    def agent(session: ScriptedSession) -> Iterator[float]:
+        sessions.append(session)
+        transcript = Path(session.spec.env[TRANSCRIPT_VARIABLE])
+        if len(sessions) == 1:
+            transcript.write_text(assistant_line(60_000, "Bash"))
+            yield 10.0
+            with transcript.open("a") as lines:
+                lines.write(assistant_line(150_000, "Edit"))
+            holder[0].write_claim(WORKER, TASK, 1, "Lead: unfinished, continue me.")
+            yield 5.0
+        else:
+            holder[0].write_claim(WORKER, TASK, 2, "Followed the lead.")
+
+    worker = make_worker_harness(tmp_path, PRESETS["S2"], {"agent": agent}, "agent")
+    holder.append(worker)
+    run_task(WORKER, TASK, worker.deps, cursor=0)
+    assert len(sessions) == 2, "exactly one restart"
+    assert "Lead: unfinished" in sessions[1].start_pack.files["CONTEXT.md"]
+    assert worker.task_queue.completed == [TASK.id]
+
+
+def test_a_loop_failure_kills_the_session_before_letting_go(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """No session outlives its lease: a second worker must not run the task beside it."""
+
+    def long_running(session: ScriptedSession) -> Iterator[float]:
+        yield 10_000.0
+
+    worker = make_worker_harness(
+        tmp_path, PRESETS["S2"], {"long_running": long_running}, "long_running"
+    )
+
+    def flaky_wait(handle: object, timeout_seconds: float | None) -> None:
+        raise RuntimeError("sidecar socket closed")
+
+    monkeypatch.setattr(worker.executor, "wait", flaky_wait)
+    with pytest.raises(RuntimeError, match="sidecar"):
+        run_task(WORKER, TASK, worker.deps, cursor=0)
+    handle = worker.executor.processes["memory-00001"].handle
+    assert not worker.executor.is_alive(handle)
+    assert worker.leases.get(WORKER) is None
+    assert worker.task_queue.requeued == [(TASK.id, NO_CLAIM_REASON)]
+    assert worker.task_queue.completed == []
+
+
+def test_a_hook_shown_interrupt_rides_the_restart_pack_once(tmp_path: Path) -> None:
+    """D77 part 3: the interrupt the hook delivered, in the next pack and not again."""
+    holder: list[WorkerHarness] = []
+    sessions: list[ScriptedSession] = []
+    sandbox = tmp_path / "sandboxes" / WORKER / TASK.id
+
+    def agent(session: ScriptedSession) -> Iterator[float]:
+        sessions.append(session)
+        transcript = Path(session.spec.env[TRANSCRIPT_VARIABLE])
+        if len(sessions) == 1:
+            (sandbox / ".vlah").mkdir(parents=True, exist_ok=True)
+            (sandbox / ".vlah" / "interrupts.jsonl").write_text(
+                INTERRUPT.model_dump_json() + "\n"
+            )
+        else:
+            pass
+        if len(sessions) < 3:
+            transcript.write_text(assistant_line(150_000, "Bash"))
+            yield 60.0
+            holder[0].write_claim(WORKER, TASK, len(sessions), "Wrapping up.")
+        else:
+            holder[0].write_claim(WORKER, TASK, 3, "Done.")
+
+    worker = make_worker_harness(tmp_path, PRESETS["S2"], {"agent": agent}, "agent")
+    holder.append(worker)
+    run_task(WORKER, TASK, worker.deps, cursor=0)
+    assert [session.start_pack.interrupt for session in sessions] == [
+        None,
+        INTERRUPT,
+        None,
+    ]
     assert worker.task_queue.completed == [TASK.id]
 
 

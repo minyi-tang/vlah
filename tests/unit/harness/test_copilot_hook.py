@@ -37,8 +37,17 @@ def run_hook(
     )
 
 
+UNREACHABLE_CHECK_URL = "http://127.0.0.1:9/hook/check"
+UNREACHABLE_ACK_URL = "http://127.0.0.1:9/hook/ack"
+COMPACTION = json.dumps({"type": "session.compaction_start", "data": {}}) + "\n"
+
+
 def hook_environment(
-    check_url: str, ack_url: str, token: str, transcript: Path
+    check_url: str,
+    ack_url: str,
+    token: str,
+    transcript: Path,
+    sandbox: Path | None = None,
 ) -> dict[str, str]:
     return {
         "VLAH_HOOK_CHECK_URL": check_url,
@@ -47,6 +56,7 @@ def hook_environment(
         "VLAH_TRANSCRIPT": str(transcript),
         "VLAH_CONTEXT_RESTART_FRACTION": "0.7",
         "VLAH_WRAP_UP_TOOLS": "herd-repo_write,herd-surprise",
+        **({"VLAH_SANDBOX": str(sandbox)} if sandbox is not None else {}),
     }
 
 
@@ -70,7 +80,11 @@ def test_the_hook_denies_on_a_hard_interrupt_and_passes_otherwise(
     with serving(tools.tools) as server:
         hooks = server.hook_config_for(WORKER)
         environment = hook_environment(
-            hooks.interrupt_check_url, hooks.interrupt_ack_url, token, transcript
+            hooks.interrupt_check_url,
+            hooks.interrupt_ack_url,
+            token,
+            transcript,
+            sandbox=tmp_path / "sandbox",
         )
         assert denial(run_hook("bash", environment)) is None
         tools.router.pending[WORKER] = INTERRUPT
@@ -78,6 +92,8 @@ def test_the_hook_denies_on_a_hard_interrupt_and_passes_otherwise(
         assert reason is not None and INTERRUPT.reason in reason
         assert tools.router.acknowledged == ["i-1"], "the agent has now seen it"
         assert denial(run_hook("view", environment)) is None
+    recorded = (tmp_path / "sandbox" / ".vlah" / "interrupts.jsonl").read_text()
+    assert json.loads(recorded)["id"] == "i-1", "kept for the restart pack (D77)"
 
 
 def test_past_the_threshold_only_the_wrap_up_tools_pass(tmp_path: Path) -> None:
@@ -95,13 +111,43 @@ def test_past_the_threshold_only_the_wrap_up_tools_pass(tmp_path: Path) -> None:
         assert denial(run_hook("herd-repo_write", environment)) is None
 
 
-def test_a_broken_hook_lets_the_call_through(tmp_path: Path) -> None:
+def test_an_unreachable_tool_server_lets_the_call_through(tmp_path: Path) -> None:
+    """The executor backstops interrupts (D60 layer 3); the hook must not stop the agent."""
     environment = hook_environment(
-        "http://127.0.0.1:9/hook/check",
-        "http://127.0.0.1:9/hook/ack",
-        "token",
-        tmp_path / "events.jsonl",
+        UNREACHABLE_CHECK_URL, UNREACHABLE_ACK_URL, "token", tmp_path / "events.jsonl"
     )
     completed = run_hook("bash", environment)
+    assert completed.returncode == 0 and completed.stdout == ""
+    assert "could not check interrupts" in completed.stderr
+
+
+def test_the_context_guard_holds_when_the_tool_server_is_down(tmp_path: Path) -> None:
+    """D77 needs no network: past the threshold, only the wrap-up tools pass."""
+    transcript = tmp_path / "events.jsonl"
+    transcript.write_text(assistant_line(150_000, "bash"))
+    environment = hook_environment(
+        UNREACHABLE_CHECK_URL, UNREACHABLE_ACK_URL, "token", transcript
+    )
+    reason = denial(run_hook("bash", environment))
+    assert reason is not None and "75% full" in reason
+    assert denial(run_hook("herd-repo_write", environment)) is None
+
+
+def test_a_compacted_conversation_counts_as_full(tmp_path: Path) -> None:
+    """After Copilot compacts, the hook keeps the agent on its wrap-up tools (D77)."""
+    transcript = tmp_path / "events.jsonl"
+    transcript.write_text(
+        assistant_line(165_000, "bash") + COMPACTION + assistant_line(40_000, "bash")
+    )
+    environment = hook_environment(
+        UNREACHABLE_CHECK_URL, UNREACHABLE_ACK_URL, "token", transcript
+    )
+    reason = denial(run_hook("bash", environment))
+    assert reason is not None and "100% full" in reason
+    assert denial(run_hook("herd-repo_write", environment)) is None
+
+
+def test_a_broken_hook_lets_the_call_through(tmp_path: Path) -> None:
+    completed = run_hook("bash", {"VLAH_TOOL_TOKEN": "token"})
     assert completed.returncode == 0 and completed.stdout == ""
     assert "letting the call through" in completed.stderr
