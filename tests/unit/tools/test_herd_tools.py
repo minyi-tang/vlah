@@ -243,8 +243,8 @@ def test_a_malformed_claim_comes_back_as_an_error_with_the_interrupt(
     )
     assert "not a valid claim" in str(reply.result["error"])
     assert reply.interrupt is not None and reply.interrupt.id == "i-1"
-    notes = harness.tools.repo_write(WORKER, {"claims/worker-01/notes.txt": "plain"})
-    assert notes.result["written"] == ["claims/worker-01/notes.txt"]
+    notes = harness.tools.repo_write(WORKER, {"traces/worker-01/notes.txt": "plain"})
+    assert notes.result["written"] == ["traces/worker-01/notes.txt"]
 
 
 def test_a_symbolic_link_in_the_candidate_is_refused(tmp_path: Path) -> None:
