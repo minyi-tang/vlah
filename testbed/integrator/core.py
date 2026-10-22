@@ -384,25 +384,14 @@ class IntegratorCore:
         }
 
     def effective_base(self, src: Path, t: int) -> int:
-        """The version a candidate was really built on, when its label claims a newer one: move off t only
-        when d(src, v_j) + d(v_j, v_t) == d(src, v_t), i.e. none of v_t's changes are in it.
-        """
-        if t == 0:
-            return 0
-        d_t = distance(src, Path(self.versions[t].dir))
-        best_j, best_d = t, d_t
-        for j in range(t - 1, -1, -1):
-            d_j = distance(src, Path(self.versions[j].dir))
-            if d_j < best_d:
-                best_j, best_d = j, d_j
-        if (
-            best_j != t
-            and best_d
-            + distance(Path(self.versions[best_j].dir), Path(self.versions[t].dir))
-            == d_t
-        ):
-            return best_j
-        return t
+        """The version a candidate was really built on: the one nearest to it by content, whatever its label
+        says (agents keep editing work/ after a merge, and copy old directories). Ties go to the claimed
+        version, then to the older one: an older base can only cause a conflict (a compose task), while a
+        newer base the candidate lacks would silently drop that version's changes."""
+        distances = [distance(src, Path(v.dir)) for v in self.versions]
+        nearest = min(distances)
+        tied = [j for j, d in enumerate(distances) if d == nearest]
+        return t if t in tied else tied[0]
 
     def on_remeasure(self, task, m: Measurement):
         c = task["cand"]
@@ -515,8 +504,7 @@ class IntegratorCore:
                 "base_dir": self.versions[t].dir,
                 "ours_dir": self.versions[self.k].dir,
                 "theirs_dir": str(src),
-                "predicted": (self.versions[self.k].score or 0.0)
-                + paired(c.per_seed, self.versions[t].per_seed)["mean"],
+                "predicted": c.score,  # its own measured score: a fair guess for the merged version
             },
         )
         self.fail(c, "conflict", note=why)

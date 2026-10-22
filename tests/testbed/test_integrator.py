@@ -284,3 +284,27 @@ def test_editing_a_pushed_change_is_not_called_stale(tmp_path):
     assert ev(env, "stale_target") == []
     assert [a["data"]["baseline"] for a in ev(env, "baseline_advanced")] == [1, 2]
     env.close()
+
+
+def test_author_keeps_editing_after_a_merge_without_compose(tmp_path):
+    """The single-arm default: work/ still says baseline@0 after the agent's own change was merged."""
+    env = mk(tmp_path, arm="single", n=1)
+    env.advance_to(60)
+    first = env.make(["backfill"])
+    env.submit("solo", first, predicted=-900, target="baseline@0")
+    env.advance_to(120)
+    assert env.base_for("solo")[0] == 1
+    second = env.make(
+        ["backfill", "admission"]
+    )  # keeps editing the same line of work, label unchanged
+    env.submit("solo", second, predicted=-800, target="baseline@0")
+    env.advance_to(2 * H)
+    assert ev(env, "compose_task") == []
+    stale = ev(env, "stale_target")
+    assert (
+        len(stale) == 1
+        and stale[0]["data"]["claimed"] == 0
+        and stale[0]["data"]["effective"] == 1
+    )
+    assert env.integ.versions[-1].score == -800
+    env.close()

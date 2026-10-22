@@ -121,3 +121,25 @@ def test_find_culprit_and_revert_primitives(tmp_path):
     BaselineRecord.model_validate(
         json.loads((c.wd / "baseline" / "4.json").read_text())
     )
+
+
+def test_compose_task_predicts_the_candidates_own_score(tmp_path):
+    m = FakeMeasurer()
+    c = core(tmp_path, m)
+    first = write(tmp_path / "a", ["backfill"])
+    (first / "knob.yaml").write_text("window: 10\n")
+    c.add(
+        VerifiedCandidate(
+            "t-a", "h-a", "baseline@0", [-900.0, -900.0], -900.0, first, actor="a"
+        )
+    )
+    drain(c)
+    clash = write(tmp_path / "b", ["admission"])
+    (clash / "knob.yaml").write_text("window: 20\n")
+    c.add(
+        VerifiedCandidate(
+            "t-b", "h-b", "baseline@0", [-900.0, -900.0], -900.0, clash, actor="b"
+        )
+    )
+    tasks = [d for d in drain(c) if d["type"] == "compose_task"]
+    assert len(tasks) == 1 and tasks[0]["predicted"] == -900.0
