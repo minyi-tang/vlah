@@ -20,6 +20,7 @@ from tests.fixtures.executor import (
     wait_for_file,
 )
 from vlah.adapters.executor.local.traces import RESTART_HINT, STUB_TAG
+from vlah.adapters.memory.store import MemoryObjectStore
 from vlah.core.types.claims import parse_claim
 from vlah.core.types.clock import FakeClock, SystemClock
 from vlah.core.types.ids import ActorId
@@ -258,3 +259,85 @@ def test_a_killed_group_takes_the_agents_children_with_it(tmp_path: Path) -> Non
             else:
                 break
         assert not process_exists(child_id)
+
+
+class FailingObjectStore(MemoryObjectStore):
+    """An object store that is down: every upload fails."""
+
+    def put(self, key: str, data: bytes, is_private: bool) -> str:
+        raise ConnectionError("the object store is down")
+
+
+def text_under(directory: Path) -> str:
+    return "\n".join(
+        path.read_text(errors="replace")
+        for path in directory.rglob("*")
+        if path.is_file() and "objects" not in path.parts
+    )
+
+
+def test_the_sandbox_holds_no_path_to_the_herds_repositories(tmp_path: Path) -> None:
+    """Clones without remotes, reflogs or FETCH_HEAD; a worktree would share .git (#42)."""
+    clock = FakeClock()
+    with running_executor(tmp_path, clock) as harness:
+        harness.executor.start(
+            harness.spec(SLEEP_PROGRAM), TASK, START_PACK, harness.sink
+        )
+        harness.blackboard.write(ActorId("human"), {"approaches/a-01.md": b"a"}, "a")
+        clock.advance(60.0)
+        harness.executor.tick()
+        sandbox = harness.sandbox()
+        assert (sandbox / "blackboard" / "approaches" / "a-01.md").exists()
+        assert (sandbox / "target" / ".git").is_dir(), "a clone, not a worktree"
+        for repository in ("runs/run-1/blackboard.git", "target"):
+            assert str(tmp_path / repository) not in text_under(
+                sandbox / "blackboard" / ".git"
+            )
+            assert str(tmp_path / repository) not in text_under(
+                sandbox / "target" / ".git"
+            )
+
+
+def test_a_worker_cannot_move_the_source_repositorys_refs(tmp_path: Path) -> None:
+    with running_executor(tmp_path, FakeClock()) as harness:
+        harness.executor.start(
+            harness.spec(SLEEP_PROGRAM), TASK, START_PACK, harness.sink
+        )
+        git(harness.sandbox() / "target", "update-ref", "refs/heads/forged", "HEAD")
+        assert "forged" not in git(harness.target, "branch", "--list")
+
+
+def test_the_base_survives_a_restart_and_a_non_default_branch(tmp_path: Path) -> None:
+    clock = FakeClock()
+    with running_executor(tmp_path, clock) as harness:
+        git(harness.target, "switch", "-q", "-c", "baseline-2")
+        (harness.target / "solver.py").write_text("SPEED = 2\n")
+        git(harness.target, "add", ".")
+        git(harness.target, "commit", "-qm", "baseline 2")
+        git(harness.target, "switch", "-q", "main")
+        spec = harness.spec(SLEEP_PROGRAM).model_copy(
+            update={"target_ref": "baseline-2"}
+        )
+        handle = harness.executor.start(spec, TASK, START_PACK, harness.sink)
+        target = harness.sandbox() / "target"
+        assert (target / "solver.py").read_text() == "SPEED = 2\n"
+        (target / "solver.py").write_text("SPEED = 3\n")
+        git(target, "commit", "-qam", "agent work")
+        harness.executor.interrupt(handle, INTERRUPT)
+        clock.advance(Params().heartbeat_interval_seconds)
+        harness.executor.tick()
+        assert harness.sink.beats[-1][1] == ("solver.py",), "diffed against the base"
+
+
+def test_a_failing_trace_upload_neither_blocks_nor_repeats_the_restart(
+    tmp_path: Path,
+) -> None:
+    with running_executor(
+        tmp_path, FakeClock(), objects=FailingObjectStore()
+    ) as harness:
+        handle = harness.executor.start(
+            harness.spec(COUNT_RUNS_PROGRAM), TASK, START_PACK, harness.sink
+        )
+        exit_info = harness.executor.wait(handle, 10.0)
+        assert exit_info is not None and exit_info.return_code == 0
+        assert (harness.sandbox() / "runs.txt").read_text() == "run\nrun\n"
