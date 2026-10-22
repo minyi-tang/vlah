@@ -207,6 +207,9 @@ def test_the_worker_environment_holds_no_push_token(tmp_path: Path) -> None:
         assert "VLAH_PUSH_TOKEN" not in environment
         assert "s3cret" not in json.dumps(environment)
         assert environment["VLAH_AGENT"] == WORKER
+        assert environment["VLAH_TRANSCRIPT"] == str(
+            harness.executor.transcript_path(handle)
+        )
         with pytest.raises(ValueError, match="VLAH_PUSH_TOKEN"):
             harness.executor.start(
                 harness.spec(QUICK_PROGRAM, env={"VLAH_PUSH_TOKEN": "s3cret"}),

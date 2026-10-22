@@ -394,6 +394,10 @@ class LocalExecutor:
         """The current process's id, which is also its process group id."""
         return self.session(handle).process.popen.pid
 
+    def transcript_path(self, handle: Handle) -> Path:
+        """Where the current process's harness writes its transcript (VLAH_TRANSCRIPT)."""
+        return self.session(handle).process.logs.transcript
+
     def usage(self, handle: Handle) -> tuple[ResourceUsage, ...]:
         session = self.session(handle)
         return tuple(
