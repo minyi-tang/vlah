@@ -260,7 +260,7 @@ def test_concurrent_duplicates_are_billed_once(tmp_path: Path) -> None:
         tmp_path, gates=(GateSpec(name="build", command="make", when=("pre_submit",)),)
     )
     gates = OverlapCountingGates()
-    harness.service.gate_runner = gates
+    harness.service.runner.gate_runner = gates
     directory = harness.candidate(0.5)
     with ThreadPoolExecutor(max_workers=calls) as pool:
         statuses = sorted(

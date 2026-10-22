@@ -57,6 +57,8 @@ class FakeSlowTierState:
     key_headers: list[str] = field(default_factory=list[str])
     status_actors: list[str] = field(default_factory=list[str])
     events: list[object] = field(default_factory=list[object])
+    status_override: dict[str, object] | None = None
+    submit_override: tuple[int, bytes] | None = None
 
 
 def handler_for(state: FakeSlowTierState) -> type[BaseHTTPRequestHandler]:
@@ -89,7 +91,9 @@ def handler_for(state: FakeSlowTierState) -> type[BaseHTTPRequestHandler]:
             elif self.path.startswith("/status/"):
                 state.status_actors.append(self.headers.get("X-TB-Actor", ""))
                 ticket = self.path.removeprefix("/status/")
-                if state.clock.now_seconds() >= state.tickets[ticket]:
+                if state.status_override is not None:
+                    self.reply(200, state.status_override)
+                elif state.clock.now_seconds() >= state.tickets[ticket]:
                     self.reply(
                         200,
                         {
@@ -115,7 +119,13 @@ def handler_for(state: FakeSlowTierState) -> type[BaseHTTPRequestHandler]:
             )
             assert isinstance(body, dict)
             if self.path == "/submit":
-                if state.submissions_left <= 0:
+                if state.submit_override is not None:
+                    status, raw = state.submit_override
+                    self.send_response(status)
+                    self.send_header("Content-Length", str(len(raw)))
+                    self.end_headers()
+                    self.wfile.write(raw)
+                elif state.submissions_left <= 0:
                     self.reply(
                         429, {"reason": "quota", "next_slot_at": state.next_slot_at}
                     )
@@ -294,3 +304,69 @@ def test_recorder_posts_herd_events(
             "data": {"kind": "dead_end", "id": "c-1", "refs": ["9f3a"], "hash": "9f3a"},
         }
     ]
+
+
+def test_a_seed_the_candidate_failed_makes_the_run_void(
+    slow_tier: tuple[SlowTierClient, FakeSlowTierState], tmp_path: Path
+) -> None:
+    """TB section 11.3: a crashed or timed-out seed scores null; that is not an error."""
+    client, state = slow_tier
+    source = SlowTierSource(client=client, declaration=DECLARATION)
+    ticket = source.submit(candidate(tmp_path), WORKER, "baseline@0", "dev")
+    state.status_override = {
+        "state": "done",
+        "result": {
+            "score": None,
+            "ci": [None, None],
+            "n": 3,
+            "per_seed": [-110.0, None, -112.0],
+            "extra": {"failed_seeds": [1], "reasons": ["timeout"]},
+            "constraint_ok": False,
+        },
+    }
+    score = source.poll(ticket)
+    assert score is not None
+    assert (score.value, score.per_seed, score.constraint_ok) == (None, (), False)
+    assert score.extra["reasons"] == ["timeout"]
+
+
+def test_a_failed_ticket_is_a_judge_failure(
+    slow_tier: tuple[SlowTierClient, FakeSlowTierState], tmp_path: Path
+) -> None:
+    client, state = slow_tier
+    source = SlowTierSource(client=client, declaration=DECLARATION)
+    ticket = source.submit(candidate(tmp_path), WORKER, "baseline@0", "dev")
+    state.status_override = {
+        "state": "failed",
+        "result": {
+            "score": None,
+            "n": 0,
+            "per_seed": [],
+            "extra": {"error": "OSError"},
+        },
+    }
+    with pytest.raises(ValueError, match="could not run"):
+        source.poll(ticket)
+
+
+@pytest.mark.parametrize(
+    ("status", "raw", "error_type"),
+    [
+        (503, b"<html>Service Unavailable</html>", RuntimeError),
+        (400, b'{"reason": "missing_prediction"}', ValueError),
+        (400, b"<html>Bad Request</html>", ValueError),
+    ],
+)
+def test_server_errors_are_transient_and_refusals_permanent(
+    slow_tier: tuple[SlowTierClient, FakeSlowTierState],
+    tmp_path: Path,
+    status: int,
+    raw: bytes,
+    error_type: type[Exception],
+) -> None:
+    """The eval client retries a RuntimeError with backoff and gives up on a ValueError."""
+    client, state = slow_tier
+    state.submit_override = (status, raw)
+    source = SlowTierSource(client=client, declaration=DECLARATION)
+    with pytest.raises(error_type):
+        source.submit(candidate(tmp_path), WORKER, "baseline@0", "dev")
