@@ -38,6 +38,7 @@ from vlah.core.types.interrupts import Interrupt
 from vlah.core.types.params import EgressPolicy, Limits, Params
 from vlah.core.worker.loop import WorkerDeps
 from vlah.runtime.assembly import RunComponents, RunContext
+from vlah.runtime.compose import compose_arm
 from vlah.tools.herd_tools import HerdTools
 
 BASELINE_ZERO = BaselineRecord(k=0, parent=None, candidates=(), created_ts=0.0)
@@ -231,18 +232,22 @@ class MemoryAssembly:
             programs={},
             heartbeat_interval_seconds=context.params.heartbeat_interval_seconds,
         )
-        tools = HerdTools(
-            blackboard=blackboard,
-            objects=None,
-            indexer=indexer,
-            eval_service=ScriptedEval(),
-            leases=leases,
-            router=router,
-            recorder=RecordingRecorder(),
-            arm=context.arm,
-            params=context.params,
-            clock=self.clock,
-            run_id=context.run_id,
+        eval_service = ScriptedEval()
+        tools, compose_tools = (
+            HerdTools(
+                blackboard=blackboard,
+                objects=None,
+                indexer=indexer,
+                eval_service=eval_service,
+                leases=leases,
+                router=router,
+                recorder=RecordingRecorder(),
+                arm=arm,
+                params=context.params,
+                clock=self.clock,
+                run_id=context.run_id,
+            )
+            for arm in (context.arm, compose_arm(context.arm))
         )
         components = RunComponents(
             blackboard=blackboard,
@@ -263,6 +268,8 @@ class MemoryAssembly:
             ),
             tool_server=FakeToolServer(),
             registry=tools,
+            compose_tool_server=FakeToolServer(),
+            compose_registry=compose_tools,
             target_repository="memory://target",
             target_ref="main",
         )

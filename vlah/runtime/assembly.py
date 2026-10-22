@@ -65,6 +65,10 @@ class RunComponents:
     harness: WorkerHarness
     tool_server: ToolServer
     registry: AgentRegistry
+    # The compose slot's tools, built with compose_arm(context.arm) so the compose
+    # agent gets the same tool behaviour in every arm (D74).
+    compose_tool_server: ToolServer
+    compose_registry: AgentRegistry
     target_repository: str
     target_ref: str
 

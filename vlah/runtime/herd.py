@@ -8,9 +8,11 @@ fan-out, starts the supervisor thread, and returns the Run.
 The merge fan-out, on every merged commit:
 - feeds the Indexer and the Router;
 - turns result_ready, and only result_ready, into the submitter's follow-up task
-  (remeasure_ready belongs to the Integrator);
+  (remeasure_ready belongs to the Integrator), in the compose queue when the
+  submitter is the compose slot and in the arm queue otherwise (D74);
 - hands a result claim to the Integrator when a claim_status event moves it to
-  verified at the top level of the judge ladder.
+  verified at the top level of the judge ladder, unless the claim is one of the
+  Integrator's own remeasures, which the eval service tags "remeasure".
 It runs on the writing thread, so it never calls the executor.
 """
 
@@ -26,8 +28,9 @@ from vlah.core.blackboard.api import Blackboard, MergedCommit
 from vlah.core.metrics.api import StandingMetrics
 from vlah.core.problem.api import LoadProblem, Problem
 from vlah.core.types.baseline import BaselineRecord
+from vlah.core.types.claims import parse_claim
 from vlah.core.types.clock import Clock
-from vlah.core.types.events import Event, event_from_json
+from vlah.core.types.events import Event, ResultReady, event_from_json
 from vlah.core.types.ids import ActorId
 from vlah.core.types.sources import SourceDecl
 from vlah.core.worker.loop import InterruptInbox, WorkerDeps, run_worker
@@ -46,6 +49,8 @@ DEFAULT_SUPERVISOR_POLL_SECONDS = 5.0
 SECONDS_PER_HOUR = 3600.0
 VERIFIED_PREFIX = "verified:"
 EVAL_SERVICE = "eval_service"
+# The eval service tags the result claim of an Integrator remeasure (D74).
+REMEASURE_TAG = "remeasure"
 
 
 def worker_id(number: int) -> ActorId:
@@ -53,14 +58,25 @@ def worker_id(number: int) -> ActorId:
 
 
 def top_level_source(sources: tuple[SourceDecl, ...]) -> str | None:
-    """The judge ladder's last level: the most expensive pull source (D9)."""
+    """The judge ladder's last level, derived as the eval service derives its ladder:
+    pull sources sorted by cost then latency, the last of equals (D9)."""
     pull = [source for source in sources if source.mode == "pull"]
     if not pull:
         return None
     else:
-        return max(
+        ladder = sorted(
             pull, key=lambda source: (source.cost_machine_hours, source.latency_seconds)
-        ).id
+        )
+        return ladder[-1].id
+
+
+def is_remeasure_claim(blackboard: Blackboard, claim_id: str) -> bool:
+    path = f"claims/{EVAL_SERVICE}/{claim_id}.md"
+    if path not in blackboard.list_paths(path, None):
+        return False
+    else:
+        claim = parse_claim(blackboard.read(path, None).decode("utf-8"))
+        return REMEASURE_TAG in claim.tags
 
 
 @dataclass(kw_only=True)
@@ -79,11 +95,21 @@ class RunFanout:
             else:
                 pass
             if event.type == "result_ready":
-                self.components.task_queue.on_result_ready(event)
+                is_compose_result = (
+                    isinstance(event.data, ResultReady)
+                    and event.data.submitter == COMPOSE_AGENT
+                )
+                queue = (
+                    self.components.compose_queue
+                    if is_compose_result
+                    else self.components.task_queue
+                )
+                queue.on_result_ready(event)
             elif (
                 event.type == "claim_status"
                 and event.target is not None
                 and event.to == f"{VERIFIED_PREFIX}{self.top_level}"
+                and not is_remeasure_claim(self.components.blackboard, event.target)
             ):
                 self.components.integrator.on_verified(event.target)
             else:
@@ -221,8 +247,12 @@ class LocalHerd:
             executor=components.executor,
             sessions=components.sessions,
             harness=components.harness,
-            tool_server=components.tool_server,
-            registry=components.registry,
+            tool_server=(
+                components.compose_tool_server if is_compose else components.tool_server
+            ),
+            registry=(
+                components.compose_registry if is_compose else components.registry
+            ),
             context=ContextSources(
                 blackboard=components.blackboard,
                 indexer=components.indexer,
@@ -312,6 +342,10 @@ def build_herd(
 ) -> LocalHerd:
     """Every arm gets the problem's Params unchanged, so the Integrator and every
     other component are configured identically across arms (D58, L0-19)."""
+    if arm == "B0" and worker_count != 1:
+        raise ValueError(f"B0 is one agent (D58), not {worker_count} workers")
+    else:
+        pass
     return LocalHerd(
         context=RunContext(
             run_id=run_id,
