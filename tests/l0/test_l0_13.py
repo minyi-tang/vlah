@@ -20,6 +20,7 @@ def test_l0_13_result_ready_fields(tmp_path: Path) -> None:
     events = harness.run(seconds=3600)
     (result,) = [event.data for event in events if isinstance(event.data, ResultReady)]
     assert result.baseline == "baseline@0"
+    assert result.paired is not None, "a measured result is paired"
     assert result.paired.mean == 2.0, "candidate minus baseline, seed by seed"
     assert result.paired.se == 0.0
     assert result.paired.n_items == 5

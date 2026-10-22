@@ -118,3 +118,22 @@ def test_payload_is_required_where_the_type_defines_one() -> None:
 def test_payload_is_rejected_where_the_type_defines_none() -> None:
     with pytest.raises(ValidationError):
         make_event("claim_status", EXAMPLE_PAYLOADS["dedup_hit"])
+
+
+def test_a_void_result_carries_no_score_and_round_trips() -> None:
+    """A void run has no score to report; a sentinel such as 0.0 would read as one."""
+    void = ResultReady(
+        candidate="9f3a",
+        claim_id="c-eval_service-00001",
+        approach="a-03",
+        submitter=ActorId("worker-07"),
+        submitter_checkpoint=None,
+        baseline="baseline@6",
+        paired=None,
+        per_item="candidates/9f3a/result.json",
+        score=None,
+        level="slow",
+        constraint_ok=False,
+    )
+    event = make_event("result_ready", void)
+    assert event_from_json(event_to_json(event)).data == void

@@ -36,7 +36,13 @@ EventType = Literal[
 
 
 class ResultReady(FrozenModel):
-    """approach is the candidate's approach, so the follow-up task can name it (D28)."""
+    """approach is the candidate's approach, so the follow-up task can name it (D28).
+
+    constraint_ok False means the result was refuted by a constraint or a
+    post-result gate (D54): paired is then a measurement, never a gain. score and
+    paired are None when the run was void, for example a candidate that crashed or
+    timed out on a seed; constraint_ok is then False too.
+    """
 
     candidate: str
     claim_id: str
@@ -44,9 +50,9 @@ class ResultReady(FrozenModel):
     submitter: ActorId
     submitter_checkpoint: str | None
     baseline: str
-    paired: Paired
+    paired: Paired | None
     per_item: str
-    score: float
+    score: float | None
     level: str
     constraint_ok: bool | None = None
 
@@ -105,6 +111,8 @@ class RemeasureReady(FrozenModel):
     """The Integrator's paired remeasure of a rebased candidate on baseline@k (D74).
 
     It goes to the Integrator only; it never creates a follow-up task for a worker.
+    As in ResultReady, score and paired are None when the run was void, and
+    constraint_ok False means the remeasure was refuted.
     """
 
     request_id: str
@@ -112,8 +120,8 @@ class RemeasureReady(FrozenModel):
     parent_candidate: str
     claim_id: str
     baseline: str
-    paired: Paired
-    score: float
+    paired: Paired | None
+    score: float | None
     level: str
     constraint_ok: bool | None = None
 
