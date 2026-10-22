@@ -1,7 +1,7 @@
 """The MCP tool server over real HTTP: the token names the agent, the hook answers (D60, D68)."""
 
 import asyncio
-import statistics
+import threading
 import time
 from pathlib import Path
 
@@ -19,6 +19,7 @@ from vlah.core.types.interrupts import Interrupt
 pytestmark = pytest.mark.tools
 
 WORKER = ActorId("worker-01")
+OTHER = ActorId("worker-02")
 TOOL_NAMES = ["eval_request", "repo_read", "repo_write", "search", "surprise"]
 HOOK_BUDGET_SECONDS = 0.050
 HOOK_SAMPLES = 20
@@ -115,19 +116,50 @@ def test_the_hook_returns_the_pending_interrupt_and_acknowledges_it(
         assert missing_id.status_code == 400
 
 
-def test_the_hook_answers_within_fifty_milliseconds(tmp_path: Path) -> None:
-    """The PreToolUse hook runs before every tool call, so it must be fast (tools/api.py)."""
+def test_the_hook_answers_within_fifty_milliseconds_while_another_agent_writes(
+    tmp_path: Path,
+) -> None:
+    """The hook runs before every tool call, so it must never wait on another call."""
     harness = make_tools_harness(tmp_path, PRESETS["S2"])
-    token = harness.tools.register_agent(WORKER, tmp_path)
+    harness.blackboard.write(ActorId("human"), {"spec.md": b"spec"}, "spec")
+    harness.tools.register_agent(WORKER, tmp_path)
+    token = harness.tools.register_agent(OTHER, tmp_path)
+    harness.recorder.gate = threading.Event()
+    path, text = insight(WORKER)
+    writer = threading.Thread(
+        target=harness.tools.repo_write, args=(WORKER, {path: text})
+    )
+    durations: list[float] = []
     with (
         serving(harness.tools) as server,
-        httpx2.Client(headers={"Authorization": f"Bearer {token}"}) as http,
+        httpx2.Client(
+            headers={"Authorization": f"Bearer {token}"}, timeout=1.0
+        ) as http,
     ):
-        url = server.hook_config_for(WORKER).interrupt_check_url
+        url = server.hook_config_for(OTHER).interrupt_check_url
         http.post(url)
-        durations = []
-        for _ in range(HOOK_SAMPLES):
-            started = time.perf_counter()
-            assert http.post(url).status_code == 200
-            durations.append(time.perf_counter() - started)
-    assert statistics.median(durations) < HOOK_BUDGET_SECONDS, durations
+        writer.start()
+        try:
+            assert harness.recorder.entered.wait(10.0), "the write reached the recorder"
+            for _ in range(HOOK_SAMPLES):
+                started = time.perf_counter()
+                assert http.post(url).status_code == 200
+                durations.append(time.perf_counter() - started)
+        finally:
+            harness.recorder.gate.set()
+            writer.join(10.0)
+    assert max(durations) < HOOK_BUDGET_SECONDS, durations
+
+
+def test_a_bad_ack_body_is_a_400_and_a_stranger_a_401(tmp_path: Path) -> None:
+    harness = make_tools_harness(tmp_path, PRESETS["S2"])
+    token = harness.tools.register_agent(WORKER, tmp_path)
+    with serving(harness.tools) as server:
+        url = server.hook_config_for(WORKER).interrupt_ack_url
+        not_json = {
+            "Authorization": f"Bearer {token}",
+            "Content-Type": "application/json",
+        }
+        assert httpx2.post(url, headers=not_json, content=b"{oops").status_code == 400
+        stranger = {"Authorization": "Bearer nope"}
+        assert httpx2.post(url, headers=stranger, content=b"{oops").status_code == 401

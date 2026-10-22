@@ -7,7 +7,6 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
-from random import Random
 
 import uvicorn
 
@@ -33,10 +32,28 @@ SERVER_START_TIMEOUT_SECONDS = 10.0
 
 @dataclass(kw_only=True)
 class RecordingRecorder:
+    """Records events; can hold each post at a barrier or a gate, or fail it."""
+
     events: list[RecorderEvent] = field(default_factory=list[RecorderEvent])
+    barrier: threading.Barrier | None = None
+    gate: threading.Event | None = None
+    entered: threading.Event = field(default_factory=threading.Event)
+    is_failing: bool = False
 
     def post(self, events: tuple[RecorderEvent, ...]) -> None:
-        self.events.extend(events)
+        self.entered.set()
+        if self.barrier is not None:
+            self.barrier.wait()
+        else:
+            pass
+        if self.gate is not None:
+            self.gate.wait()
+        else:
+            pass
+        if self.is_failing:
+            raise ConnectionError("the testbed recorder is down")
+        else:
+            self.events.extend(events)
 
 
 @dataclass(kw_only=True)
@@ -140,7 +157,6 @@ def make_tools_harness(sandbox_root: Path, arm: ArmConfig) -> ToolsHarness:
         params=Params(),
         clock=clock,
         run_id="r-tools",
-        random=Random(0),
     )
     return ToolsHarness(
         tools=tools,

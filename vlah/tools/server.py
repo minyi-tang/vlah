@@ -162,18 +162,20 @@ class McpToolServer:
         @self.server.custom_route(HOOK_ACK_PATH, methods=["POST"])
         async def hook_ack(request: Request) -> JSONResponse:
             agent = agent_from(request)
-            body: object = await request.json()
             if agent is None:
                 return JSONResponse({"error": "unknown agent token"}, status_code=401)
-            elif not isinstance(body, dict) or not isinstance(
-                body.get("interrupt_id"), str
-            ):
-                return JSONResponse(
-                    {"error": "interrupt_id is required"}, status_code=400
-                )
             else:
-                tools.hook_ack(agent, str(body["interrupt_id"]))
-                return JSONResponse({"acknowledged": True})
+                try:
+                    body: object = await request.json()
+                except ValueError:
+                    body = None
+                if isinstance(body, dict) and isinstance(body.get("interrupt_id"), str):
+                    tools.hook_ack(agent, str(body["interrupt_id"]))
+                    return JSONResponse({"acknowledged": True})
+                else:
+                    return JSONResponse(
+                        {"error": "interrupt_id is required"}, status_code=400
+                    )
 
     def app(self) -> Starlette:
         return self.server.streamable_http_app(

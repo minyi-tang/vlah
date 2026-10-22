@@ -215,3 +215,114 @@ def test_concurrent_calls_keep_the_books_and_never_wait_on_a_gate(
     assert harness.tools.state(WORKER).consecutive_failures == calls
     claim_paths = harness.blackboard.list_paths(f"claims/{WORKER}/", None)
     assert len(claim_paths) == calls
+
+
+MANIFEST = b"kind: patch\ntarget: baseline@0\napproach: a-01\nauthor: worker-01\ncreated_at: 0\n"
+
+
+def test_tokens_are_secrets_not_draws_from_the_seeded_random(tmp_path: Path) -> None:
+    """Two herds seeded alike must not issue the same credentials."""
+    first = make_tools_harness(tmp_path / "a", PRESETS["S2"])
+    second = make_tools_harness(tmp_path / "b", PRESETS["S2"])
+    token = first.tools.register_agent(WORKER, tmp_path)
+    assert token != second.tools.register_agent(WORKER, tmp_path)
+    assert len(token) == 32
+    assert first.tools.register_agent(WORKER, tmp_path) == token, "stable per agent"
+
+
+def test_a_malformed_claim_comes_back_as_an_error_with_the_interrupt(
+    tmp_path: Path,
+) -> None:
+    harness = make_tools_harness(tmp_path, PRESETS["S2"])
+    harness.tools.register_agent(WORKER, tmp_path)
+    harness.router.pending[WORKER] = Interrupt(
+        id="i-1", agent=WORKER, kind="hard", rule=2, reason="r", written_ts=0.0
+    )
+    reply = harness.tools.repo_write(
+        WORKER, {"claims/worker-01/c-worker-01-00001.md": "---\nid: oops\n---\n"}
+    )
+    assert "not a valid claim" in str(reply.result["error"])
+    assert reply.interrupt is not None and reply.interrupt.id == "i-1"
+    notes = harness.tools.repo_write(WORKER, {"claims/worker-01/notes.txt": "plain"})
+    assert notes.result["written"] == ["claims/worker-01/notes.txt"]
+
+
+def test_a_symbolic_link_in_the_candidate_is_refused(tmp_path: Path) -> None:
+    """Following it would copy any host file onto the shared blackboard (D63)."""
+    harness = make_tools_harness(tmp_path, PRESETS["S2"])
+    sandbox = tmp_path / "sandbox"
+    (sandbox / "candidate").mkdir(parents=True)
+    (tmp_path / "herd.yaml").write_text("secret: true\n")
+    (sandbox / "candidate" / "leak.yaml").symlink_to(tmp_path / "herd.yaml")
+    harness.tools.register_agent(WORKER, sandbox)
+    reply = harness.tools.eval_request(
+        WORKER, "candidate", {"slow": 1.0}, "why", (), None, None
+    )
+    assert "symbolic link (leak.yaml)" in str(reply.result["error"])
+    assert harness.eval_service.requests == []
+
+
+def test_a_dead_end_may_cite_the_result_claim_instead_of_the_candidate(
+    tmp_path: Path,
+) -> None:
+    harness = make_tools_harness(tmp_path, PRESETS["S2"])
+    harness.tools.register_agent(WORKER, tmp_path)
+    harness.blackboard.write(WORKER, {"candidates/9f3a/manifest.yaml": MANIFEST}, "c")
+    result_path, result_text = claim_text(
+        ActorId("eval_service"),
+        1,
+        "result",
+        EvidenceRef(candidate="candidates/9f3a/result.json"),
+    )
+    harness.blackboard.write(
+        ActorId("eval_service"), {result_path: result_text.encode()}, "result"
+    )
+    path, text = claim_text(
+        WORKER, 1, "dead_end", EvidenceRef(claim="c-eval_service-00001")
+    )
+    assert "error" not in harness.tools.repo_write(WORKER, {path: text}).result
+    assert harness.recorder.events[-1].data["hash"] == "9f3a"
+
+
+def test_a_recorder_outage_does_not_fail_the_tools(tmp_path: Path) -> None:
+    """The write has merged by the time the recorder is called; it must not look failed."""
+    harness = make_tools_harness(tmp_path, PRESETS["S2"])
+    harness.tools.register_agent(WORKER, tmp_path)
+    harness.blackboard.write(ActorId("human"), {"spec.md": b"spec"}, "spec")
+    harness.recorder.is_failing = True
+    path, text = claim_text(WORKER, 1, "insight", EvidenceRef(path="spec.md"))
+    assert harness.tools.repo_write(WORKER, {path: text}).result["written"] == [path]
+    assert harness.tools.repo_read(WORKER, "spec.md").result["content"] == "spec"
+
+
+def test_claims_before_the_lease_count_for_the_registered_task(tmp_path: Path) -> None:
+    """The worker loop registers the task before the session starts and the lease exists."""
+    harness = make_tools_harness(tmp_path, PRESETS["S2"])
+    harness.tools.register_agent(WORKER, tmp_path, TASK.id)
+    harness.blackboard.write(ActorId("human"), {"spec.md": b"spec"}, "spec")
+    path, text = claim_text(WORKER, 1, "insight", EvidenceRef(path="spec.md"))
+    harness.tools.repo_write(WORKER, {path: text})
+    assert harness.tools.claims_written(WORKER, TASK.id) == ("c-worker-01-00001",)
+
+
+def test_two_agents_write_at_once(tmp_path: Path) -> None:
+    """Both writes reach the recorder together: no lock is held across another agent's I/O."""
+    harness = make_tools_harness(tmp_path, PRESETS["S2"])
+    harness.blackboard.write(ActorId("human"), {"spec.md": b"spec"}, "spec")
+    for agent in (WORKER, OTHER):
+        harness.tools.register_agent(agent, tmp_path)
+    harness.recorder.barrier = threading.Barrier(2, timeout=10)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        replies = list(
+            pool.map(
+                lambda agent: harness.tools.repo_write(
+                    agent,
+                    dict(
+                        [claim_text(agent, 1, "insight", EvidenceRef(path="spec.md"))]
+                    ),
+                ),
+                (WORKER, OTHER),
+            )
+        )
+    assert all("written" in reply.result for reply in replies)
+    assert len(harness.recorder.events) == 2
