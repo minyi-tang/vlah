@@ -64,6 +64,10 @@ class SessionFiles(Protocol):
 
     def transcript_path(self, handle: Handle) -> Path: ...
 
+    def base_revision(self, agent: ActorId, task_id: str) -> str:
+        """What target/ started from, for the working-directory diff (D77)."""
+        ...
+
 
 class AgentRegistry(Protocol):
     def register_agent(
@@ -274,7 +278,7 @@ def context_restart_pack(run: TaskRun, deps: WorkerDeps) -> StartPack:
             interrupt=run.last_interrupt,
             working_diff=working_directory_diff(
                 deps.sessions.sandbox_path(run.agent, run.task.id) / "target",
-                deps.workspace.target_ref,
+                deps.sessions.base_revision(run.agent, run.task.id),
             ),
             tool_calls=deps.harness.recent_tool_calls(
                 deps.sessions.transcript_path(run.handle),

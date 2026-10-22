@@ -36,6 +36,7 @@ from vlah.adapters.executor.local.traces import (
     write_trace,
 )
 from vlah.adapters.executor.local.workspace import (
+    BASE_REF,
     GitCommandError,
     SandboxPaths,
     check_out_target,
@@ -404,6 +405,10 @@ class LocalExecutor:
     def process_id(self, handle: Handle) -> int:
         """The current process's id, which is also its process group id."""
         return self.session(handle).process.popen.pid
+
+    def base_revision(self, agent: ActorId, task_id: str) -> str:
+        """target/ is a detached clone; its starting commit is kept at BASE_REF."""
+        return BASE_REF
 
     def transcript_path(self, handle: Handle) -> Path:
         """Where the current process's harness writes its transcript (VLAH_TRANSCRIPT)."""

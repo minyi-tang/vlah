@@ -5,7 +5,11 @@ from pathlib import Path
 
 import pytest
 
+from tests.fixtures.executor import SLEEP_PROGRAM, START_PACK, TASK
+from tests.fixtures.executor import git as executor_git
+from tests.fixtures.executor import running_executor
 from tests.fixtures.worker import WORKER
+from vlah.core.types.clock import FakeClock
 from vlah.core.types.interrupts import Interrupt
 from vlah.core.worker.restart import RestartParts, restart_pack, working_directory_diff
 from vlah.ports.executor import StartPack
@@ -84,3 +88,24 @@ def test_without_an_interrupt_there_is_no_interrupt_part(tmp_path: Path) -> None
     assert working_directory_diff(tmp_path / "missing", "main") == (
         "There is no working directory yet."
     )
+
+
+def test_the_diff_uses_the_executors_base_not_the_branch(tmp_path: Path) -> None:
+    """target/ is a detached clone with no remote, so a branch name may not resolve
+    in it; the executor names the base."""
+    with running_executor(tmp_path, FakeClock()) as harness:
+        executor_git(harness.target, "branch", "baseline-3")
+        spec = harness.spec(SLEEP_PROGRAM).model_copy(
+            update={"target_ref": "baseline-3"}
+        )
+        harness.executor.start(spec, TASK, START_PACK, harness.sink)
+        target = harness.sandbox() / "target"
+        (target / "README.md").write_text("edited by the agent\n")
+        executor_git(target, "commit", "-qam", "agent work")
+        (target / "README.md").write_text("edited again\n")
+        by_branch = working_directory_diff(target, "baseline-3")
+        by_base = working_directory_diff(
+            target, harness.executor.base_revision(WORKER, TASK.id)
+        )
+    assert "+edited again" not in by_branch, "the branch is gone from the clone"
+    assert "-target" in by_base and "+edited again" in by_base
