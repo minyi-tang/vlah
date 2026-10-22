@@ -12,12 +12,14 @@ from tests.fixtures.runtime import (
     SwitchedRouter,
     WaitingRunner,
     random_for_tests,
+    result_ready_event,
     toy_problem,
 )
 from vlah.arms.config import ArmName
 from vlah.core.types.clock import FakeClock
 from vlah.core.types.ids import ActorId
-from vlah.core.types.interrupts import Interrupt
+from vlah.core.types.params import Params
+from vlah.core.types.tasks import Task
 from vlah.runtime.compose import COMPOSE_AGENT
 from vlah.runtime.herd import HerdRun, build_herd
 
@@ -26,12 +28,17 @@ pytestmark = pytest.mark.runtime
 DURATION_SECONDS = 3600.0
 
 
-def prepared_run(tmp_path: Path, runner: WaitingRunner, arm: ArmName = "S2") -> HerdRun:
+def prepared_run(
+    tmp_path: Path,
+    runner: WaitingRunner,
+    arm: ArmName = "S2",
+    use_real_router: bool = True,
+) -> HerdRun:
     clock = FakeClock()
     herd = build_herd(
         toy_problem(tmp_path),
         arm,
-        MemoryAssembly(clock=clock, root=tmp_path),
+        MemoryAssembly(clock=clock, root=tmp_path, use_real_router=use_real_router),
         "r-1",
         root=tmp_path,
         worker_count=2,
@@ -44,22 +51,26 @@ def prepared_run(tmp_path: Path, runner: WaitingRunner, arm: ArmName = "S2") -> 
 
 
 def test_overdue_interrupts_reach_the_workers_inbox(tmp_path: Path) -> None:
-    """The worker loop calls Executor.interrupt itself, so it keeps owning the handle."""
+    """The real router's fallback: the worker loop calls Executor.interrupt itself."""
     run = prepared_run(tmp_path, WaitingRunner())
-    router = run.components.router
-    assert isinstance(router, SwitchedRouter)
-    interrupt = Interrupt(
-        id="i-1",
-        agent=ActorId("worker-01"),
-        kind="hard",
-        rule=2,
-        reason="r",
-        written_ts=0.0,
+    worker = ActorId("worker-01")
+    run.components.leases.acquire(
+        worker,
+        Task(id="t-1", approach="a-01", kind="advance", goal="g", created_by="queue"),
+        "handle-1",
     )
-    router.overdue_interrupts.append(interrupt)
+    run.components.blackboard.write(
+        ActorId("eval_service"),
+        {"events/eval_service/00001.json": result_ready_event(worker).encode()},
+        "result",
+    )
+    assert run.components.router.check(worker) is not None
     try:
-        run.supervisor.tick(0.0)
-        assert run.supervisor.inbox.take(ActorId("worker-01")) == interrupt
+        run.supervisor.tick(Params().interrupt_ack_timeout_seconds - 1)
+        assert run.supervisor.inbox.take(worker) is None
+        run.supervisor.tick(Params().interrupt_ack_timeout_seconds)
+        delivered = run.supervisor.inbox.take(worker)
+        assert delivered is not None and delivered.rule == 1
     finally:
         run.supervisor.finish()
 
@@ -136,7 +147,7 @@ def test_a_started_run_stops_and_reports_the_closeout(tmp_path: Path) -> None:
 
 
 def test_a_failing_step_cannot_keep_the_run_past_its_limit(tmp_path: Path) -> None:
-    run = prepared_run(tmp_path, WaitingRunner())
+    run = prepared_run(tmp_path, WaitingRunner(), use_real_router=False)
     router = run.components.router
     assert isinstance(router, SwitchedRouter)
     router.is_failing = True
