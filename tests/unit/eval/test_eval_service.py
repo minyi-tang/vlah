@@ -210,7 +210,7 @@ def test_remeasure_runs_once_at_the_top_level_for_the_integrator(
     ]
     assert [remeasure.request_id for remeasure in remeasures] == [request_id]
     assert remeasures[0].level == "expensive"
-    assert remeasures[0].paired.mean == 1.5
+    assert remeasures[0].paired is not None and remeasures[0].paired.mean == 1.5
     integrator_jobs = [
         job
         for source in harness.sources

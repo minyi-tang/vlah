@@ -45,7 +45,7 @@ def test_results_return_to_their_submitters(
     for event in result_events:
         assert isinstance(event.data, ResultReady)
         assert event.data.level == TOY_SOURCE.id
-        assert event.data.paired.n_items == 5
+        assert event.data.paired is not None and event.data.paired.n_items == 5
 
     follow_ups = {seen.agent: seen.task for seen in toy.worker.follow_ups}
     assert set(follow_ups) == {"worker-01", "worker-02"}
