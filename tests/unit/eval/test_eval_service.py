@@ -1,5 +1,8 @@
 """The eval client: validation, the ladder, confirmation, dedup, gates, remeasures (v2.2 section 9)."""
 
+import threading
+import time
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -9,6 +12,7 @@ from tests.fixtures.eval_harness import WORKER, make_eval_harness, source_declar
 from vlah.adapters.memory.signal_source import FakeSlowSource
 from vlah.arms.config import PRESETS
 from vlah.core.eval.api import RemeasureRequest
+from vlah.core.eval.jobs import GateOutcome
 from vlah.core.indexer.api import Hit
 from vlah.core.types.events import RemeasureReady, ResultReady
 from vlah.core.types.ids import ActorId
@@ -228,3 +232,43 @@ def test_post_result_gates_refute(tmp_path: Path) -> None:
     assert (response.claim_id, "refuted") in [
         (event.target, event.to) for event in events if event.type == "claim_status"
     ]
+
+
+@dataclass(kw_only=True)
+class OverlapCountingGates:
+    """A slow gate that records how many requests were inside the service at once."""
+
+    hold_seconds: float = 0.02
+    inside: int = 0
+    most_inside: int = 0
+    counter_lock: threading.Lock = field(default_factory=threading.Lock)
+
+    def __call__(self, gate: GateSpec, candidate_directory: Path) -> GateOutcome:
+        with self.counter_lock:
+            self.inside += 1
+            self.most_inside = max(self.most_inside, self.inside)
+        time.sleep(self.hold_seconds)
+        with self.counter_lock:
+            self.inside -= 1
+        return GateOutcome(passed=True, output="ran")
+
+
+def test_concurrent_duplicates_are_billed_once(tmp_path: Path) -> None:
+    """The tool server runs each worker's eval_request on its own thread (#16)."""
+    calls = 4
+    harness = make_eval_harness(
+        tmp_path, gates=(GateSpec(name="build", command="make", when=("pre_submit",)),)
+    )
+    gates = OverlapCountingGates()
+    harness.service.gate_runner = gates
+    directory = harness.candidate(0.5)
+    with ThreadPoolExecutor(max_workers=calls) as pool:
+        statuses = sorted(
+            response.status
+            for response in pool.map(
+                lambda _: harness.service.request(harness.request(directory), WORKER),
+                range(calls),
+            )
+        )
+    assert statuses == ["dedup_hit"] * (calls - 1) + ["queued"]
+    assert gates.most_inside == 1
