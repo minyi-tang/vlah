@@ -8,21 +8,23 @@ These are the herd-side hooks (D60 layer 1):
 - after repeated failures every reply carries the diff (S2 only).
 
 The MCP SDK runs each tool call on a worker thread, so calls arrive concurrently.
-One lock guards this class's own state. It is released while the eval service
-runs its gates, so a slow gate never holds up another worker's calls, and the
-interrupt hook takes no lock at all.
+- self.lock guards only this class's tables and is never held across I/O, so token
+  lookups for MCP auth and the interrupt hook never wait behind another call;
+- each agent's own lock serializes that agent's writes (claim ids) and its sync
+  state; other agents never wait on it;
+- recorder posts happen after every lock is released, and a recorder failure is
+  logged, never returned: the write has already merged.
 
 The MCP server in server.py only maps a bearer token to an agent and calls these.
 """
 
 import re
+import secrets
 import threading
 from collections import deque
 from dataclasses import dataclass, field
 from pathlib import Path
-from random import Random
 
-import yaml
 from pydantic import JsonValue
 
 from vlah.arms.config import ArmConfig
@@ -32,28 +34,22 @@ from vlah.core.indexer.api import Hit, Indexer, WorkingSet
 from vlah.core.queue.api import Leases
 from vlah.core.router.api import Router
 from vlah.core.types.base import FrozenModel
-from vlah.core.types.candidates import CandidateManifest
-from vlah.core.types.claims import Claim, EvidenceRef, parse_claim, render_claim
+from vlah.core.types.claims import Claim, EvidenceRef, render_claim
 from vlah.core.types.clock import Clock
 from vlah.core.types.ids import ActorId, format_claim_id
 from vlah.core.types.interrupts import Interrupt
 from vlah.core.types.params import Params
 from vlah.ports.store import ObjectStore
-from vlah.tools.api import Recorder, RecorderEvent
+from vlah.tools.api import Recorder
+from vlah.tools.evidence import candidate_hashes, parse_claims, write_event_data
+from vlah.tools.recording import PendingEvent, RecorderClient
+from vlah.tools.scope import may_read, resolve_candidate_directory, write_gate
 
-PRIVATE_POINTER_PREFIX = "private://"
 OBJECT_POINTER_PREFIX = "object://"
-OWN_PREFIXES = ("claims", "events", "traces", "checkpoints")
-MAP_SCRIPT_PATTERN = re.compile(r"map/measurements/[^/]+/[^/]+")
-CANDIDATE_POINTER_PATTERN = re.compile(r"candidates/(?P<hash>[0-9a-f]+)/")
 CLAIM_NUMBER_PATTERN = re.compile(r"c-.+-(?P<number>\d+)\.md")
 RECENT_IDS_KEPT = 20
 # Hits attached when a worker reaches the failure threshold (D19: "force a search").
 RELATED_LIMIT = 5
-# A claim that records composing two candidates carries this tag (TB section 11.5,
-# conflict handling).
-COMPOSE_TAG = "compose"
-RECORDER_KIND_BY_CLAIM_TYPE = {"dead_end": "dead_end", "insight": "insight"}
 
 
 class ToolReply(FrozenModel):
@@ -67,11 +63,13 @@ class ToolReply(FrozenModel):
 @dataclass(kw_only=True)
 class AgentState:
     sandbox_root: Path
+    task_id: str | None
     cursor: int = 0
     consecutive_failures: int = 0
     recent_ids: deque[str] = field(
         default_factory=lambda: deque(maxlen=RECENT_IDS_KEPT)
     )
+    lock: threading.RLock = field(default_factory=threading.RLock)
 
 
 def hit_json(hit: Hit) -> dict[str, JsonValue]:
@@ -81,22 +79,6 @@ def hit_json(hit: Hit) -> dict[str, JsonValue]:
         "similarity": hit.similarity,
         "summary": hit.summary,
     }
-
-
-def candidate_hashes(claim: Claim) -> tuple[str, ...]:
-    pointers = [
-        pointer
-        for evidence in claim.evidence
-        for pointer in (evidence.candidate, evidence.path, evidence.trace)
-        if pointer is not None
-    ]
-    return tuple(
-        dict.fromkeys(
-            match.group("hash")
-            for pointer in pointers
-            if (match := CANDIDATE_POINTER_PATTERN.match(pointer)) is not None
-        )
-    )
 
 
 class HerdTools:
@@ -114,7 +96,6 @@ class HerdTools:
         params: Params,
         clock: Clock,
         run_id: str,
-        random: Random,
     ) -> None:
         self.blackboard = blackboard
         self.objects = objects
@@ -127,23 +108,30 @@ class HerdTools:
         self.params = params
         self.clock = clock
         self.run_id = run_id
-        self.random = random
+        self.recording = RecorderClient(
+            recorder=recorder, clock=clock, run_id=run_id, arm=arm
+        )
         self.agents: dict[ActorId, AgentState] = {}
         self.agent_by_token: dict[str, ActorId] = {}
         self.token_by_agent: dict[ActorId, str] = {}
         self.claims_by_task: dict[tuple[ActorId, str | None], list[str]] = {}
-        self.lock = threading.RLock()
+        self.lock = threading.Lock()
 
-    def register_agent(self, agent: ActorId, sandbox_root: Path) -> str:
-        """Give an agent a bearer token, and the sandbox its candidate paths resolve in."""
+    def register_agent(
+        self, agent: ActorId, sandbox_root: Path, task_id: str | None = None
+    ) -> str:
+        """Give an agent a bearer token, and the sandbox its candidate paths resolve in.
+
+        Tokens are credentials, so they come from secrets, never from the seeded
+        random generator. task_id attributes claims written before the lease exists.
+        """
+        cursor = self.blackboard.head_sequence()
         with self.lock:
-            token = (
-                self.token_by_agent.get(agent) or f"{self.random.getrandbits(128):032x}"
-            )
+            token = self.token_by_agent.get(agent) or secrets.token_hex(16)
             self.token_by_agent[agent] = token
             self.agent_by_token[token] = agent
             self.agents[agent] = AgentState(
-                sandbox_root=sandbox_root, cursor=self.blackboard.head_sequence()
+                sandbox_root=sandbox_root, task_id=task_id, cursor=cursor
             )
             return token
 
@@ -162,8 +150,8 @@ class HerdTools:
         self, agent: ActorId, result: dict[str, JsonValue], diff: str | None = None
     ) -> ToolReply:
         """Attach the pending hard interrupt, and the diff when failures call for it (D19)."""
-        with self.lock:
-            state = self.state(agent)
+        state = self.state(agent)
+        with state.lock:
             if (
                 diff is None
                 and self.arm.failure_refresh
@@ -177,8 +165,8 @@ class HerdTools:
 
     def sync_diff(self, agent: ActorId) -> str:
         """The ranked diff since this agent last looked, truncated (D17, D18)."""
-        with self.lock:
-            state = self.state(agent)
+        state = self.state(agent)
+        with state.lock:
             lease = self.leases.get(agent)
             working_set = WorkingSet(
                 approach=lease.approach if lease is not None else "",
@@ -195,67 +183,8 @@ class HerdTools:
             state.cursor = diff.cursor
             return diff.rendered
 
-    def record(
-        self, agent: ActorId, event_type: str, data: dict[str, JsonValue]
-    ) -> None:
-        if self.recorder is not None:
-            self.recorder.post(
-                (
-                    RecorderEvent.model_validate(
-                        {
-                            "ts": self.clock.now_seconds(),
-                            "run_id": self.run_id,
-                            "arm": self.arm.arm,
-                            "actor": agent,
-                            "type": event_type,
-                            "data": data,
-                        }
-                    ),
-                )
-            )
-        else:
-            pass
-
-    def is_own_path(self, agent: ActorId, path: str) -> bool:
-        segments = path.split("/")
-        return (
-            len(segments) >= 3 and segments[0] in OWN_PREFIXES and segments[1] == agent
-        )
-
-    def submitted_by(self, agent: ActorId, path: str) -> bool:
-        """Whether path is inside a candidate this agent submitted (B1 sees its own results)."""
-        match = CANDIDATE_POINTER_PATTERN.match(path)
-        if match is None:
-            return False
-        else:
-            manifest_path = f"candidates/{match.group('hash')}/manifest.yaml"
-            if manifest_path not in self.blackboard.list_paths(manifest_path, None):
-                return False
-            else:
-                manifest_data: object = yaml.safe_load(
-                    self.blackboard.read(manifest_path, None)
-                )
-                return CandidateManifest.model_validate(manifest_data).author == agent
-
-    def may_read(self, agent: ActorId, path: str) -> bool:
-        """repo_read scope by arm (D58); private data is never readable by a worker (D63)."""
-        scope = self.arm.repo_read_scope
-        is_shared_problem_file = path == "spec.md" or path.startswith("approaches/")
-        if path.startswith(PRIVATE_POINTER_PREFIX):
-            return False
-        elif scope == "all":
-            return True
-        elif is_shared_problem_file or self.is_own_path(agent, path):
-            return True
-        elif scope == "spec_approaches_own_candidates":
-            return path.startswith("candidates/") or path.startswith(
-                "events/eval_service/"
-            )
-        else:
-            return self.submitted_by(agent, path)
-
     def repo_read(self, agent: ActorId, path: str) -> ToolReply:
-        if not self.may_read(agent, path):
+        if not may_read(self.blackboard, self.arm, agent, path):
             return self.reply(
                 agent, {"error": f"{path} is not readable in arm {self.arm.arm}"}
             )
@@ -264,7 +193,9 @@ class HerdTools:
                 return self.reply(agent, {"error": "this herd has no object store"})
             else:
                 content = self.objects.get(path, agent)
-                self.record(agent, "blackboard_read", {"ids": [path]})
+                self.recording.post(
+                    agent, [PendingEvent(type="blackboard_read", data={"ids": [path]})]
+                )
                 return self.reply(
                     agent, {"path": path, "content": content.decode("utf-8", "replace")}
                 )
@@ -273,51 +204,42 @@ class HerdTools:
                 content = self.blackboard.read(path, None)
             except FileNotFoundError:
                 return self.reply(agent, {"error": f"{path} does not exist"})
-            with self.lock:
-                self.state(agent).recent_ids.append(path)
-            self.record(agent, "blackboard_read", {"ids": [path]})
+            state = self.state(agent)
+            with state.lock:
+                state.recent_ids.append(path)
+            self.recording.post(
+                agent, [PendingEvent(type="blackboard_read", data={"ids": [path]})]
+            )
             return self.reply(
                 agent, {"path": path, "content": content.decode("utf-8", "replace")}
             )
 
-    def write_gate(self, agent: ActorId, path: str) -> str | None:
-        """The tool server's own gate, before the blackboard's (D31)."""
-        if self.is_own_path(agent, path):
-            return None
-        elif MAP_SCRIPT_PATTERN.fullmatch(path) and self.arm.map == "full":
-            return None
-        else:
-            return f"{path}: workers create files only under their own prefix (claims/{agent}/ ...)"
-
-    def repo_write(self, agent: ActorId, files: dict[str, str]) -> ToolReply:
-        """Gate, merge and book a write as one step, so claim ids and leases stay consistent."""
-        with self.lock:
-            return self.write_locked(agent, files)
-
-    def write_locked(self, agent: ActorId, files: dict[str, str]) -> ToolReply:
+    def write_files(
+        self, agent: ActorId, files: dict[str, str]
+    ) -> tuple[dict[str, JsonValue], list[PendingEvent]]:
+        """With the agent's lock held: gate, merge and book a write."""
         gate_errors = [
-            error for path in sorted(files) if (error := self.write_gate(agent, path))
+            error
+            for path in sorted(files)
+            if (error := write_gate(self.arm, agent, path))
         ]
-        claims = {
-            path: parse_claim(text)
-            for path, text in files.items()
-            if path.startswith("claims/")
+        claims, parse_errors = parse_claims(files)
+        hashes_by_claim = {
+            claim.id: candidate_hashes(self.blackboard, claim) for claim in claims
         }
         missing_hash = [
             claim.id
-            for claim in claims.values()
-            if claim.type == "dead_end" and not candidate_hashes(claim)
+            for claim in claims
+            if claim.type == "dead_end" and not hashes_by_claim[claim.id]
         ]
-        if gate_errors:
-            return self.reply(agent, {"error": "; ".join(gate_errors)})
+        if gate_errors or parse_errors:
+            return {"error": "; ".join(gate_errors + parse_errors)}, []
         elif missing_hash:
-            return self.reply(
-                agent,
-                {
-                    "error": f"dead ends {missing_hash} must cite the candidate they tested "
-                    "(evidence: candidate: candidates/<hash>/...) so nobody re-runs it"
-                },
-            )
+            return {
+                "error": f"dead ends {missing_hash} must cite the candidate they tested "
+                "(evidence: candidate: candidates/<hash>/..., or the result claim) so "
+                "nobody re-runs it"
+            }, []
         else:
             receipt = self.blackboard.write(
                 agent,
@@ -325,32 +247,32 @@ class HerdTools:
                 f"write by {agent}",
             )
             if receipt.status == "rejected":
-                return self.reply(
-                    agent,
-                    {
-                        "error": "; ".join(
-                            f"{v.path}: {v.message}" for v in receipt.violations
-                        )
-                    },
-                )
+                return {
+                    "error": "; ".join(
+                        f"{violation.path}: {violation.message}"
+                        for violation in receipt.violations
+                    )
+                }, []
             else:
-                self.after_claims_written(agent, tuple(claims.values()))
-                return self.reply(
-                    agent,
-                    {
-                        "written": [path for path in sorted(files)],
-                        "sequence_numbers": [
-                            number for number in receipt.sequence_numbers
-                        ],
-                    },
-                )
+                self.book_claims(agent, claims)
+                events = [
+                    PendingEvent(
+                        type="blackboard_write",
+                        data=write_event_data(claim, hashes_by_claim[claim.id]),
+                    )
+                    for claim in claims
+                ]
+                return {
+                    "written": [path for path in sorted(files)],
+                    "sequence_numbers": [number for number in receipt.sequence_numbers],
+                }, events
 
-    def after_claims_written(self, agent: ActorId, claims: tuple[Claim, ...]) -> None:
+    def book_claims(self, agent: ActorId, claims: list[Claim]) -> None:
+        """Add new claims to the lease (D55) and to the task's record (D4)."""
         if not claims:
             return
         else:
             lease = self.leases.get(agent)
-            task_id = lease.task_id if lease is not None else None
             if lease is not None:
                 self.leases.add_targets(
                     agent,
@@ -361,27 +283,20 @@ class HerdTools:
                         for dependency in claim.depends_on
                     ),
                 )
+                task_id = lease.task_id
             else:
-                pass
-            self.claims_by_task.setdefault((agent, task_id), []).extend(
-                claim.id for claim in claims
-            )
-            for claim in claims:
-                hashes = candidate_hashes(claim)
-                if COMPOSE_TAG in claim.tags:
-                    kind = "compose"
-                else:
-                    kind = RECORDER_KIND_BY_CLAIM_TYPE.get(claim.type, "claim")
-                data: dict[str, JsonValue] = {
-                    "kind": kind,
-                    "id": claim.id,
-                    "refs": list(hashes),
-                }
-                if claim.type == "dead_end":
-                    data["hash"] = hashes[0]
-                else:
-                    pass
-                self.record(agent, "blackboard_write", data)
+                task_id = self.state(agent).task_id
+            with self.lock:
+                self.claims_by_task.setdefault((agent, task_id), []).extend(
+                    claim.id for claim in claims
+                )
+
+    def repo_write(self, agent: ActorId, files: dict[str, str]) -> ToolReply:
+        state = self.state(agent)
+        with state.lock:
+            result, events = self.write_files(agent, files)
+        self.recording.post(agent, events)
+        return self.reply(agent, result)
 
     def next_claim_id(self, agent: ActorId) -> str:
         numbers = [
@@ -395,42 +310,38 @@ class HerdTools:
         self, agent: ActorId, note: str, pointer: str, approach: str
     ) -> ToolReply:
         """Record something unexpected without needing a conclusion (D8)."""
-        with self.lock:
-            return self.surprise_locked(agent, note, pointer, approach)
-
-    def surprise_locked(
-        self, agent: ActorId, note: str, pointer: str, approach: str
-    ) -> ToolReply:
-        claim = Claim(
-            id=self.next_claim_id(agent),
-            type="question",
-            status="open",
-            approach=approach,
-            author=agent,
-            evidence=(EvidenceRef(path=pointer),),
-            surprise=True,
-            body=note,
-        )
-        return self.write_locked(
-            agent, {f"claims/{agent}/{claim.id}.md": render_claim(claim)}
-        )
+        state = self.state(agent)
+        with state.lock:
+            claim = Claim(
+                id=self.next_claim_id(agent),
+                type="question",
+                status="open",
+                approach=approach,
+                author=agent,
+                evidence=(EvidenceRef(path=pointer),),
+                surprise=True,
+                body=note,
+            )
+            result, events = self.write_files(
+                agent, {f"claims/{agent}/{claim.id}.md": render_claim(claim)}
+            )
+        self.recording.post(agent, events)
+        return self.reply(agent, result)
 
     def search(self, agent: ActorId, query: str, limit: int) -> ToolReply:
         hits = self.indexer.search(query, limit, agent, self.arm)
-        with self.lock:
-            self.state(agent).recent_ids.extend(hit.item_id for hit in hits)
-        self.record(agent, "blackboard_read", {"ids": [hit.item_id for hit in hits]})
+        state = self.state(agent)
+        with state.lock:
+            state.recent_ids.extend(hit.item_id for hit in hits)
+        self.recording.post(
+            agent,
+            [
+                PendingEvent(
+                    type="blackboard_read", data={"ids": [hit.item_id for hit in hits]}
+                )
+            ],
+        )
         return self.reply(agent, {"hits": [hit_json(hit) for hit in hits]})
-
-    def resolve_candidate_directory(
-        self, agent: ActorId, candidate_dir: str
-    ) -> Path | None:
-        root = self.state(agent).sandbox_root.resolve()
-        directory = (root / candidate_dir).resolve()
-        if directory.is_relative_to(root) and directory.is_dir():
-            return directory
-        else:
-            return None
 
     def eval_request(
         self,
@@ -442,11 +353,11 @@ class HerdTools:
         confirm_token: str | None,
         baseline: str | None,
     ) -> ToolReply:
-        directory = self.resolve_candidate_directory(agent, candidate_dir)
-        if directory is None:
-            return self.reply(
-                agent, {"error": f"{candidate_dir} is not a directory in your sandbox"}
-            )
+        directory = resolve_candidate_directory(
+            self.state(agent).sandbox_root, candidate_dir
+        )
+        if isinstance(directory, str):
+            return self.reply(agent, {"error": directory})
         else:
             diff = (
                 self.sync_diff(agent)
@@ -464,8 +375,8 @@ class HerdTools:
                 ),
                 agent,
             )
-            with self.lock:
-                state = self.state(agent)
+            state = self.state(agent)
+            with state.lock:
                 if response.status in ("gate_failed", "dedup_hit"):
                     state.consecutive_failures += 1
                 elif response.status == "queued":
@@ -479,8 +390,14 @@ class HerdTools:
             result: dict[str, JsonValue] = response.model_dump(mode="json")
             if self.arm.failure_refresh and reached_threshold:
                 related = self.indexer.search(rationale, RELATED_LIMIT, agent, self.arm)
-                self.record(
-                    agent, "blackboard_read", {"ids": [hit.item_id for hit in related]}
+                self.recording.post(
+                    agent,
+                    [
+                        PendingEvent(
+                            type="blackboard_read",
+                            data={"ids": [hit.item_id for hit in related]},
+                        )
+                    ],
                 )
                 result["related"] = [hit_json(hit) for hit in related]
             else:
