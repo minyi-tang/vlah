@@ -1,8 +1,9 @@
 """Scaffolding fakes of the component contracts, just enough to run the smoke loop.
 
 These are not reference implementations: they skip most rules on purpose. Each
-Wave-1 component replaces one of them. FakeComponents types every fake by its
-frozen contract, so pyright proves each fake satisfies it.
+Wave-1 component replaces one of them. make_fake_components returns them as
+HerdComponents, whose fields are typed by the frozen contracts, so pyright proves
+each fake satisfies its contract.
 """
 
 import statistics
@@ -21,18 +22,16 @@ from vlah.core.blackboard.api import (
     Violation,
     WriteReceipt,
 )
-from vlah.core.eval.api import EvalRequest, EvalResponse, EvalService
+from vlah.core.eval.api import EvalRequest, EvalResponse
 from vlah.core.indexer.api import (
     ApproachState,
     ClaimState,
     Diff,
     Hit,
-    Indexer,
     IndexerMetrics,
     WorkingSet,
 )
-from vlah.core.queue.api import HandleLiveness, Leases, TaskQueue
-from vlah.core.router.api import Router
+from vlah.core.queue.api import HandleLiveness
 from vlah.core.types.candidates import CandidateManifest, candidate_hash
 from vlah.core.types.claims import Claim, EvidenceRef, parse_claim, render_claim
 from vlah.core.types.clock import Clock
@@ -50,6 +49,7 @@ from vlah.core.types.states import INITIAL_STATUS
 from vlah.core.types.tasks import Lease, Task
 from vlah.ports.signal_source import CandidateRef, SignalSource
 from vlah.ports.store import MergeResult
+from vlah.runtime.wiring import HerdComponents
 
 PUSH_TOKEN = "fake-push-token"
 EVAL_SERVICE = ActorId("eval_service")
@@ -513,23 +513,11 @@ class FakeRouter:
         return ()
 
 
-@dataclass(frozen=True, kw_only=True)
-class FakeComponents:
-    """Every fake, typed by the contract it stands in for."""
-
-    blackboard: Blackboard
-    indexer: Indexer
-    task_queue: TaskQueue
-    leases: Leases
-    eval_service: EvalService
-    router: Router
-
-
 def make_fake_components(
     *, clock: Clock, source: SignalSource, blackboard_name: str
-) -> FakeComponents:
+) -> HerdComponents:
     blackboard = FakeBlackboard(name=blackboard_name)
-    return FakeComponents(
+    return HerdComponents(
         blackboard=blackboard,
         indexer=FakeIndexer(),
         task_queue=FakeTaskQueue(),
