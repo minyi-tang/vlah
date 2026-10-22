@@ -17,8 +17,17 @@ pytestmark = pytest.mark.smoke
 STEP_SECONDS = 300.0
 
 
-def test_results_return_to_their_submitters(tmp_path: Path) -> None:
-    toy = make_toy_herd(tmp_path, PRESETS["S2"])
+@pytest.mark.parametrize(
+    "is_store_blackboard", [False, True], ids=["fake", "real_blackboard"]
+)
+def test_results_return_to_their_submitters(
+    tmp_path: Path, is_store_blackboard: bool
+) -> None:
+    """The real_blackboard variant runs every write check, so a write the herd needs but
+    the rules reject (a dangling evidence pointer, say) fails here first."""
+    toy = make_toy_herd(
+        tmp_path, PRESETS["S2"], is_store_blackboard=is_store_blackboard
+    )
     for _ in range(4):
         toy.herd.step(STEP_SECONDS)
 

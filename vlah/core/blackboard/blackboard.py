@@ -7,11 +7,14 @@ Every write is checked synchronously before anything is committed:
 - every evidence pointer resolves.
 
 Writes are merged one at a time, and subscribers get each merge parsed: events
-carry the sequence numbers they were given.
+carry the sequence numbers they were given. Delivery is strictly in sequence
+order: merges enter a queue under the merge lock, and one thread at a time drains
+it. A listener that writes only enqueues, so it never deadlocks or overtakes.
 """
 
 import re
 import threading
+from collections import deque
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Protocol
@@ -102,6 +105,9 @@ class StoreBlackboard:
         self.lock = threading.Lock()
         self.listeners: dict[int, CommitListener] = {}
         self.next_subscription_id = 1
+        self.delivery_lock = threading.Lock()
+        self.delivery_queue: deque[MergedCommit] = deque()
+        self.is_delivering = False
         self.claim_paths_by_id: dict[str, str] = {}
         for path in store.list_paths("claims/", None):
             claim_match = CLAIM_PATH_PATTERN.fullmatch(path)
@@ -298,9 +304,9 @@ class StoreBlackboard:
                 for claim_path, claim in checked.claims.items():
                     self.claim_paths_by_id[claim.id] = claim_path
                 self.record_merge_duration(self.clock.now_seconds() - started_seconds)
-        for merged_commit in merged_commits:
-            for listener in list(self.listeners.values()):
-                listener(merged_commit)
+                with self.delivery_lock:
+                    self.delivery_queue.extend(merged_commits)
+        self.drain_deliveries()
         sequence_numbers = tuple(
             sequence_number
             for merge_result in merge_results
@@ -312,6 +318,28 @@ class StoreBlackboard:
             sequence_numbers=tuple(sorted(sequence_numbers)),
             violations=(),
         )
+
+    def drain_deliveries(self) -> None:
+        """Deliver queued merges in order; returns at once if another call is draining."""
+        with self.delivery_lock:
+            if self.is_delivering:
+                return
+            else:
+                self.is_delivering = True
+        try:
+            while True:
+                with self.delivery_lock:
+                    if not self.delivery_queue:
+                        self.is_delivering = False
+                        return
+                    else:
+                        merged_commit = self.delivery_queue.popleft()
+                for listener in list(self.listeners.values()):
+                    listener(merged_commit)
+        except BaseException:
+            with self.delivery_lock:
+                self.is_delivering = False
+            raise
 
     def parsed_commit(
         self, merge_result: MergeResult, checked: CheckedFiles
@@ -399,25 +427,33 @@ class MirrorBlackboard:
         self.keep = keep
         self.listeners: dict[int, CommitListener] = {}
         self.next_subscription_id = 1
-        self.copy_paths(source.list_paths("", None), "initial copy")
+        self.copy_lock = threading.Lock()
+        # Subscribe before the initial copy, so a merge that lands meanwhile is not missed;
+        # copy_paths skips files the mirror already has.
         source.subscribe(self.follow)
+        self.copy_paths(source.list_paths("", None), "initial copy")
 
     def is_kept(self, path: str) -> bool:
         return not path.startswith(SEQUENCE_POINTER_PREFIX) and self.keep(path)
 
     def copy_paths(self, paths: tuple[str, ...], message: str) -> None:
-        kept_files = {
-            path: self.source.read(path, None)
-            for path in paths
-            if self.is_kept(path) and not self.store.exists(path)
-        }
-        if kept_files:
-            self.store.commit(
-                "mirror", kept_files, ActorId("merge_queue"), message, self.push_token
-            )
-            self.store.merge("mirror")
-        else:
-            pass
+        with self.copy_lock:
+            kept_files = {
+                path: self.source.read(path, None)
+                for path in paths
+                if self.is_kept(path) and not self.store.exists(path)
+            }
+            if kept_files:
+                self.store.commit(
+                    "mirror",
+                    kept_files,
+                    ActorId("merge_queue"),
+                    message,
+                    self.push_token,
+                )
+                self.store.merge("mirror")
+            else:
+                pass
 
     def follow(self, merged_commit: MergedCommit) -> None:
         self.copy_paths(merged_commit.paths, f"mirror of {merged_commit.commit_id}")

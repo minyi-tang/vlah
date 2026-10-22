@@ -139,10 +139,13 @@ class GitVersionedStore:
             self.commit_count = 0
             for entry in log_output.split("\x01"):
                 if "\x00" in entry:
-                    self.commit_count += 1
                     commit_hash, body = entry.strip("\n").split("\x00", 1)
                     for sequence_number in parse_sequence_trailer(body):
                         self.commit_by_sequence[sequence_number] = commit_hash
+                    # Rejected commits also used ids, so continue from the largest one seen.
+                    self.commit_count = max(
+                        self.commit_count, parse_commit_number(body)
+                    )
                 else:
                     continue
             self.main_paths = set(self.tree_paths(self.main_head))
@@ -339,3 +342,12 @@ def parse_sequence_trailer(commit_body: str) -> list[int]:
         else:
             continue
     return []
+
+
+def parse_commit_number(commit_body: str) -> int:
+    for line in commit_body.splitlines():
+        if line.startswith(f"{COMMIT_ID_TRAILER}: "):
+            return int(line.rsplit("-", 1)[1])
+        else:
+            continue
+    return 0

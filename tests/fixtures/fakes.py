@@ -32,7 +32,7 @@ from vlah.core.indexer.api import (
     WorkingSet,
 )
 from vlah.core.queue.api import HandleLiveness
-from vlah.core.types.candidates import CandidateManifest, candidate_hash
+from vlah.core.types.candidates import CandidateManifest, candidate_hash, payload_files
 from vlah.core.types.claims import Claim, EvidenceRef, parse_claim, render_claim
 from vlah.core.types.clock import Clock
 from vlah.core.types.events import Event, ResultReady, event_from_json, event_to_json
@@ -380,8 +380,20 @@ class PendingJob:
     baseline: str
 
 
+def require_merged(receipt: WriteReceipt) -> None:
+    """Fakes must not hide a rejected write: the smoke loop has to catch it."""
+    if receipt.status == "rejected":
+        raise RuntimeError(f"blackboard rejected a write: {receipt.violations}")
+    else:
+        pass
+
+
 class FakeEvalService:
-    """Accepts every request, submits to one judge, and reports the result paired against zero."""
+    """Accepts every request, submits to one judge, and reports the result paired against zero.
+
+    Like the real eval client (#14), it first writes the candidate to the blackboard as
+    the submitting worker, then the result claim as the eval service.
+    """
 
     def __init__(
         self, *, blackboard: Blackboard, source: SignalSource, clock: Clock
@@ -403,6 +415,16 @@ class FakeEvalService:
         )
         manifest = CandidateManifest.model_validate(manifest_data)
         hash_value = candidate_hash(request.candidate_directory, baseline)
+        candidate_files = {
+            f"candidates/{hash_value}/candidate/{relative_path}": file_path.read_bytes()
+            for relative_path, file_path in payload_files(request.candidate_directory)
+        }
+        candidate_files[f"candidates/{hash_value}/manifest.yaml"] = (
+            request.candidate_directory / "manifest.yaml"
+        ).read_bytes()
+        require_merged(
+            self.blackboard.write(caller, candidate_files, f"candidate {hash_value}")
+        )
         claim = Claim(
             id=format_claim_id(EVAL_SERVICE, self.next_number()),
             type="result",
@@ -412,14 +434,13 @@ class FakeEvalService:
             evidence=(EvidenceRef(candidate=f"candidates/{hash_value}/result.json"),),
             body=request.rationale,
         )
-        self.blackboard.write(
-            EVAL_SERVICE,
-            {
-                f"claims/{EVAL_SERVICE}/{claim.id}.md": render_claim(claim).encode(
-                    "utf-8"
-                )
-            },
-            f"result claim for {hash_value}",
+        claim_path = f"claims/{EVAL_SERVICE}/{claim.id}.md"
+        require_merged(
+            self.blackboard.write(
+                EVAL_SERVICE,
+                {claim_path: render_claim(claim).encode("utf-8")},
+                f"result claim for {hash_value}",
+            )
         )
         job_id = self.source.submit(
             CandidateRef(
@@ -483,14 +504,13 @@ class FakeEvalService:
                         level=self.source.declaration.id,
                     ),
                 )
-                self.blackboard.write(
-                    EVAL_SERVICE,
-                    {
-                        f"events/{event.local_id}.json": event_to_json(event).encode(
-                            "utf-8"
-                        )
-                    },
-                    f"result_ready for {job.candidate_hash}",
+                event_path = f"events/{event.local_id}.json"
+                require_merged(
+                    self.blackboard.write(
+                        EVAL_SERVICE,
+                        {event_path: event_to_json(event).encode("utf-8")},
+                        f"result_ready for {job.candidate_hash}",
+                    )
                 )
                 events.append(event)
         self.pending = still_pending
@@ -514,9 +534,8 @@ class FakeRouter:
 
 
 def make_fake_components(
-    *, clock: Clock, source: SignalSource, blackboard_name: str
+    *, clock: Clock, source: SignalSource, blackboard: Blackboard
 ) -> HerdComponents:
-    blackboard = FakeBlackboard(name=blackboard_name)
     return HerdComponents(
         blackboard=blackboard,
         indexer=FakeIndexer(),

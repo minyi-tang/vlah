@@ -12,7 +12,7 @@ from pathlib import Path
 
 import yaml
 
-from tests.fixtures.fakes import make_fake_components
+from tests.fixtures.fakes import FakeBlackboard, make_fake_components
 from vlah.adapters.memory.executor import (
     MemoryExecutor,
     ScriptedHarness,
@@ -20,8 +20,10 @@ from vlah.adapters.memory.executor import (
     ScriptedSession,
 )
 from vlah.adapters.memory.signal_source import FAKE_SCORE_FILE_NAME, FakeSlowSource
+from vlah.adapters.memory.store import MemoryVersionedStore
 from vlah.arms.config import ArmConfig
 from vlah.core.blackboard.api import Blackboard
+from vlah.core.blackboard.blackboard import StoreBlackboard
 from vlah.core.eval.api import EvalRequest, EvalService
 from vlah.core.types.candidates import CandidateManifest
 from vlah.core.types.claims import Claim, EvidenceRef, render_claim
@@ -31,6 +33,7 @@ from vlah.core.types.params import Params
 from vlah.core.types.sources import SourceBudget, SourceDecl
 from vlah.core.types.tasks import Task
 from vlah.ports.harness import Workspace
+from vlah.ports.store import VersionedStore
 from vlah.runtime.wiring import SteppedHerd, build_stepped_herd
 
 TOY_SOURCE = SourceDecl(
@@ -79,11 +82,17 @@ class ToyWorker:
                 "body": body,
             }
         )
-        self.blackboard.write(
+        receipt = self.blackboard.write(
             agent,
             {f"claims/{agent}/{claim.id}.md": render_claim(claim).encode("utf-8")},
             f"{claim_type} from {agent}",
         )
+        if receipt.status == "rejected":
+            raise RuntimeError(
+                f"the toy worker's claim was rejected: {receipt.violations}"
+            )
+        else:
+            pass
 
     def write_candidate(self, session: ScriptedSession, worker_number: int) -> Path:
         directory = self.candidates_root / session.agent / session.task.id
@@ -150,10 +159,37 @@ class ToyHerd:
     worker: ToyWorker
 
 
-def make_toy_herd(tmp_path: Path, arm: ArmConfig, worker_count: int = 2) -> ToyHerd:
+TOY_PUSH_TOKEN = "toy-push-token"
+
+
+class MemoryMirrorStores:
+    def __call__(self, mirror_name: str) -> tuple[VersionedStore, str]:
+        return (
+            MemoryVersionedStore(name=mirror_name, push_token=TOY_PUSH_TOKEN),
+            TOY_PUSH_TOKEN,
+        )
+
+
+def make_toy_herd(
+    tmp_path: Path,
+    arm: ArmConfig,
+    worker_count: int = 2,
+    is_store_blackboard: bool = False,
+) -> ToyHerd:
+    """is_store_blackboard runs the real blackboard (W1-01) over the memory store, with all its checks."""
     clock = FakeClock()
     source = FakeSlowSource(clock=clock, declaration=TOY_SOURCE)
-    components = make_fake_components(clock=clock, source=source, blackboard_name="toy")
+    if is_store_blackboard:
+        blackboard: Blackboard = StoreBlackboard(
+            store=MemoryVersionedStore(name="toy", push_token=TOY_PUSH_TOKEN),
+            push_token=TOY_PUSH_TOKEN,
+            objects=None,
+            mirror_store_factory=MemoryMirrorStores(),
+            clock=clock,
+        )
+    else:
+        blackboard = FakeBlackboard(name="toy")
+    components = make_fake_components(clock=clock, source=source, blackboard=blackboard)
     params = Params(slots_per_approach={TOY_APPROACH: worker_count})
     worker = ToyWorker(
         blackboard=components.blackboard,

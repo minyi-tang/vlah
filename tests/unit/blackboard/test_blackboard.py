@@ -8,7 +8,7 @@ import pytest
 
 from vlah.adapters.memory.store import MemoryObjectStore, MemoryVersionedStore
 from vlah.adapters.store.git.store import GitVersionedStore
-from vlah.core.blackboard.api import Blackboard, PublicProblemFiles
+from vlah.core.blackboard.api import Blackboard, MergedCommit, PublicProblemFiles
 from vlah.core.blackboard.blackboard import StoreBlackboard
 from vlah.core.blackboard.layout import init_layout, open_blackboard
 from vlah.core.types.claims import Claim, EvidenceRef, render_claim
@@ -175,6 +175,53 @@ def test_concurrent_writers_lose_nothing_and_sequence_numbers_have_no_gaps(
         for sequence in range(1, 51)
     }
     assert pointed_paths == {f"events/{writer}/00001.json" for writer in writers}
+
+
+def test_concurrent_merges_reach_listeners_in_sequence_order(tmp_path: Path) -> None:
+    """Delivery order is the contract: replay and routing assume it (D56)."""
+    blackboard = open_blackboard(tmp_path, "run-1", "blackboard")
+    delivered: list[int] = []
+    blackboard.subscribe(
+        lambda merged_commit: delivered.extend(
+            event.seq for event in merged_commit.events if event.seq is not None
+        )
+    )
+    writers = [ActorId(f"worker-{index:02d}") for index in range(1, 21)]
+    barrier = threading.Barrier(len(writers))
+
+    def write_one(writer: ActorId) -> None:
+        barrier.wait()
+        blackboard.write(writer, dict([event_file(writer, 1)]), f"event from {writer}")
+
+    threads = [threading.Thread(target=write_one, args=(writer,)) for writer in writers]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+    assert delivered == list(range(1, 21))
+
+
+def test_a_listener_that_writes_neither_deadlocks_nor_overtakes() -> None:
+    """The indexer writes corroboration events from inside its merge hook (W1-02)."""
+    blackboard = memory_blackboard()
+    reacted: list[bool] = []
+
+    def react_once(merged_commit: MergedCommit) -> None:
+        if not reacted:
+            reacted.append(True)
+            blackboard.write(WORKER, dict([event_file(WORKER, 2)]), "reaction")
+        else:
+            pass
+
+    second_listener_saw: list[int] = []
+    blackboard.subscribe(react_once)
+    blackboard.subscribe(
+        lambda merged_commit: second_listener_saw.extend(
+            event.seq for event in merged_commit.events if event.seq is not None
+        )
+    )
+    blackboard.write(WORKER, dict([event_file(WORKER, 1)]), "first")
+    assert second_listener_saw == [1, 2]
 
 
 def test_reading_at_a_sequence_number_shows_that_moment() -> None:
