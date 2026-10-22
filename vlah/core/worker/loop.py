@@ -40,6 +40,7 @@ DEFAULT_IDLE_SECONDS = 30.0
 DEFAULT_WRAP_UP_SECONDS = 600.0
 MAX_CONTEXT_RESTARTS = 5
 NO_CLAIM_REASON = "the session ended without a claim (D4)"
+STOPPING_REASON = "the run is stopping"
 
 
 class TranscriptReader(Protocol):
@@ -69,6 +70,14 @@ class AgentRegistry(Protocol):
         self, agent: ActorId, sandbox_root: Path, task_id: str | None = None
     ) -> str:
         """Point eval_request paths at this task's sandbox; count early claims for it."""
+        ...
+
+
+class StartPackBuilder(Protocol):
+    def __call__(
+        self, agent: ActorId, task: Task, cursor: int
+    ) -> tuple[StartPack, int]:
+        """The start pack for a task, and the diff cursor for next time."""
         ...
 
 
@@ -115,6 +124,8 @@ class WorkerDeps:
     poll_seconds: float = DEFAULT_POLL_SECONDS
     idle_seconds: float = DEFAULT_IDLE_SECONDS
     wrap_up_seconds: float = DEFAULT_WRAP_UP_SECONDS
+    # None builds the arm's start pack (D58); the compose pool supplies its own (D74).
+    start_packs: StartPackBuilder | None = None
 
 
 @dataclass(kw_only=True)
@@ -137,13 +148,19 @@ def run_worker(agent: ActorId, deps: WorkerDeps) -> None:
         task = deps.task_queue.claim_task(agent)
         if task is None:
             deps.stop.wait(deps.idle_seconds)
+        elif deps.stop.is_set():
+            # The stop landed while claiming: hand the task back instead of starting it.
+            deps.task_queue.requeue(task.id, STOPPING_REASON)
         else:
             cursor = run_task(agent, task, deps, cursor)
 
 
 def run_task(agent: ActorId, task: Task, deps: WorkerDeps, cursor: int) -> int:
     """Run one task to its end; return the diff cursor for the next start pack."""
-    start_pack, next_cursor = build_start_pack(agent, task, deps.context, cursor)
+    if deps.start_packs is None:
+        start_pack, next_cursor = build_start_pack(agent, task, deps.context, cursor)
+    else:
+        start_pack, next_cursor = deps.start_packs(agent, task, cursor)
     try:
         handle = start_session(agent, task, start_pack, deps)
     except Exception:
@@ -177,18 +194,24 @@ def start_session(
 
 
 def follow_sessions(run: TaskRun, deps: WorkerDeps) -> None:
-    """Wait on the session; swap in a new one for an interrupt or a context restart."""
+    """Wait on the session; swap in a new one for an interrupt or a context restart.
+
+    Once the run is stopping, no new session starts: the loop waits for the current
+    one to end, which the supervisor's kill makes quick.
+    """
     while True:
         exit_info = deps.executor.wait(run.handle, deps.poll_seconds)
         if exit_info is not None:
             log_rate_limits(run, deps)
-            if run.over_threshold_since is not None and should_restart(run):
+            if deps.stop.is_set():
+                return
+            elif run.over_threshold_since is not None and should_restart(run):
                 replace_session(run, deps, context_restart_pack(run, deps))
                 continue
             else:
                 return
         else:
-            interrupt = deps.inbox.take(run.agent)
+            interrupt = None if deps.stop.is_set() else deps.inbox.take(run.agent)
             if interrupt is not None:
                 run.last_interrupt = interrupt
                 run.over_threshold_since = None

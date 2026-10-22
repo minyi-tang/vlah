@@ -1,6 +1,9 @@
 """The worker loop: complete only with a claim, own the handle, restart near the limit."""
 
+import dataclasses
+import threading
 from collections.abc import Iterator
+from dataclasses import dataclass
 from pathlib import Path
 
 import pytest
@@ -9,14 +12,17 @@ from tests.fixtures.worker import (
     TASK,
     TRANSCRIPT_VARIABLE,
     WORKER,
+    RecordingTaskQueue,
     WorkerHarness,
     assistant_line,
     make_worker_harness,
 )
 from vlah.adapters.memory.executor import ScriptedSession
 from vlah.arms.config import PRESETS
+from vlah.core.types.ids import ActorId
 from vlah.core.types.interrupts import Interrupt
-from vlah.core.worker.loop import NO_CLAIM_REASON, run_task, run_worker
+from vlah.core.types.tasks import Task
+from vlah.core.worker.loop import NO_CLAIM_REASON, STOPPING_REASON, run_task, run_worker
 
 pytestmark = pytest.mark.harness
 
@@ -148,4 +154,45 @@ def test_a_replaced_process_starts_the_wrap_up_clock_over(tmp_path: Path) -> Non
     holder.append(worker)
     run_task(WORKER, TASK, worker.deps, cursor=0)
     assert len(sessions) == 1, "neither killed nor restarted for context"
+    assert worker.task_queue.completed == [TASK.id]
+
+
+@dataclass(kw_only=True)
+class StopWhileClaiming(RecordingTaskQueue):
+    """The run stops between the loop's stop check and its claim."""
+
+    stop: threading.Event
+
+    def claim_task(self, agent: ActorId) -> Task | None:
+        task = super().claim_task(agent)
+        self.stop.set()
+        return task
+
+
+def test_a_task_claimed_as_the_run_stops_is_handed_back(tmp_path: Path) -> None:
+    worker = make_worker_harness(tmp_path, PRESETS["S2"], {}, "none")
+    queue = StopWhileClaiming(stop=worker.stop)
+    queue.put(TASK)
+    run_worker(WORKER, dataclasses.replace(worker.deps, task_queue=queue))
+    assert queue.requeued == [(TASK.id, STOPPING_REASON)]
+    assert worker.executor.started_count == 0, "no session started after the stop"
+
+
+def test_no_context_restart_once_the_run_is_stopping(tmp_path: Path) -> None:
+    holder: list[WorkerHarness] = []
+    sessions: list[ScriptedSession] = []
+
+    def agent(session: ScriptedSession) -> Iterator[float]:
+        sessions.append(session)
+        Path(session.spec.env[TRANSCRIPT_VARIABLE]).write_text(
+            assistant_line(190_000, "bash")
+        )
+        yield 60.0
+        holder[0].write_claim(WORKER, TASK, 1, "Wrapped up as the run stopped.")
+        holder[0].stop.set()
+
+    worker = make_worker_harness(tmp_path, PRESETS["S2"], {"agent": agent}, "agent")
+    holder.append(worker)
+    run_task(WORKER, TASK, worker.deps, cursor=0)
+    assert len(sessions) == 1
     assert worker.task_queue.completed == [TASK.id]
