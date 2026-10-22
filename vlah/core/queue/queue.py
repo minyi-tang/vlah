@@ -7,7 +7,13 @@ lease. Every contended step is a compare-and-set or an exactly-once removal, so
 concurrent claimers and reclaimers never double up.
 
 Compose work runs outside every arm (D74), so it lives in its own queue,
-constructed with pool="external".
+constructed with pool="external", under its own key in the same store.
+
+A stale lease is retired by swapping its exact bytes for a tombstone with one
+compare-and-set, after asking the executor: a heartbeat that lands meanwhile
+changes the bytes, so the swap fails and the lease stays. Only the reclaimer whose
+swap succeeds requeues the task. Every reader treats a tombstone as no lease, and
+it expires after the lease TTL.
 """
 
 import logging
@@ -27,12 +33,14 @@ from vlah.ports.store import KeyValueStore
 logger = logging.getLogger(__name__)
 
 QUEUE_KEY = "queue"
+EXTERNAL_QUEUE_KEY = "queue/external"
 SLOTS_KEY = "slots"
 TASK_KEY_PREFIX = "task/"
 LEASE_KEY_PREFIX = "lease/"
 DONE_KEY_PREFIX = "done/"
 FOLLOW_UP_KEY_PREFIX = "followup/"
-RECLAIM_KEY_PREFIX = "reclaimed/"
+# What a reclaimed lease becomes; it is never valid lease JSON.
+LEASE_TOMBSTONE = b"reclaimed"
 TASK_COUNTER_KEY = "counter/task"
 ENQUEUE_COUNTER_KEY = "counter/enqueue"
 EVENT_COUNTER_KEY = "counter/event"
@@ -58,11 +66,18 @@ def read_leases(store: KeyValueStore) -> tuple[Lease, ...]:
     leases: list[Lease] = []
     for key in store.scan(LEASE_KEY_PREFIX):
         raw_lease = store.get(key)
-        if raw_lease is None:
+        if raw_lease is None or raw_lease == LEASE_TOMBSTONE:
             continue
         else:
             leases.append(Lease.model_validate_json(raw_lease))
     return tuple(leases)
+
+
+def queue_key(pool: Literal["arm", "external"]) -> str:
+    if pool == "external":
+        return EXTERNAL_QUEUE_KEY
+    else:
+        return QUEUE_KEY
 
 
 class KeyValueTaskQueue:
@@ -73,6 +88,7 @@ class KeyValueTaskQueue:
     ) -> None:
         self.store = store
         self.pool = pool
+        self.queue_key = queue_key(pool)
 
     def load_task(self, task_id: str) -> Task | None:
         raw_task = self.store.get(f"{TASK_KEY_PREFIX}{task_id}")
@@ -84,7 +100,7 @@ class KeyValueTaskQueue:
     def enqueue(self, task: Task) -> None:
         enqueue_order = self.store.increment(ENQUEUE_COUNTER_KEY, 1)
         self.store.sorted_add(
-            QUEUE_KEY, task.id, task.priority * PRIORITY_SCALE + enqueue_order
+            self.queue_key, task.id, task.priority * PRIORITY_SCALE + enqueue_order
         )
 
     def put(self, task: Task) -> None:
@@ -101,9 +117,9 @@ class KeyValueTaskQueue:
 
     def queued_tasks(self) -> list[tuple[Task, float]]:
         queued: list[tuple[Task, float]] = []
-        for task_id, score in self.store.sorted_range(QUEUE_KEY):
+        for task_id, score in self.store.sorted_range(self.queue_key):
             task = self.load_task(task_id)
-            if task is None:
+            if task is None or task.pool != self.pool:
                 continue
             else:
                 queued.append((task, score))
@@ -146,23 +162,31 @@ class KeyValueTaskQueue:
             or task.for_agent not in lease_holders
         ]
         for task, score in sorted(eligible, key=claim_order):
-            if self.store.sorted_remove(QUEUE_KEY, task.id):
+            if self.store.sorted_remove(self.queue_key, task.id):
                 return task
             else:
                 continue
         return None
 
     def complete(self, task_id: str, agent: ActorId) -> None:
+        """Mark the task done; its record stays, so a replayed result finds its follow-up."""
         self.store.set(f"{DONE_KEY_PREFIX}{task_id}", agent.encode(), None)
-        self.store.delete(f"{TASK_KEY_PREFIX}{task_id}")
 
     def requeue(self, task_id: str, reason: str) -> None:
-        queued_ids = {entry[0] for entry in self.store.sorted_range(QUEUE_KEY)}
+        """Queue a task again, unless it is done, queued, or still leased by an agent."""
+        queued_ids = {entry[0] for entry in self.store.sorted_range(self.queue_key)}
         task = self.load_task(task_id)
+        holders = [
+            lease.agent for lease in read_leases(self.store) if lease.task_id == task_id
+        ]
         if self.store.get(f"{DONE_KEY_PREFIX}{task_id}") is not None or task is None:
             logger.info(f"not requeueing {task_id}: it is already done")
         elif task_id in queued_ids:
             logger.info(f"not requeueing {task_id}: it is already queued")
+        elif holders:
+            logger.warning(
+                f"not requeueing {task_id}: {holders} still hold it; release first"
+            )
         else:
             logger.info(f"requeueing {task_id}: {reason}")
             self.enqueue(task)
@@ -225,9 +249,12 @@ class KeyValueTaskQueue:
         else:
             follow_up_key = f"{FOLLOW_UP_KEY_PREFIX}{event.seq}"
             existing_task_id = self.store.get(follow_up_key)
-            if existing_task_id is not None:
-                existing = self.load_task(existing_task_id.decode())
-                assert existing is not None
+            existing = (
+                None
+                if existing_task_id is None
+                else self.load_task(existing_task_id.decode())
+            )
+            if existing is not None:
                 return existing
             else:
                 result = event.data
@@ -285,8 +312,11 @@ class KeyValueLeases:
             heartbeat_ts=now_seconds,
             acquired_ts=now_seconds,
         )
+        encoded = lease.model_dump_json().encode()
         if self.store.compare_and_set(
-            lease_key(agent), None, lease.model_dump_json().encode(), None
+            lease_key(agent), None, encoded, None
+        ) or self.store.compare_and_set(
+            lease_key(agent), LEASE_TOMBSTONE, encoded, None
         ):
             return lease
         else:
@@ -296,7 +326,7 @@ class KeyValueLeases:
         """Apply transform with compare-and-set, retrying if another writer got there first."""
         while True:
             raw_lease = self.store.get(lease_key(agent))
-            if raw_lease is None:
+            if raw_lease is None or raw_lease == LEASE_TOMBSTONE:
                 return
             else:
                 updated = transform(Lease.model_validate_json(raw_lease))
@@ -348,7 +378,7 @@ class KeyValueLeases:
 
     def get(self, agent: ActorId) -> Lease | None:
         raw_lease = self.store.get(lease_key(agent))
-        if raw_lease is None:
+        if raw_lease is None or raw_lease == LEASE_TOMBSTONE:
             return None
         else:
             return Lease.model_validate_json(raw_lease)
@@ -366,28 +396,42 @@ class KeyValueLeases:
             elif liveness(lease.handle_id):
                 # Heartbeats are late but the process lives: never reclaim a live worker.
                 continue
-            elif not self.store.compare_and_set(
-                f"{RECLAIM_KEY_PREFIX}{lease.task_id}/{lease.acquired_ts!r}",
-                None,
-                b"1",
-                None,
-            ):
-                continue
-            else:
-                raw_lease = self.store.get(lease_key(lease.agent))
-                if (
-                    raw_lease is not None
-                    and Lease.model_validate_json(raw_lease) == lease
-                ):
-                    self.store.delete(lease_key(lease.agent))
-                else:
-                    pass
+            elif self.retire(lease, now_seconds):
                 self.task_queue.requeue(
                     lease.task_id, f"no heartbeat from {lease.agent}"
                 )
                 self.write_stale_event(lease, now_seconds)
                 requeued.append(lease.task_id)
+            else:
+                continue
         return tuple(requeued)
+
+    def retire(self, lease: Lease, now_seconds: float) -> bool:
+        """Swap the lease for a tombstone if it is still this stale lease; True if we did.
+
+        Read again after asking the executor: a heartbeat may have landed meanwhile.
+        """
+        key = lease_key(lease.agent)
+        raw_lease = self.store.get(key)
+        if raw_lease is None or raw_lease == LEASE_TOMBSTONE:
+            return False
+        else:
+            current = Lease.model_validate_json(raw_lease)
+            is_same_lease = (
+                current.task_id == lease.task_id
+                and current.acquired_ts == lease.acquired_ts
+                and current.handle_id == lease.handle_id
+            )
+            is_still_stale = (
+                current.heartbeat_ts + self.lease_ttl_seconds <= now_seconds
+            )
+            return (
+                is_same_lease
+                and is_still_stale
+                and self.store.compare_and_set(
+                    key, raw_lease, LEASE_TOMBSTONE, self.lease_ttl_seconds
+                )
+            )
 
     def write_stale_event(self, lease: Lease, now_seconds: float) -> None:
         event = Event(
