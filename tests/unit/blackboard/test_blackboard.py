@@ -471,3 +471,31 @@ def test_readers_never_see_a_merge_half_done(tmp_path: Path) -> None:
     reader.join()
     assert reader_errors == []
     assert len(blackboard.list_paths("traces/", None)) == 10 * 5 * 40
+
+
+def test_a_raising_listener_skips_only_itself() -> None:
+    """Delivery runs on the draining writer; one bad listener must not cost the others (S3)."""
+    blackboard = memory_blackboard()
+    seen_by_second: list[int] = []
+
+    def broken(merged_commit: MergedCommit) -> None:
+        raise RuntimeError("an indexer bug")
+
+    blackboard.subscribe(broken)
+    blackboard.subscribe(
+        lambda merged_commit: seen_by_second.extend(
+            event.seq for event in merged_commit.events if event.seq is not None
+        )
+    )
+    first = blackboard.write(WORKER, dict([event_file(WORKER, 1)]), "first")
+    second = blackboard.write(WORKER, dict([event_file(WORKER, 2)]), "second")
+    assert (first.status, second.status) == ("merged", "merged")
+    assert seen_by_second == [1, 2]
+    mirror = blackboard.mirror("s1", lambda path: path.startswith("events/"))
+    mirrored: list[str] = []
+    mirror.subscribe(broken)
+    mirror.subscribe(lambda merged_commit: mirrored.extend(merged_commit.paths))
+    assert blackboard.write(WORKER, dict([event_file(WORKER, 3)]), "third").status == (
+        "merged"
+    )
+    assert "events/worker-07/00003.json" in mirrored

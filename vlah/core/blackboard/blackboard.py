@@ -13,6 +13,7 @@ order: merges enter a queue under the merge lock, and one thread at a time drain
 it. A listener that writes only enqueues, so it never deadlocks or overtakes.
 """
 
+import logging
 import re
 import threading
 from collections import deque
@@ -50,6 +51,8 @@ CANDIDATE_PATH_PATTERN = re.compile(r"candidates/(?P<hash>[^/]+)/.+")
 SEQUENCE_POINTER_PREFIX = "events/_seq/"
 OBJECT_POINTER_PREFIXES = ("object://", "private://")
 
+logger = logging.getLogger(__name__)
+
 
 class MirrorStoreFactory(Protocol):
     def __call__(self, mirror_name: str) -> tuple[VersionedStore, str]:
@@ -85,6 +88,24 @@ def evidence_pointer(evidence: EvidenceRef) -> str:
         else:
             continue
     raise ValueError("evidence has no pointer")
+
+
+def deliver(merged_commit: MergedCommit, listeners: list[CommitListener]) -> None:
+    """Give every listener the commit; one that raises is logged and skips only it.
+
+    Delivery runs on whichever writer is draining, so an exception must neither stop
+    the listeners after it nor surface in that writer's already merged write. A
+    listener that needs every commit handles its own errors, or rebuilds from the
+    blackboard (D13).
+    """
+    for listener in listeners:
+        try:
+            listener(merged_commit)
+        except Exception:
+            logger.exception(
+                f"a merge listener failed on commit {merged_commit.commit_id}; "
+                "the other listeners still get it"
+            )
 
 
 class StoreBlackboard:
@@ -370,8 +391,7 @@ class StoreBlackboard:
                         return
                     else:
                         merged_commit = self.delivery_queue.popleft()
-                for listener in list(self.listeners.values()):
-                    listener(merged_commit)
+                deliver(merged_commit, list(self.listeners.values()))
         except BaseException:
             with self.delivery_lock:
                 self.is_delivering = False
@@ -510,8 +530,7 @@ class MirrorBlackboard:
                     if self.is_kept(f"claims/{claim.author}/{claim.id}.md")
                 ),
             )
-            for listener in list(self.listeners.values()):
-                listener(mirrored)
+            deliver(mirrored, list(self.listeners.values()))
         else:
             pass
 
