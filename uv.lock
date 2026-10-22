@@ -562,7 +562,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "pydantic", specifier = ">=2.7" },
+    { name = "pydantic", specifier = ">=2.11" },
     { name = "pyyaml", specifier = ">=6.0" },
 ]
 
