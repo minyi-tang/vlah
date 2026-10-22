@@ -37,6 +37,7 @@ packages = ["vlah"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+pythonpath = ["."]
 addopts = ["--strict-markers", "--import-mode=importlib", "-ra", "-m", "not slow"]
 timeout = 60
 markers = [
