@@ -35,8 +35,11 @@ EventType = Literal[
 
 
 class ResultReady(FrozenModel):
+    """approach is the candidate's approach, so the follow-up task can name it (D28)."""
+
     candidate: str
     claim_id: str
+    approach: str
     submitter: ActorId
     submitter_checkpoint: str | None
     baseline: str

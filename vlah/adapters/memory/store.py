@@ -2,6 +2,7 @@
 
 import math
 import re
+import threading
 from collections.abc import Mapping
 from dataclasses import dataclass
 
@@ -165,91 +166,108 @@ class StoredValue:
 
 
 class MemoryKeyValueStore:
-    """Key-value state with TTLs on the injected clock, plus sorted sets."""
+    """Key-value state with TTLs on the injected clock, plus sorted sets.
+
+    Every operation holds one re-entrant lock, so compare_and_set and sorted_remove are
+    atomic across threads, as they are in Redis.
+    """
 
     def __init__(self, *, clock: Clock, namespace: str) -> None:
         self.clock = clock
         self.namespace = namespace
+        self.lock = threading.RLock()
         self.entries: dict[str, StoredValue] = {}
         self.sorted_sets: dict[str, dict[str, float]] = {}
 
     def live_entry(self, key: str) -> StoredValue | None:
-        entry = self.entries.get(key)
-        if entry is None:
-            return None
-        elif (
-            entry.expires_at_seconds is not None
-            and entry.expires_at_seconds <= self.clock.now_seconds()
-        ):
-            self.entries.pop(key)
-            return None
-        else:
-            return entry
+        with self.lock:
+            entry = self.entries.get(key)
+            if entry is None:
+                return None
+            elif (
+                entry.expires_at_seconds is not None
+                and entry.expires_at_seconds <= self.clock.now_seconds()
+            ):
+                self.entries.pop(key)
+                return None
+            else:
+                return entry
 
     def get(self, key: str) -> bytes | None:
-        entry = self.live_entry(key)
-        if entry is None:
-            return None
-        else:
-            return entry.value
+        with self.lock:
+            entry = self.live_entry(key)
+            if entry is None:
+                return None
+            else:
+                return entry.value
 
     def set(self, key: str, value: bytes, ttl_seconds: float | None) -> None:
-        if ttl_seconds is None:
-            expires_at_seconds = None
-        else:
-            expires_at_seconds = self.clock.now_seconds() + ttl_seconds
-        self.entries[key] = StoredValue(
-            value=value, expires_at_seconds=expires_at_seconds
-        )
+        with self.lock:
+            if ttl_seconds is None:
+                expires_at_seconds = None
+            else:
+                expires_at_seconds = self.clock.now_seconds() + ttl_seconds
+            self.entries[key] = StoredValue(
+                value=value, expires_at_seconds=expires_at_seconds
+            )
 
     def compare_and_set(
         self, key: str, expected: bytes | None, value: bytes, ttl_seconds: float | None
     ) -> bool:
-        if self.get(key) == expected:
-            self.set(key, value, ttl_seconds)
-            return True
-        else:
-            return False
+        with self.lock:
+            if self.get(key) == expected:
+                self.set(key, value, ttl_seconds)
+                return True
+            else:
+                return False
 
     def delete(self, key: str) -> bool:
-        if self.live_entry(key) is None:
-            return False
-        else:
-            self.entries.pop(key)
-            return True
+        with self.lock:
+            if self.live_entry(key) is None:
+                return False
+            else:
+                self.entries.pop(key)
+                return True
 
     def scan(self, prefix: str) -> tuple[str, ...]:
-        return tuple(
-            sorted(
-                key
-                for key in list(self.entries)
-                if key.startswith(prefix) and self.live_entry(key) is not None
+        with self.lock:
+            return tuple(
+                sorted(
+                    key
+                    for key in list(self.entries)
+                    if key.startswith(prefix) and self.live_entry(key) is not None
+                )
             )
-        )
 
     def increment(self, key: str, amount: int) -> int:
-        current_value = self.get(key)
-        if current_value is None:
-            new_value = amount
-        else:
-            new_value = int(current_value.decode("ascii")) + amount
-        self.set(key, str(new_value).encode("ascii"), None)
-        return new_value
+        with self.lock:
+            current_value = self.get(key)
+            if current_value is None:
+                new_value = amount
+            else:
+                new_value = int(current_value.decode("ascii")) + amount
+            self.set(key, str(new_value).encode("ascii"), None)
+            return new_value
 
     def sorted_add(self, key: str, member: str, score: float) -> None:
-        self.sorted_sets.setdefault(key, {})[member] = score
+        with self.lock:
+            self.sorted_sets.setdefault(key, {})[member] = score
 
     def sorted_range(self, key: str) -> tuple[tuple[str, float], ...]:
-        members = self.sorted_sets.get(key, {})
-        return tuple(sorted(members.items(), key=lambda entry: (entry[1], entry[0])))
+        with self.lock:
+            members = self.sorted_sets.get(key, {})
+            return tuple(
+                sorted(members.items(), key=lambda entry: (entry[1], entry[0]))
+            )
 
     def sorted_remove(self, key: str, member: str) -> bool:
-        members = self.sorted_sets.get(key, {})
-        if member in members:
-            members.pop(member)
-            return True
-        else:
-            return False
+        with self.lock:
+            members = self.sorted_sets.get(key, {})
+            if member in members:
+                members.pop(member)
+                return True
+            else:
+                return False
 
 
 class MemoryObjectStore:

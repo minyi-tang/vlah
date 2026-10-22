@@ -28,6 +28,7 @@ EXAMPLE_PAYLOADS: dict[str, EventPayload] = {
     "result_ready": ResultReady(
         candidate="9f3a",
         claim_id="c-eval_service-00001",
+        approach="a-03",
         submitter=ActorId("worker-07"),
         submitter_checkpoint=None,
         baseline="baseline@6",
