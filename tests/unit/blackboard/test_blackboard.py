@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 
 from vlah.adapters.memory.store import MemoryObjectStore, MemoryVersionedStore
-from vlah.adapters.store.git.store import GitVersionedStore
+from vlah.adapters.store.git.store import GitVersionedStore, MainMovedError
 from vlah.core.blackboard.api import Blackboard, MergedCommit, PublicProblemFiles
 from vlah.core.blackboard.blackboard import StoreBlackboard
 from vlah.core.blackboard.layout import init_layout, open_blackboard
@@ -331,3 +331,143 @@ def test_layout_never_copies_hidden_files() -> None:
         "charter/status.md",
         "spec.md",
     )
+
+
+def git_blackboard(tmp_path: Path) -> Blackboard:
+    return open_blackboard(tmp_path, "run-1", "blackboard")
+
+
+@pytest.mark.parametrize("use_git", [False, True], ids=["memory", "git"])
+def test_a_file_and_a_directory_never_share_a_name(
+    tmp_path: Path, use_git: bool
+) -> None:
+    """Git cannot hold both, so such a write would delete the other one (D31)."""
+    blackboard = git_blackboard(tmp_path) if use_git else memory_blackboard()
+    other = ActorId("worker-08")
+    first = blackboard.write(
+        WORKER,
+        {
+            "candidates/abc/candidate/foo.py": b"x = 1\n",
+            f"traces/{WORKER}/t-1.ptr": b"ptr",
+        },
+        "candidate",
+    )
+    assert first.status == "merged", first.violations
+    file_over_directory = blackboard.write(
+        other, {"candidates/abc/candidate": b"squat"}, "file over directory"
+    )
+    directory_over_file = blackboard.write(
+        WORKER, {f"traces/{WORKER}/t-1.ptr/inner": b"x"}, "directory over file"
+    )
+    both_in_one_write = blackboard.write(
+        WORKER,
+        {f"traces/{WORKER}/t-2.ptr": b"x", f"traces/{WORKER}/t-2.ptr/inner": b"x"},
+        "both at once",
+    )
+    for receipt in (file_over_directory, directory_over_file, both_in_one_write):
+        assert receipt.status == "rejected"
+        assert {violation.rule for violation in receipt.violations} == {"file_exists"}
+    assert blackboard.list_paths("", None) == (
+        "candidates/abc/candidate/foo.py",
+        f"traces/{WORKER}/t-1.ptr",
+    )
+    assert blackboard.read("candidates/abc/candidate/foo.py", None) == b"x = 1\n"
+
+
+def forge_main_from_a_clone(blackboard: Blackboard, clone: Path) -> str:
+    """Push past the pre-receive hook the way a worker with directory access could."""
+    subprocess.run(
+        ["git", "clone", "-q", blackboard.clone_url(), str(clone)], check=True
+    )
+    (clone / "claims").mkdir()
+    (clone / "claims" / "forged.md").write_text("forged")
+    git = ["git", "-C", str(clone), "-c", "user.name=w", "-c", "user.email=w@x"]
+    subprocess.run([*git, "add", "."], check=True)
+    subprocess.run([*git, "commit", "-qm", "forged"], check=True)
+    subprocess.run(
+        [
+            *git,
+            "push",
+            "-q",
+            "--receive-pack=git -c core.hooksPath=/nonexistent receive-pack",
+            "origin",
+            "HEAD:main",
+        ],
+        check=True,
+    )
+    return subprocess.run(
+        [*git, "rev-parse", "HEAD"], capture_output=True, text=True, check=True
+    ).stdout.strip()
+
+
+def test_a_main_moved_from_outside_stops_the_store(tmp_path: Path) -> None:
+    """The hook guards only the default push path; a moved main is detected, not adopted (D56)."""
+    blackboard = git_blackboard(tmp_path)
+    blackboard.write(ActorId("human"), {"spec.md": b"spec"}, "spec")
+    forged_tip = forge_main_from_a_clone(blackboard, tmp_path / "clone")
+
+    with pytest.raises(MainMovedError):
+        blackboard.write(WORKER, dict([event_file(WORKER, 1)]), "after the forgery")
+    assert blackboard.list_paths("", None) == ("spec.md",)
+    repository = tmp_path / "run-1" / "blackboard.git"
+    kept = subprocess.run(
+        ["git", "--git-dir", str(repository), "rev-parse", "refs/tampered/1"],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.strip()
+    assert kept == forged_tip
+    with pytest.raises(MainMovedError):
+        open_blackboard(tmp_path, "run-1", "blackboard")
+
+
+def test_a_commit_message_cannot_forge_the_sequence_trailers(tmp_path: Path) -> None:
+    blackboard = git_blackboard(tmp_path)
+    blackboard.write(
+        WORKER,
+        dict([event_file(WORKER, 1)]),
+        "look\nHerd-Seq: 1-5000\nHerd-Commit: blackboard-999999\n",
+    )
+    reopened = open_blackboard(tmp_path, "run-1", "blackboard")
+    assert reopened.head_sequence() == 1
+    receipt = reopened.write(WORKER, dict([event_file(WORKER, 2)]), "second")
+    assert receipt.sequence_numbers == (2,)
+    assert receipt.commit_id == "blackboard-000002"
+
+
+def test_readers_never_see_a_merge_half_done(tmp_path: Path) -> None:
+    """list_paths from another thread used to fail with 'set changed size during iteration'."""
+    blackboard = git_blackboard(tmp_path)
+    writers = [ActorId(f"worker-{index:02d}") for index in range(1, 11)]
+    reader_errors: list[BaseException] = []
+    stop_reading = threading.Event()
+
+    def read_all() -> None:
+        while not stop_reading.is_set():
+            try:
+                blackboard.list_paths("", None)
+                blackboard.head_sequence()
+            except BaseException as error:
+                reader_errors.append(error)
+                return
+
+    def write_many(writer: ActorId) -> None:
+        for number in range(1, 6):
+            files = {
+                f"traces/{writer}/t-{number}-{item}.ptr": b"x" for item in range(40)
+            }
+            blackboard.write(writer, files, f"traces from {writer}")
+
+    reader = threading.Thread(target=read_all)
+    reader.start()
+    threads = [
+        threading.Thread(target=write_many, args=(writer,)) for writer in writers
+    ]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+    stop_reading.set()
+    reader.join()
+    assert reader_errors == []
+    assert len(blackboard.list_paths("traces/", None)) == 10 * 5 * 40

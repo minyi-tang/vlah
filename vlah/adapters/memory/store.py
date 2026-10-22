@@ -3,8 +3,9 @@
 import math
 import re
 import threading
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
+from pathlib import PurePosixPath
 
 from vlah.core.types.clock import Clock
 from vlah.core.types.ids import ActorId, Role, role_of_actor
@@ -28,6 +29,30 @@ class PendingCommit:
     author: ActorId
     message: str
     files: dict[str, bytes]
+
+
+def directories_of(paths: Iterable[str]) -> set[str]:
+    """Every directory the paths lie in: a/b/c gives a and a/b."""
+    return {str(parent) for path in paths for parent in PurePosixPath(path).parents} - {
+        "."
+    }
+
+
+def overwritten_paths(new_paths: set[str], existing_paths: set[str]) -> list[str]:
+    """New paths that exist, take a directory's name, or sit inside a file's name.
+
+    A real store, git, cannot hold a file and a directory at one name, so the
+    reference rejects what git would silently delete (D31).
+    """
+    all_files = existing_paths | new_paths
+    all_directories = directories_of(all_files)
+    return sorted(
+        path
+        for path in new_paths
+        if path in existing_paths
+        or path in all_directories
+        or directories_of((path,)) & all_files
+    )
 
 
 class MemoryVersionedStore:
@@ -71,8 +96,10 @@ class MemoryVersionedStore:
         merged: list[MergeResult] = []
         pending_commits = self.pending_by_branch.pop(branch, [])
         for index, pending_commit in enumerate(pending_commits):
-            existing_paths = sorted(set(pending_commit.files) & set(self.main_files))
-            if existing_paths:
+            clashing_paths = overwritten_paths(
+                set(pending_commit.files), set(self.main_files)
+            )
+            if clashing_paths:
                 # The offending commit is dropped; later commits stay pending.
                 remaining_commits = pending_commits[index + 1 :]
                 if remaining_commits:
@@ -80,7 +107,7 @@ class MemoryVersionedStore:
                 else:
                     pass
                 raise AppendOnlyViolationError(
-                    f"{pending_commit.commit_id} would overwrite {existing_paths}"
+                    f"{pending_commit.commit_id} would overwrite {clashing_paths}"
                 )
             else:
                 merge_result = self.apply_commit(pending_commit)

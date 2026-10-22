@@ -118,6 +118,27 @@ def check_versioned_store(store: VersionedStore, push_token: str) -> None:
         raise AssertionError("overwriting an existing file must be rejected")
     assert store.read("claims/worker-01/c.md", None) == b"claim"
 
+    for clashing_files in (
+        {"claims/worker-01/c.md/inner": b"x"},
+        {"events/worker-01": b"x"},
+        {"claims/worker-01/d": b"x", "claims/worker-01/d/inner": b"x"},
+    ):
+        store.commit("w/check", clashing_files, CHECK_AUTHOR, "clash", push_token)
+        try:
+            store.merge("w/check")
+        except AppendOnlyViolationError:
+            pass
+        else:
+            raise AssertionError(
+                f"a file and a directory cannot share a name: {sorted(clashing_files)}"
+            )
+    assert store.read("claims/worker-01/c.md", None) == b"claim"
+    assert store.list_paths("events/worker-01/", None) == (
+        "events/worker-01/00001.json",
+        "events/worker-01/00002.json",
+        "events/worker-01/00003.json",
+    ), "a rejected clash leaves the tree as it was"
+
     assert [merge.commit_id for merge in listener.merges] == [
         first_merge.commit_id,
         second_merge.commit_id,
