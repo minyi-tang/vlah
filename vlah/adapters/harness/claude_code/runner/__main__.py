@@ -1,0 +1,8 @@
+"""Entry point: python -m vlah.adapters.harness.claude_code.runner <claude command...>."""
+
+import os
+import sys
+
+from vlah.adapters.harness.claude_code.runner import main
+
+sys.exit(main(sys.argv[1:], os.environ, sys.stdout.buffer))
