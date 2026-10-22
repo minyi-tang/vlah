@@ -1,0 +1,245 @@
+{
+  "settings": {
+    "artifact_megabytes": 1500,
+    "repetitions": 1,
+    "transfer_megabytes_per_second": 100,
+    "claude_code_version": "2.1.308 (Claude Code)",
+    "base_commit": "4aef689b80da4e2a192607d6a0bbdddc2e1a02a4"
+  },
+  "session": {
+    "sandbox_build_seconds": 131.08660507202148,
+    "sandbox_bytes": 1849039195,
+    "sandbox_without_venv_bytes": 1541963420,
+    "sandbox_paths": 7630
+  },
+  "context_usage": {
+    "assistant_entries": 2,
+    "transcript_matches_returned_usage": true,
+    "last_context_tokens": 15053,
+    "context_window_tokens": 1000000,
+    "last_context_fraction": 0.015053,
+    "transcript_bytes": 207360
+  },
+  "agent_sdk": {
+    "store_bytes": 35736,
+    "export_seconds": 2.0829079151153564,
+    "resume_to_first_tool_call_seconds": 3.1506619453430176,
+    "recalled_nonce_matches": true,
+    "fork_session_id_differs": true,
+    "spilled_tool_results_on_target": 0
+  },
+  "summary": [
+    {
+      "approach": "tar_zstd",
+      "runs": 1,
+      "median_total_seconds": 24.595077753067017,
+      "median_checkpoint_seconds": 7.283608913421631,
+      "median_transfer_seconds": 9.309317588806152,
+      "median_restore_seconds": 6.734623908996582,
+      "median_resume_seconds": 0.8964064121246338,
+      "median_snapshot_megabytes": 940.318813,
+      "files_faithful": true,
+      "conversation_ok": true,
+      "passes": true
+    },
+    {
+      "approach": "git_bundle",
+      "runs": 1,
+      "median_total_seconds": 23.61144995689392,
+      "median_checkpoint_seconds": 5.64275050163269,
+      "median_transfer_seconds": 9.446473360061646,
+      "median_restore_seconds": 6.6394829750061035,
+      "median_resume_seconds": 1.4089303016662598,
+      "median_snapshot_megabytes": 939.557086,
+      "files_faithful": true,
+      "conversation_ok": true,
+      "passes": true
+    },
+    {
+      "approach": "overlay_upper",
+      "runs": 1,
+      "median_total_seconds": 28.761762142181396,
+      "median_checkpoint_seconds": 9.212613582611084,
+      "median_transfer_seconds": 9.488890886306763,
+      "median_restore_seconds": 8.205732345581055,
+      "median_resume_seconds": 0.942328929901123,
+      "median_snapshot_megabytes": 939.887343,
+      "files_faithful": true,
+      "conversation_ok": true,
+      "passes": true
+    },
+    {
+      "approach": "command_replay",
+      "runs": 1,
+      "median_total_seconds": 121.7876079082489,
+      "median_checkpoint_seconds": 0.021738052368164062,
+      "median_transfer_seconds": 0.03901219367980957,
+      "median_restore_seconds": 119.96222066879272,
+      "median_resume_seconds": 0.9132757186889648,
+      "median_snapshot_megabytes": 0.079471,
+      "files_faithful": false,
+      "conversation_ok": true,
+      "passes": false
+    },
+    {
+      "approach": "tar_without_venv",
+      "runs": 1,
+      "median_total_seconds": 32.60801696777344,
+      "median_checkpoint_seconds": 11.479176044464111,
+      "median_transfer_seconds": 8.688185453414917,
+      "median_restore_seconds": 11.061000108718872,
+      "median_resume_seconds": 0.7577612400054932,
+      "median_snapshot_megabytes": 861.901823,
+      "files_faithful": true,
+      "conversation_ok": true,
+      "passes": true
+    }
+  ],
+  "measurements": [
+    {
+      "approach": "tar_zstd",
+      "repetition": 0,
+      "checkpoint_seconds": 7.283608913421631,
+      "transfer_seconds": 9.309317588806152,
+      "restore_seconds": 6.734623908996582,
+      "resume_to_first_tool_call_seconds": 0.8964064121246338,
+      "resume_to_first_model_request_seconds": 0.8038787841796875,
+      "total_seconds": 24.595077753067017,
+      "sandbox_checkpoint_bytes": 940240995,
+      "conversation_checkpoint_bytes": 77818,
+      "fidelity": {
+        "matching_paths": 7630,
+        "missing_paths": 0,
+        "extra_paths": 0,
+        "differing_paths": 0,
+        "differing_bytes": 0,
+        "differing_paths_outside_caches": 0,
+        "git_state_matches": true,
+        "git_fields_differing": [],
+        "example_paths": []
+      },
+      "recalled_nonce_matches": true,
+      "history_reached_model": true,
+      "prompt_prefix_break": "",
+      "spilled_tool_results_on_target": 1
+    },
+    {
+      "approach": "git_bundle",
+      "repetition": 0,
+      "checkpoint_seconds": 5.64275050163269,
+      "transfer_seconds": 9.446473360061646,
+      "restore_seconds": 6.6394829750061035,
+      "resume_to_first_tool_call_seconds": 1.4089303016662598,
+      "resume_to_first_model_request_seconds": 1.290663480758667,
+      "total_seconds": 23.61144995689392,
+      "sandbox_checkpoint_bytes": 939479268,
+      "conversation_checkpoint_bytes": 77818,
+      "fidelity": {
+        "matching_paths": 7630,
+        "missing_paths": 0,
+        "extra_paths": 0,
+        "differing_paths": 0,
+        "differing_bytes": 0,
+        "differing_paths_outside_caches": 0,
+        "git_state_matches": true,
+        "git_fields_differing": [],
+        "example_paths": []
+      },
+      "recalled_nonce_matches": true,
+      "history_reached_model": true,
+      "prompt_prefix_break": "",
+      "spilled_tool_results_on_target": 1
+    },
+    {
+      "approach": "overlay_upper",
+      "repetition": 0,
+      "checkpoint_seconds": 9.212613582611084,
+      "transfer_seconds": 9.488890886306763,
+      "restore_seconds": 8.205732345581055,
+      "resume_to_first_tool_call_seconds": 0.942328929901123,
+      "resume_to_first_model_request_seconds": 0.8484821319580078,
+      "total_seconds": 28.761762142181396,
+      "sandbox_checkpoint_bytes": 939809525,
+      "conversation_checkpoint_bytes": 77818,
+      "fidelity": {
+        "matching_paths": 7630,
+        "missing_paths": 0,
+        "extra_paths": 0,
+        "differing_paths": 0,
+        "differing_bytes": 0,
+        "differing_paths_outside_caches": 0,
+        "git_state_matches": true,
+        "git_fields_differing": [],
+        "example_paths": []
+      },
+      "recalled_nonce_matches": true,
+      "history_reached_model": true,
+      "prompt_prefix_break": "",
+      "spilled_tool_results_on_target": 1
+    },
+    {
+      "approach": "command_replay",
+      "repetition": 0,
+      "checkpoint_seconds": 0.021738052368164062,
+      "transfer_seconds": 0.03901219367980957,
+      "restore_seconds": 119.96222066879272,
+      "resume_to_first_tool_call_seconds": 0.9132757186889648,
+      "resume_to_first_model_request_seconds": 0.8092708587646484,
+      "total_seconds": 121.7876079082489,
+      "sandbox_checkpoint_bytes": 1653,
+      "conversation_checkpoint_bytes": 77818,
+      "fidelity": {
+        "matching_paths": 7262,
+        "missing_paths": 0,
+        "extra_paths": 0,
+        "differing_paths": 368,
+        "differing_bytes": 85998473,
+        "differing_paths_outside_caches": 1,
+        "git_state_matches": false,
+        "git_fields_differing": [
+          "head_commit"
+        ],
+        "example_paths": [
+          "runs/sweep-1/sweep.log"
+        ]
+      },
+      "recalled_nonce_matches": true,
+      "history_reached_model": true,
+      "prompt_prefix_break": "",
+      "spilled_tool_results_on_target": 1
+    },
+    {
+      "approach": "tar_without_venv",
+      "repetition": 0,
+      "checkpoint_seconds": 11.479176044464111,
+      "transfer_seconds": 8.688185453414917,
+      "restore_seconds": 11.061000108718872,
+      "resume_to_first_tool_call_seconds": 0.7577612400054932,
+      "resume_to_first_model_request_seconds": 0.6427938938140869,
+      "total_seconds": 32.60801696777344,
+      "sandbox_checkpoint_bytes": 861824005,
+      "conversation_checkpoint_bytes": 77818,
+      "fidelity": {
+        "matching_paths": 7203,
+        "missing_paths": 427,
+        "extra_paths": 0,
+        "differing_paths": 0,
+        "differing_bytes": 10997761,
+        "differing_paths_outside_caches": 0,
+        "git_state_matches": true,
+        "git_fields_differing": [],
+        "example_paths": [
+          ".venv/lib/python3.11/site-packages/__pycache__",
+          ".venv/lib/python3.11/site-packages/__pycache__/_virtualenv.cpython-311.pyc",
+          ".venv/lib/python3.11/site-packages/__pycache__/six.cpython-311.pyc",
+          ".venv/lib/python3.11/site-packages/dateutil/__pycache__",
+          ".venv/lib/python3.11/site-packages/dateutil/__pycache__/__init__.cpython-311.pyc"
+        ]
+      },
+      "recalled_nonce_matches": true,
+      "history_reached_model": true,
+      "prompt_prefix_break": "",
+      "spilled_tool_results_on_target": 1
+    }
+  ]
+}
