@@ -14,6 +14,7 @@ from vlah.core.types.events import (
     IntegrationFailed,
     InteractionFound,
     MapUpdated,
+    RemeasureReady,
     ResultReady,
     Stopped,
     event_from_json,
@@ -66,6 +67,16 @@ EXAMPLE_PAYLOADS: dict[str, EventPayload] = {
     ),
     "dedup_hit": DedupHit(candidate="9f3a", original_claim="c-eval_service-00001"),
     "stopped": Stopped(reason="budget"),
+    "remeasure_ready": RemeasureReady(
+        request_id="bench_full-00002",
+        candidate="77be",
+        parent_candidate="9f3a",
+        claim_id="c-eval_service-00004",
+        baseline="baseline@7",
+        paired=PAIRED,
+        score=64.1,
+        level="bench_full",
+    ),
 }
 
 

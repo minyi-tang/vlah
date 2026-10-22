@@ -39,6 +39,8 @@ def test_unknown_actor_ids_are_rejected(actor: str) -> None:
         ("worker-07", "candidates/9f3a/candidate/policy.py", True),
         ("worker-07", "candidates/9f3a/result.json", False),
         ("eval_service", "candidates/9f3a/result.json", True),
+        ("integrator", "candidates/77be/candidate/policy.py", True),
+        ("eval_service", "candidates/77be/manifest.yaml", False),
         ("worker-07", "events/_seq/10482", False),
         ("merge_queue", "events/_seq/10482", True),
         ("worker-07", "map/measurements/wait_by_site/measure.py", True),

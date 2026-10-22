@@ -15,3 +15,14 @@ class AppendOnlyViolationError(Exception):
 
 class ReadPermissionError(PermissionError):
     """The reader's role may not read this object, for example private data (D63)."""
+
+
+class JudgeBusyError(Exception):
+    """The judge refused a submission for now (testbed: HTTP 429); retry at retry_at_seconds.
+
+    Quota policy stays with the eval client: the adapter only reports when to retry.
+    """
+
+    def __init__(self, retry_at_seconds: float) -> None:
+        super().__init__(f"the judge is busy until {retry_at_seconds}")
+        self.retry_at_seconds = retry_at_seconds
