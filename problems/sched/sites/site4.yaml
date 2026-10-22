@@ -1,0 +1,11 @@
+id: 4
+summary: Many small single-core jobs from many users; starting a job costs 120 s unless the same user ran on that machine in the last 10 minutes.
+machines: 4
+cores_per_machine: 8
+racks: 1
+arrival: {kind: poisson, utilization: 0.55}
+duration: {kind: uniform, min_s: 60, max_s: 180}
+cores: {1: 1.0}
+users: {n: 60}
+mechanisms:
+  startup: {overhead_s: 120, window_s: 600}
