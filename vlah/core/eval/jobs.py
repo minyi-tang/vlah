@@ -59,10 +59,14 @@ class EvalJob:
     level_index: int = 0
     job_id: str | None = None
     retry_at_seconds: float = 0.0
+    # Transient judge errors since the last successful call (retried with backoff).
+    error_count: int = 0
     held_score: ScoreResult | None = None
     status: str = "proposed"
     level_results: list[LevelResult] = field(default_factory=list[LevelResult])
     is_finished: bool = False
+    # Set when the judge could not run it, so the same candidate may be submitted again.
+    releases_hash: bool = False
 
 
 @dataclass(frozen=True, kw_only=True)

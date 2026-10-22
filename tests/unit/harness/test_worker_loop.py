@@ -25,14 +25,25 @@ INTERRUPT = Interrupt(
 )
 
 
-def test_a_session_without_a_claim_is_not_marked_complete(tmp_path: Path) -> None:
+def test_a_session_without_a_claim_is_not_marked_complete(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     def silent(session: ScriptedSession) -> Iterator[float]:
         yield 10.0
 
     worker = make_worker_harness(tmp_path, PRESETS["S2"], {"silent": silent}, "silent")
+    held_at_requeue: list[bool] = []
+    requeue = worker.task_queue.requeue
+
+    def requeue_after_release(task_id: str, reason: str) -> None:
+        held_at_requeue.append(worker.leases.get(WORKER) is not None)
+        requeue(task_id, reason)
+
+    monkeypatch.setattr(worker.task_queue, "requeue", requeue_after_release)
     run_task(WORKER, TASK, worker.deps, cursor=0)
     assert worker.task_queue.completed == []
     assert worker.task_queue.requeued == [(TASK.id, NO_CLAIM_REASON)]
+    assert held_at_requeue == [False], "the queue refuses a task that is still held"
     assert worker.leases.get(WORKER) is None
 
 

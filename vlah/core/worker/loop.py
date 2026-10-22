@@ -293,11 +293,14 @@ def move_lease(run: TaskRun, deps: WorkerDeps) -> None:
 
 
 def finish_task(run: TaskRun, deps: WorkerDeps) -> None:
-    """Complete the task only if it has a claim (D4); release the lease either way."""
-    try:
-        if deps.tool_server.claims_written(run.agent, run.task.id):
-            deps.task_queue.complete(run.task.id, run.agent)
-        else:
-            deps.task_queue.requeue(run.task.id, NO_CLAIM_REASON)
-    finally:
-        deps.leases.release(run.agent)
+    """Release the lease, then complete the task if it has a claim (D4) or requeue it.
+
+    The lease goes first: the queue refuses to requeue a task an agent still holds,
+    so that no task ever has two leases.
+    """
+    has_claim = bool(deps.tool_server.claims_written(run.agent, run.task.id))
+    deps.leases.release(run.agent)
+    if has_claim:
+        deps.task_queue.complete(run.task.id, run.agent)
+    else:
+        deps.task_queue.requeue(run.task.id, NO_CLAIM_REASON)
