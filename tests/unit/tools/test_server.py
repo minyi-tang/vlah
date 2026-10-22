@@ -10,11 +10,16 @@ import pytest
 from mcp.client.session import ClientSession
 from mcp.client.streamable_http import streamable_http_client
 
+from tests.fixtures.fakes import FakeIndexer
 from tests.fixtures.tools import make_tools_harness, serving
+from vlah.adapters.memory.store import MemoryKeyValueStore
 from vlah.arms.config import PRESETS
+from vlah.core.router.router import KeyValueRouter
 from vlah.core.types.claims import Claim, EvidenceRef, render_claim
 from vlah.core.types.ids import ActorId
 from vlah.core.types.interrupts import Interrupt
+from vlah.core.types.params import Params
+from vlah.tools.herd_tools import HerdTools
 
 pytestmark = pytest.mark.tools
 
@@ -163,3 +168,63 @@ def test_a_bad_ack_body_is_a_400_and_a_stranger_a_401(tmp_path: Path) -> None:
         assert httpx2.post(url, headers=not_json, content=b"{oops").status_code == 400
         stranger = {"Authorization": "Bearer nope"}
         assert httpx2.post(url, headers=stranger, content=b"{oops").status_code == 401
+
+
+def test_only_the_pending_interrupt_can_be_acknowledged(tmp_path: Path) -> None:
+    """An ack with another id answered 200 and the hook could not tell it had missed."""
+    harness = make_tools_harness(tmp_path, PRESETS["S2"])
+    router = KeyValueRouter(
+        store=MemoryKeyValueStore(clock=harness.clock, namespace="router"),
+        leases=harness.leases,
+        indexer=FakeIndexer(),
+        arm=PRESETS["S2"],
+        params=Params(),
+        clock=harness.clock,
+    )
+    tools = HerdTools(
+        blackboard=harness.blackboard,
+        objects=harness.objects,
+        indexer=FakeIndexer(),
+        eval_service=harness.eval_service,
+        leases=harness.leases,
+        router=router,
+        recorder=harness.recorder,
+        arm=PRESETS["S2"],
+        params=Params(),
+        clock=harness.clock,
+        run_id="r-tools",
+    )
+    token = tools.register_agent(WORKER, tmp_path)
+    authorized = {"Authorization": f"Bearer {token}"}
+    interrupt = Interrupt(
+        id="i-worker-01-2-7",
+        agent=WORKER,
+        kind="hard",
+        rule=2,
+        reason="your target was refuted",
+        written_ts=0.0,
+    )
+    with serving(tools) as server:
+        hook = server.hook_config_for(WORKER)
+        nothing_pending = httpx2.post(
+            hook.interrupt_ack_url, headers=authorized, json={"interrupt_id": "i-x"}
+        )
+        assert nothing_pending.status_code == 409
+        router.write_hard(interrupt, priority=2)
+        foreign = httpx2.post(
+            hook.interrupt_ack_url,
+            headers=authorized,
+            json={"interrupt_id": "i-worker-02-2-7"},
+        )
+        assert foreign.status_code == 409
+        checked = httpx2.post(hook.interrupt_check_url, headers=authorized)
+        assert checked.json()["interrupt"]["id"] == interrupt.id, "still pending"
+        own = httpx2.post(
+            hook.interrupt_ack_url,
+            headers=authorized,
+            json={"interrupt_id": interrupt.id},
+        )
+        assert own.status_code == 200
+        assert httpx2.post(hook.interrupt_check_url, headers=authorized).json() == {
+            "interrupt": None
+        }
