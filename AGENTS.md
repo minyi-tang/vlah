@@ -10,6 +10,7 @@ VLAH runs many LLM agents on one hard optimization problem, where the only trust
 
 ## Start here
 
+0. **Claim it first.** If the issue already has the `in-progress` label, someone else has it: pick another, or ask. Otherwise add the label and comment with your branch name before you write any code.
 1. Find **your issue**. Its "Start here" block gives:
    - what it's blocked by;
    - your branch name;
