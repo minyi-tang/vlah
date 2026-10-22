@@ -40,7 +40,7 @@ WRITE_RULES: tuple[PathRule, ...] = (
     ),
     make_path_rule(
         r"candidates/[0-9a-f]+/(manifest\.yaml|prediction\.json|local\.json|candidate(\.[^/]+)?(/.+)?)",
-        frozenset({"worker", "human"}),
+        frozenset({"worker", "human", "integrator"}),
     ),
     make_path_rule(r"digests/[^/]+\.md", frozenset({"librarian"})),
     make_path_rule(r"decisions/[^/]+\.md", frozenset({"planner"})),

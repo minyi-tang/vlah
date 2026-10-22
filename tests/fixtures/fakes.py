@@ -22,7 +22,7 @@ from vlah.core.blackboard.api import (
     Violation,
     WriteReceipt,
 )
-from vlah.core.eval.api import EvalRequest, EvalResponse
+from vlah.core.eval.api import EvalRequest, EvalResponse, RemeasureRequest
 from vlah.core.indexer.api import (
     ApproachState,
     ClaimState,
@@ -466,7 +466,7 @@ class FakeEvalService:
             request_id=job_id, claim_id=claim.id, baseline=baseline, status="queued"
         )
 
-    def remeasure(self, candidate_hash: str, baseline: str) -> str:
+    def remeasure(self, request: RemeasureRequest) -> str:
         raise NotImplementedError(
             "the fake eval service does not remeasure; see W1-04 (#14)"
         )

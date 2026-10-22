@@ -45,13 +45,28 @@ class EvalResponse(FrozenModel):
     error: str | None = None
 
 
+class RemeasureRequest(FrozenModel):
+    """One paired remeasure at the top level, for the Integrator (D74, TB section 11.8.1).
+
+    candidate_directory holds the candidate already rebased onto baseline; it is a new
+    candidate, written by the Integrator, with parent_candidate as its lineage.
+    """
+
+    candidate_directory: Path
+    baseline: str
+    parent_candidate: str
+    approach: str
+
+
 class EvalService(Protocol):
     def request(self, request: EvalRequest, caller: ActorId) -> EvalResponse:
         """Validate, search for similar work, run gates, dedup, and queue (D57)."""
         ...
 
-    def remeasure(self, candidate_hash: str, baseline: str) -> str:
-        """Integrator only: a paired remeasure that skips confirmation and dedup (D74)."""
+    def remeasure(self, request: RemeasureRequest) -> str:
+        """Integrator only: one top-level paired run that skips confirmation and dedup,
+        charged to the Integrator's quota (D74). The result arrives as a remeasure_ready
+        event; the return value is its request_id."""
         ...
 
     def tick(self) -> tuple[Event, ...]:

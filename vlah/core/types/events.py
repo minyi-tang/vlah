@@ -31,6 +31,7 @@ EventType = Literal[
     "audit_checked",
     "dedup_hit",
     "stopped",
+    "remeasure_ready",
 ]
 
 
@@ -100,6 +101,23 @@ class DedupHit(FrozenModel):
     original_claim: str
 
 
+class RemeasureReady(FrozenModel):
+    """The Integrator's paired remeasure of a rebased candidate on baseline@k (D74).
+
+    It goes to the Integrator only; it never creates a follow-up task for a worker.
+    """
+
+    request_id: str
+    candidate: str
+    parent_candidate: str
+    claim_id: str
+    baseline: str
+    paired: Paired
+    score: float
+    level: str
+    constraint_ok: bool | None = None
+
+
 class Stopped(FrozenModel):
     reason: Literal["budget", "target", "all_frozen", "plateau", "human", "time"]
 
@@ -114,6 +132,7 @@ EventPayload = (
     | MapUpdated
     | DedupHit
     | Stopped
+    | RemeasureReady
 )
 
 PAYLOAD_MODELS: dict[str, type[EventPayload]] = {
@@ -126,6 +145,7 @@ PAYLOAD_MODELS: dict[str, type[EventPayload]] = {
     "map_updated": MapUpdated,
     "dedup_hit": DedupHit,
     "stopped": Stopped,
+    "remeasure_ready": RemeasureReady,
 }
 
 
