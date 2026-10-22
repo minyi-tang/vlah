@@ -1,0 +1,230 @@
+"""The eval client: validation, the ladder, confirmation, dedup, gates, remeasures (v2.2 section 9)."""
+
+from dataclasses import dataclass, field
+from pathlib import Path
+
+import pytest
+
+from tests.fixtures.eval_harness import WORKER, make_eval_harness, source_declaration
+from vlah.adapters.memory.signal_source import FakeSlowSource
+from vlah.arms.config import PRESETS
+from vlah.core.eval.api import RemeasureRequest
+from vlah.core.indexer.api import Hit
+from vlah.core.types.events import RemeasureReady, ResultReady
+from vlah.core.types.ids import ActorId
+from vlah.core.types.params import GateSpec
+from vlah.core.types.sources import ScoreResult, SourceDecl
+from vlah.ports.errors import JudgeBusyError
+from vlah.ports.signal_source import CandidateRef, Dataset
+
+pytestmark = pytest.mark.eval
+
+CHEAP = source_declaration("cheap", 0.1, "2m")
+EXPENSIVE = source_declaration("expensive", 10.0, "6h")
+
+
+@pytest.mark.parametrize(
+    ("fields", "error_part"),
+    [
+        ({"predictions": {}}, "predictions are required"),
+        ({"rationale": "  "}, "rationale"),
+        ({"parents": ["deadbeef"]}, "unknown parent"),
+    ],
+)
+def test_invalid_requests_are_refused_before_anything_is_written(
+    tmp_path: Path, fields: dict[str, object], error_part: str
+) -> None:
+    harness = make_eval_harness(tmp_path)
+    request = harness.request(harness.candidate(1.0)).model_copy(update=fields)
+    response = harness.service.request(request, WORKER)
+    assert response.status == "invalid_request"
+    assert response.error is not None and error_part in response.error
+    assert harness.blackboard.list_paths("", None) == ()
+
+
+def test_ladder_climbs_by_cost_and_stops_when_a_level_shows_no_gain(
+    tmp_path: Path,
+) -> None:
+    harness = make_eval_harness(tmp_path, declarations=(EXPENSIVE, CHEAP))
+    winner = harness.service.request(harness.request(harness.candidate(2.0)), WORKER)
+    loser = harness.service.request(harness.request(harness.candidate(-1.0)), WORKER)
+    events = harness.run(seconds=8 * 3600)
+    statuses = [
+        (event.target, event.to) for event in events if event.type == "claim_status"
+    ]
+    assert (winner.claim_id, "verified:cheap") in statuses
+    assert (winner.claim_id, "verified:expensive") in statuses
+    assert (loser.claim_id, "verified:cheap") in statuses
+    assert (
+        loser.claim_id,
+        "verified:expensive",
+    ) not in statuses, "no gain, no promotion"
+    results = {
+        event.data.claim_id: event.data
+        for event in events
+        if event.type == "result_ready" and isinstance(event.data, ResultReady)
+    }
+    assert winner.claim_id is not None and loser.claim_id is not None
+    assert results[winner.claim_id].level == "expensive"
+    assert results[loser.claim_id].level == "cheap"
+    assert len(results) == 2, "one result_ready per request, when its ladder ends"
+
+
+def test_a_confirm_token_works_once_and_only_for_its_caller(tmp_path: Path) -> None:
+    harness = make_eval_harness(tmp_path)
+    harness.indexer.candidate_hits = (
+        Hit(
+            item_id="c-old",
+            kind="candidate",
+            similarity=0.97,
+            summary="almost the same",
+        ),
+    )
+    directory = harness.candidate(1.0)
+    first = harness.service.request(harness.request(directory), WORKER)
+    assert first.status == "needs_confirmation"
+    with_token = harness.request(directory, confirm_token=first.confirm_token)
+    assert (
+        harness.service.request(with_token, ActorId("worker-08")).status
+        == "invalid_request"
+    )
+    second = harness.service.request(harness.request(directory), WORKER)
+    queued = harness.service.request(
+        harness.request(directory, confirm_token=second.confirm_token), WORKER
+    )
+    assert queued.status == "queued"
+    reused = harness.service.request(
+        harness.request(harness.candidate(2.0), confirm_token=second.confirm_token),
+        WORKER,
+    )
+    assert reused.status == "invalid_request", "a used token is gone"
+
+
+def test_b1_runs_duplicates_and_asks_nothing(tmp_path: Path) -> None:
+    """B1 has no sharing: duplicates really run and are billed (D58)."""
+    harness = make_eval_harness(tmp_path, arm=PRESETS["B1"])
+    harness.indexer.candidate_hits = (
+        Hit(item_id="c-old", kind="candidate", similarity=0.99, summary="same"),
+    )
+    directory = harness.candidate(1.0)
+    first = harness.service.request(harness.request(directory), WORKER)
+    second = harness.service.request(harness.request(directory), WORKER)
+    assert (first.status, second.status) == ("queued", "queued")
+    harness.run(seconds=3600)
+    assert len(harness.sources[0].jobs) == 2
+    assert len(harness.budget.records) == 2
+
+
+def test_the_worker_is_the_actor_and_the_bytes_are_unchanged(tmp_path: Path) -> None:
+    """The quota-discipline metric matches submissions to tb fast runs by hash (TB section 11.5)."""
+    harness = make_eval_harness(tmp_path)
+    directory = harness.candidate(1.0)
+    original_bytes = {path.name: path.read_bytes() for path in directory.iterdir()}
+    harness.service.request(harness.request(directory), WORKER)
+    harness.run(seconds=3600)
+    (job,) = harness.sources[0].jobs.values()
+    assert job.actor == WORKER
+    assert {
+        path.name: path.read_bytes() for path in directory.iterdir()
+    } == original_bytes
+
+
+@dataclass(kw_only=True)
+class BusyOnceSource:
+    """A judge that answers its first submission with "busy until 1800 s"."""
+
+    inner: FakeSlowSource
+    submit_times: list[float] = field(default_factory=list[float])
+
+    @property
+    def declaration(self) -> SourceDecl:
+        return self.inner.declaration
+
+    def submit(
+        self, candidate: CandidateRef, actor: ActorId, baseline: str, dataset: Dataset
+    ) -> str:
+        self.submit_times.append(self.inner.clock.now_seconds())
+        if len(self.submit_times) == 1:
+            raise JudgeBusyError(retry_at_seconds=1800.0)
+        else:
+            return self.inner.submit(candidate, actor, baseline, dataset)
+
+    def poll(self, job_id: str) -> ScoreResult | None:
+        return self.inner.poll(job_id)
+
+
+def test_a_busy_judge_is_retried_at_the_time_it_gives(tmp_path: Path) -> None:
+    harness = make_eval_harness(tmp_path)
+    busy_source = BusyOnceSource(inner=harness.sources[0])
+    harness.service.ladder = (busy_source,)
+    harness.service.request(harness.request(harness.candidate(1.0)), WORKER)
+    harness.run(seconds=7200, steps=8)
+    assert busy_source.submit_times[0] == 0.0
+    assert busy_source.submit_times[1] >= 1800.0
+    assert len(harness.sources[0].jobs) == 1
+
+
+def test_constraint_failure_refutes_and_records_a_dead_end(tmp_path: Path) -> None:
+    harness = make_eval_harness(tmp_path)
+    response = harness.service.request(
+        harness.request(harness.candidate(5.0, constraint_ok=False)), WORKER
+    )
+    events = harness.run(seconds=3600)
+    assert (response.claim_id, "refuted") in [
+        (event.target, event.to) for event in events if event.type == "claim_status"
+    ]
+    dead_ends = harness.blackboard.list_paths("claims/eval_service/", None)
+    assert any(
+        b"gate:constraint" in harness.blackboard.read(path, None) for path in dead_ends
+    )
+
+
+def test_remeasure_runs_once_at_the_top_level_for_the_integrator(
+    tmp_path: Path,
+) -> None:
+    """D74: one paired remeasure at the slow tier, outside dedup and confirmation."""
+    harness = make_eval_harness(tmp_path, declarations=(CHEAP, EXPENSIVE))
+    original = harness.service.request(
+        harness.request(harness.candidate(2.0, name="c")), WORKER
+    )
+    harness.run(seconds=8 * 3600)
+    harness.indexer.candidate_hits = (
+        Hit(item_id="c", kind="candidate", similarity=1.0, summary="the original"),
+    )
+    rebased = harness.candidate(1.5, name="rebased")
+    request_id = harness.service.remeasure(
+        RemeasureRequest(
+            candidate_directory=rebased,
+            baseline="baseline@0",
+            parent_candidate=original.request_id,
+            approach="a-01",
+        )
+    )
+    events = harness.run(seconds=8 * 3600)
+    remeasures = [
+        event.data for event in events if isinstance(event.data, RemeasureReady)
+    ]
+    assert [remeasure.request_id for remeasure in remeasures] == [request_id]
+    assert remeasures[0].level == "expensive"
+    assert remeasures[0].paired.mean == 1.5
+    integrator_jobs = [
+        job
+        for source in harness.sources
+        for job in source.jobs.values()
+        if job.actor == "integrator"
+    ]
+    assert [job.job_id.split("-")[0] for job in integrator_jobs] == ["expensive"]
+    assert not any(event.type == "result_ready" for event in events)
+
+
+def test_post_result_gates_refute(tmp_path: Path) -> None:
+    harness = make_eval_harness(
+        tmp_path,
+        gates=(GateSpec(name="latency", command="check", when=("post_result",)),),
+    )
+    harness.gates.failing.add("latency")
+    response = harness.service.request(harness.request(harness.candidate(3.0)), WORKER)
+    events = harness.run(seconds=3600)
+    assert (response.claim_id, "refuted") in [
+        (event.target, event.to) for event in events if event.type == "claim_status"
+    ]

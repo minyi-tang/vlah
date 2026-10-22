@@ -10,10 +10,11 @@ import json
 from collections.abc import Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
+from random import Random
 
 import yaml
 
-from tests.fixtures.fakes import FakeBlackboard, make_fake_components
+from tests.fixtures.fakes import FakeBlackboard, RecordingBudget, make_fake_components
 from vlah.adapters.memory.executor import (
     MemoryExecutor,
     ScriptedHarness,
@@ -26,15 +27,18 @@ from vlah.arms.config import ArmConfig
 from vlah.core.blackboard.api import Blackboard
 from vlah.core.blackboard.blackboard import StoreBlackboard
 from vlah.core.eval.api import EvalRequest, EvalService
+from vlah.core.eval.jobs import GateOutcome
+from vlah.core.eval.service import LadderEvalService
 from vlah.core.queue.queue import KeyValueLeases, KeyValueTaskQueue
 from vlah.core.types.candidates import CandidateManifest
 from vlah.core.types.claims import Claim, EvidenceRef, render_claim
 from vlah.core.types.clock import FakeClock
 from vlah.core.types.ids import ActorId, format_claim_id
-from vlah.core.types.params import Params
+from vlah.core.types.params import GateSpec, Params
 from vlah.core.types.sources import SourceBudget, SourceDecl
 from vlah.core.types.tasks import Task
 from vlah.ports.harness import Workspace
+from vlah.ports.signal_source import Dataset
 from vlah.ports.store import VersionedStore
 from vlah.runtime.wiring import SteppedHerd, build_stepped_herd
 
@@ -162,6 +166,18 @@ class ToyHerd:
 
 
 TOY_PUSH_TOKEN = "toy-push-token"
+TOY_SEED_COUNT = 5
+
+
+def zero_baseline_scores(
+    source_id: str, baseline: str, dataset: Dataset
+) -> tuple[float, ...]:
+    """The toy baseline scores zero on every seed, so a paired gain equals the score."""
+    return (0.0,) * TOY_SEED_COUNT
+
+
+def passing_gate(gate: GateSpec, candidate_directory: Path) -> GateOutcome:
+    return GateOutcome(passed=True, output="")
 
 
 class MemoryMirrorStores:
@@ -190,7 +206,8 @@ def make_toy_herd(
     use_real_components: bool = False,
 ) -> ToyHerd:
     """use_real_components swaps in every real component that exists so far, over
-    in-memory stores: the blackboard (W1-01) and the queue and leases (W1-03)."""
+    in-memory stores: the blackboard (W1-01), the queue and leases (W1-03) and the
+    eval client (W1-04)."""
     clock = FakeClock()
     source = FakeSlowSource(clock=clock, declaration=TOY_SOURCE)
     params = Params(slots_per_approach={TOY_APPROACH: worker_count})
@@ -210,6 +227,19 @@ def make_toy_herd(
                 blackboard=blackboard,
                 clock=clock,
                 lease_ttl_seconds=params.lease_ttl_seconds,
+            ),
+            eval_service=LadderEvalService(
+                blackboard=blackboard,
+                sources=(source,),
+                indexer=components.indexer,
+                budget=RecordingBudget(),
+                gates=(),
+                gate_runner=passing_gate,
+                baseline_scores=zero_baseline_scores,
+                arm=arm,
+                params=params,
+                clock=clock,
+                random=Random(0),
             ),
         )
     else:
