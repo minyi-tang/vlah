@@ -50,9 +50,12 @@ BASELINE_PER_SEED = [-120.0, -118.0, -125.0]
 class FakeSlowTierState:
     clock: FakeClock
     submissions_left: int = 100
+    next_slot_at: float | None = 3600.0
     tickets: dict[str, float] = field(default_factory=dict[str, float])
     archives: list[bytes] = field(default_factory=list[bytes])
     run_headers: list[str] = field(default_factory=list[str])
+    key_headers: list[str] = field(default_factory=list[str])
+    status_actors: list[str] = field(default_factory=list[str])
     events: list[object] = field(default_factory=list[object])
 
 
@@ -71,6 +74,7 @@ def handler_for(state: FakeSlowTierState) -> type[BaseHTTPRequestHandler]:
 
         def do_GET(self) -> None:
             state.run_headers.append(self.headers.get(RUN_HEADER, ""))
+            state.key_headers.append(self.headers.get("X-TB-Key", ""))
             if self.path == "/meta":
                 self.reply(
                     200,
@@ -83,6 +87,7 @@ def handler_for(state: FakeSlowTierState) -> type[BaseHTTPRequestHandler]:
                     },
                 )
             elif self.path.startswith("/status/"):
+                state.status_actors.append(self.headers.get("X-TB-Actor", ""))
                 ticket = self.path.removeprefix("/status/")
                 if state.clock.now_seconds() >= state.tickets[ticket]:
                     self.reply(
@@ -111,7 +116,9 @@ def handler_for(state: FakeSlowTierState) -> type[BaseHTTPRequestHandler]:
             assert isinstance(body, dict)
             if self.path == "/submit":
                 if state.submissions_left <= 0:
-                    self.reply(429, {"reason": "quota", "next_slot_at": 3600.0})
+                    self.reply(
+                        429, {"reason": "quota", "next_slot_at": state.next_slot_at}
+                    )
                 else:
                     state.submissions_left -= 1
                     state.archives.append(base64.b64decode(str(body["zip_b64"])))
@@ -136,7 +143,9 @@ def slow_tier() -> Iterator[tuple[SlowTierClient, FakeSlowTierState]]:
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     host, port = server.server_address[0], server.server_address[1]
-    yield SlowTierClient(base_url=f"http://{host!s}:{port}", run_id="r-test"), state
+    yield SlowTierClient(
+        base_url=f"http://{host!s}:{port}", run_id="r-test", system_key="system-key"
+    ), state
     server.shutdown()
     server.server_close()
 
@@ -178,6 +187,10 @@ def test_slow_tier_passes_the_signal_source_check(
         ServerTimer(clock=state.clock),
     )
     assert set(state.run_headers) == {"r-test"}, "every request names its run"
+    assert set(state.key_headers) == {
+        "system-key"
+    }, "the eval client is a trusted service"
+    assert set(state.status_actors) == {"worker-07"}, "status is asked as the submitter"
 
 
 def test_submission_carries_the_unchanged_payload_and_the_worker(
@@ -198,6 +211,19 @@ def test_submission_carries_the_unchanged_payload_and_the_worker(
         "note": "",
         "target": "baseline@2",
     }
+
+
+def test_a_used_up_quota_is_busy_for_the_rest_of_the_run(
+    tmp_path: Path, slow_tier: tuple[SlowTierClient, FakeSlowTierState]
+) -> None:
+    client, state = slow_tier
+    state.submissions_left = 0
+    state.next_slot_at = None
+    with pytest.raises(JudgeBusyError) as busy:
+        SlowTierSource(client=client, declaration=DECLARATION).submit(
+            candidate(tmp_path), WORKER, "baseline@0", "dev"
+        )
+    assert busy.value.retry_at_seconds == float("inf")
 
 
 def test_a_full_hour_becomes_judge_busy(

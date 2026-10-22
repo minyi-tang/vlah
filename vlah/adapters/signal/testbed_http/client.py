@@ -1,15 +1,18 @@
 """The testbed's slow tier as a SignalSource, its recorder, and its baseline scores
 (Herd Testbed section 11.3, 11.4).
 
-Every request carries X-TB-Run, so quota, queue and records stay per run. A
-candidate is submitted as a zip of its payload plus a testbed manifest naming the
-worker as the actor; the bytes are exactly what the worker ran tb fast on, so the
-quota-discipline metric can match them by hash.
+Every request carries X-TB-Run, so quota, queue and records stay per run. The
+herd's eval client is a trusted service: it sends the testbed's system key
+(X-TB-Key), which the workers' sandboxes cannot read, and names the actor it acts
+for (X-TB-Actor). A candidate is submitted as a zip of its payload plus a testbed
+manifest naming the worker as the actor; the bytes are exactly what the worker ran
+tb fast on, so the quota-discipline metric can match them by hash.
 """
 
 import base64
 import io
 import json
+import math
 import urllib.error
 import urllib.request
 import zipfile
@@ -28,6 +31,8 @@ from vlah.ports.signal_source import CandidateRef, Dataset
 from vlah.tools.api import RecorderEvent
 
 RUN_HEADER = "X-TB-Run"
+KEY_HEADER = "X-TB-Key"
+ACTOR_HEADER = "X-TB-Actor"
 REQUEST_TIMEOUT_SECONDS = 30.0
 BASELINE_ZERO = "baseline@0"
 
@@ -72,19 +77,33 @@ class HttpReply:
 class SlowTierClient:
     base_url: str
     run_id: str
+    system_key: str | None
 
     def call(
-        self, method: str, path: str, body: dict[str, JsonValue] | None
+        self,
+        method: str,
+        path: str,
+        body: dict[str, JsonValue] | None,
+        actor: ActorId | None = None,
     ) -> HttpReply:
         if body is None:
             data = None
         else:
             data = json.dumps(body).encode("utf-8")
+        headers = {RUN_HEADER: self.run_id, "Content-Type": "application/json"}
+        if self.system_key is not None:
+            headers[KEY_HEADER] = self.system_key
+        else:
+            pass
+        if actor is not None:
+            headers[ACTOR_HEADER] = actor
+        else:
+            pass
         request = urllib.request.Request(
             f"{self.base_url.rstrip('/')}{path}",
             data=data,
             method=method,
-            headers={RUN_HEADER: self.run_id, "Content-Type": "application/json"},
+            headers=headers,
         )
         try:
             with urllib.request.urlopen(
@@ -140,6 +159,7 @@ class SlowTierSource:
     def __init__(self, *, client: SlowTierClient, declaration: SourceDecl) -> None:
         self.client = client
         self.source_declaration = declaration
+        self.actor_by_ticket: dict[str, ActorId] = {}
 
     @property
     def declaration(self) -> SourceDecl:
@@ -155,22 +175,25 @@ class SlowTierSource:
             "POST", "/submit", {"zip_b64": zip_text, "dataset": dataset}
         )
         if reply.status == 200:
-            return SubmitReply.model_validate(reply.body).ticket
+            ticket = SubmitReply.model_validate(reply.body).ticket
+            self.actor_by_ticket[ticket] = actor
+            return ticket
         elif reply.status == 429 and isinstance(reply.body, dict):
             retry_at: object = reply.body.get("next_slot_at")
             if isinstance(retry_at, int | float):
                 raise JudgeBusyError(float(retry_at))
             else:
-                raise RuntimeError(
-                    f"a 429 from the slow tier without next_slot_at: {reply.body}"
-                )
+                # No next slot: this quota is used up for the rest of the run.
+                raise JudgeBusyError(math.inf)
         else:
             raise ValueError(
                 f"the slow tier refused the candidate ({reply.status}): {reply.body}"
             )
 
     def poll(self, job_id: str) -> ScoreResult | None:
-        reply = self.client.call("GET", f"/status/{job_id}", None)
+        reply = self.client.call(
+            "GET", f"/status/{job_id}", None, actor=self.actor_by_ticket.get(job_id)
+        )
         if reply.status != 200:
             raise RuntimeError(
                 f"the slow tier status call failed ({reply.status}): {reply.body}"
