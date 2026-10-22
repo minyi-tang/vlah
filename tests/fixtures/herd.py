@@ -5,6 +5,7 @@ records an insight. On a result follow-up it records what it saw. The fake judge
 scores each worker's candidate on five seeds after a ten-minute latency.
 """
 
+import dataclasses
 import json
 from collections.abc import Iterator
 from dataclasses import dataclass, field
@@ -20,11 +21,12 @@ from vlah.adapters.memory.executor import (
     ScriptedSession,
 )
 from vlah.adapters.memory.signal_source import FAKE_SCORE_FILE_NAME, FakeSlowSource
-from vlah.adapters.memory.store import MemoryVersionedStore
+from vlah.adapters.memory.store import MemoryKeyValueStore, MemoryVersionedStore
 from vlah.arms.config import ArmConfig
 from vlah.core.blackboard.api import Blackboard
 from vlah.core.blackboard.blackboard import StoreBlackboard
 from vlah.core.eval.api import EvalRequest, EvalService
+from vlah.core.queue.queue import KeyValueLeases, KeyValueTaskQueue
 from vlah.core.types.candidates import CandidateManifest
 from vlah.core.types.claims import Claim, EvidenceRef, render_claim
 from vlah.core.types.clock import FakeClock
@@ -170,27 +172,50 @@ class MemoryMirrorStores:
         )
 
 
+def make_store_blackboard(clock: FakeClock, name: str = "toy") -> StoreBlackboard:
+    """The real blackboard (W1-01) over the memory store, with all its write checks."""
+    return StoreBlackboard(
+        store=MemoryVersionedStore(name=name, push_token=TOY_PUSH_TOKEN),
+        push_token=TOY_PUSH_TOKEN,
+        objects=None,
+        mirror_store_factory=MemoryMirrorStores(),
+        clock=clock,
+    )
+
+
 def make_toy_herd(
     tmp_path: Path,
     arm: ArmConfig,
     worker_count: int = 2,
-    is_store_blackboard: bool = False,
+    use_real_components: bool = False,
 ) -> ToyHerd:
-    """is_store_blackboard runs the real blackboard (W1-01) over the memory store, with all its checks."""
+    """use_real_components swaps in every real component that exists so far, over
+    in-memory stores: the blackboard (W1-01) and the queue and leases (W1-03)."""
     clock = FakeClock()
     source = FakeSlowSource(clock=clock, declaration=TOY_SOURCE)
-    if is_store_blackboard:
-        blackboard: Blackboard = StoreBlackboard(
-            store=MemoryVersionedStore(name="toy", push_token=TOY_PUSH_TOKEN),
-            push_token=TOY_PUSH_TOKEN,
-            objects=None,
-            mirror_store_factory=MemoryMirrorStores(),
-            clock=clock,
+    params = Params(slots_per_approach={TOY_APPROACH: worker_count})
+    if use_real_components:
+        blackboard: Blackboard = make_store_blackboard(clock)
+        components = make_fake_components(
+            clock=clock, source=source, blackboard=blackboard
+        )
+        key_value_store = MemoryKeyValueStore(clock=clock, namespace="toy")
+        task_queue = KeyValueTaskQueue(store=key_value_store)
+        components = dataclasses.replace(
+            components,
+            task_queue=task_queue,
+            leases=KeyValueLeases(
+                store=key_value_store,
+                task_queue=task_queue,
+                blackboard=blackboard,
+                clock=clock,
+                lease_ttl_seconds=params.lease_ttl_seconds,
+            ),
         )
     else:
-        blackboard = FakeBlackboard(name="toy")
-    components = make_fake_components(clock=clock, source=source, blackboard=blackboard)
-    params = Params(slots_per_approach={TOY_APPROACH: worker_count})
+        components = make_fake_components(
+            clock=clock, source=source, blackboard=FakeBlackboard(name="toy")
+        )
     worker = ToyWorker(
         blackboard=components.blackboard,
         eval_service=components.eval_service,
