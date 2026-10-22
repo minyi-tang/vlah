@@ -299,7 +299,7 @@ class FakeTaskQueue:
         assert isinstance(event.data, ResultReady)
         task = Task(
             id=self.next_task_id(),
-            approach=event.target or "unknown",
+            approach=event.data.approach,
             kind="result_followup",
             goal=f"Decide the next step from the result of candidate {event.data.candidate}",
             refs=(event.data.claim_id, event.data.candidate),
@@ -490,6 +490,7 @@ class FakeEvalService:
                     data=ResultReady(
                         candidate=job.candidate_hash,
                         claim_id=job.claim_id,
+                        approach=job.approach,
                         submitter=job.submitter,
                         submitter_checkpoint=None,
                         baseline=job.baseline,
