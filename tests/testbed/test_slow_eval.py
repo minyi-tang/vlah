@@ -3,7 +3,15 @@
 import pytest
 
 from testbed.cli.client import ServiceError
+from testbed.slow_eval.testing import InProcessService
 from tests.testbed.helpers import stub_candidate
+
+
+@pytest.fixture
+def svc(tmp_path):
+    service = InProcessService(tmp_path)
+    yield service
+    service.close()
 
 
 def test_missing_run_header_rejected(svc):
