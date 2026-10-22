@@ -212,6 +212,7 @@ class MemoryAssembly:
             clock=self.clock,
             programs={},
             heartbeat_interval_seconds=context.params.heartbeat_interval_seconds,
+            sandbox_root=context.run_root / "sandboxes",
         )
         tools = HerdTools(
             blackboard=blackboard,

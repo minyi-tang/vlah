@@ -25,17 +25,23 @@ logger = logging.getLogger(__name__)
 SCRIPTED_COMMAND = "scripted"
 TOOL_URL_VARIABLE = "VLAH_TOOL_URL"
 TOOL_TOKEN_VARIABLE = "VLAH_TOOL_TOKEN"
+HERD_DIRECTORY = ".vlah"
 
 
 @dataclass(kw_only=True)
 class ScriptedSession:
-    """What a scripted program sees; files_touched is what heartbeats report."""
+    """What a scripted program sees; files_touched is what heartbeats report.
+
+    transcript_path is where the executor says this process's transcript is; a
+    program that wants the harness to read something writes it there.
+    """
 
     agent: ActorId
     task: Task
     start_pack: StartPack
     spec: AgentSpec
     clock: FakeClock
+    transcript_path: Path
     files_touched: set[str] = field(default_factory=set[str])
 
 
@@ -60,7 +66,11 @@ class ScriptedProcess:
 
 
 class MemoryExecutor:
-    """Runs scripted programs named by AgentSpec.command, on a fake clock."""
+    """Runs scripted programs named by AgentSpec.command, on a fake clock.
+
+    Nothing is written under sandbox_root unless a program does; the paths only
+    tell the worker loop and the tool server where a task's files would be.
+    """
 
     def __init__(
         self,
@@ -68,12 +78,18 @@ class MemoryExecutor:
         clock: FakeClock,
         programs: dict[str, ScriptedProgram],
         heartbeat_interval_seconds: float,
+        sandbox_root: Path,
     ) -> None:
         self.clock = clock
         self.programs = programs
         self.heartbeat_interval_seconds = heartbeat_interval_seconds
+        self.sandbox_root = sandbox_root
         self.processes: dict[str, ScriptedProcess] = {}
+        self.base_revisions: dict[tuple[ActorId, str], str] = {}
         self.started_count = 0
+
+    def sandbox_path(self, agent: ActorId, task_id: str) -> Path:
+        return self.sandbox_root / agent / task_id
 
     def start(
         self,
@@ -98,7 +114,11 @@ class MemoryExecutor:
                 start_pack=start_pack,
                 spec=spec,
                 clock=self.clock,
+                transcript_path=self.sandbox_path(spec.agent, task.id)
+                / HERD_DIRECTORY
+                / f"{handle.handle_id}.transcript.jsonl",
             )
+            self.base_revisions[(spec.agent, task.id)] = spec.target_ref
             now_seconds = self.clock.now_seconds()
             process = ScriptedProcess(
                 handle=handle,
@@ -202,6 +222,13 @@ class MemoryExecutor:
                 )
             return process.exit_info
 
+    def transcript_path(self, handle: Handle) -> Path:
+        return self.processes[handle.handle_id].session.transcript_path
+
+    def base_revision(self, agent: ActorId, task_id: str) -> str:
+        """A scripted target has no history, so its base is the ref the spec named."""
+        return self.base_revisions[(agent, task_id)]
+
     def checkpoint(self, handle: Handle) -> bytes:
         raise NotSupportedError("scripted programs cannot be checkpointed")
 
@@ -260,6 +287,13 @@ class ScriptedHarness:
         return ContextUsage.model_validate_json(
             transcript_path.read_text(encoding="utf-8")
         )
+
+    def recent_tool_calls(self, transcript_path: Path, count: int) -> tuple[str, ...]:
+        """A scripted program makes no model calls, so a transcript lists no tools."""
+        return ()
+
+    def rate_limit_retries(self, transcript_path: Path) -> int:
+        return 0
 
     def export_state(self, handle: Handle) -> bytes:
         raise NotSupportedError("scripted programs have no conversation to export")
