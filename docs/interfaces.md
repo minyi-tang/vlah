@@ -104,6 +104,23 @@ Seven fields are required: `id`, `mode`, `latency`, `budget`, `cost_machine_hour
 
 Workers never see this file. It parses into `HerdConfig` in `vlah/core/problem/api.py`: `judges`, `executor`, `harness`, `stores`, `models` and `human`.
 
+### Router rules
+
+`vlah/core/router/rules.default.yaml` lists the router's rules (v2.2 section 8). A rule changes by editing this file, without a code change. Each entry has these fields:
+
+| Field | Meaning |
+|---|---|
+| `id` | unique name, used to deduplicate interrupts |
+| `rule` | the rule number from v2.2 section 8, reported on each interrupt |
+| `events` | event types that trigger it, or `claim` for a newly merged claim (not `on`, which YAML reads as true) |
+| `match` | one lease predicate from the fixed set in `vlah/core/router/rules.py`; a file naming another fails to load |
+| `kind` | `hard` blocks the agent's next tool call; `soft` waits for its next sync point |
+| `priority` | among pending hard interrupts, the lowest number is shown and the rest are counted |
+| `enabled_by` | the `ArmConfig` flag that turns the rule on: `router_rule1`, `router_rules_2_5` or `router_rule6_baseline_push` |
+| `reason` | the text the agent sees; a template whose fields are listed in `rules.py` |
+
+Rule 7 ("everything else waits for the diff") is the absence of a matching rule.
+
 ## Blackboard
 
 ### Layout and who may create files
