@@ -10,12 +10,12 @@ import pytest
 
 from tests.fixtures.runtime import (
     MemoryAssembly,
-    SwitchedRouter,
     WaitingRunner,
     random_for_tests,
     toy_problem,
 )
 from vlah.arms.config import ArmName
+from vlah.core.router.router import KeyValueRouter
 from vlah.core.types.claims import Claim, EvidenceRef, render_claim
 from vlah.core.types.clock import FakeClock
 from vlah.core.types.ids import ActorId
@@ -48,7 +48,7 @@ def test_l0_10_arm_switches(tmp_path: Path, arm: ArmName, is_on: bool) -> None:
     components = run.components
     tools = components.registry
     router = components.router
-    assert isinstance(tools, HerdTools) and isinstance(router, SwitchedRouter)
+    assert isinstance(tools, HerdTools) and isinstance(router, KeyValueRouter)
     assert tools.arm is run.context.arm and router.arm is run.context.arm
 
     tools.register_agent(WORKER, tmp_path)

@@ -5,6 +5,7 @@ metrics) are fakes here. The router and indexer fakes honor the arm's switches, 
 the runtime's wiring of one ArmConfig into every component is observable (L0-10).
 """
 
+import json
 import threading
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -20,12 +21,15 @@ from tests.fixtures.worker import (
     TranscriptHarness,
 )
 from vlah.adapters.memory.executor import MemoryExecutor, ScriptedHarness
+from vlah.adapters.memory.store import MemoryKeyValueStore
 from vlah.arms.config import ArmConfig
 from vlah.core.blackboard.api import MergedCommit, PublicProblemFiles
 from vlah.core.indexer.api import Diff, Hit, WorkingSet
 from vlah.core.metrics.api import StandingMetrics
 from vlah.core.problem.api import AdapterChoice, HerdConfig, Problem
 from vlah.core.queue.api import Leases
+from vlah.core.router.api import Router
+from vlah.core.router.router import KeyValueRouter
 from vlah.core.types.baseline import BaselineRecord
 from vlah.core.types.clock import FakeClock
 from vlah.core.types.events import Event
@@ -190,9 +194,14 @@ class ZeroMetrics:
 
 @dataclass(kw_only=True)
 class MemoryAssembly:
-    """Builds every component from fakes and in-memory stores; remembers what it built."""
+    """Builds every component from fakes and in-memory stores; remembers what it built.
+
+    The router is the real one over a memory key-value store; use_real_router False
+    swaps in SwitchedRouter, whose overdue and failures a test can script.
+    """
 
     clock: FakeClock
+    use_real_router: bool = True
     root: Path
     contexts: list[RunContext] = field(default_factory=list[RunContext])
     built: list[RunComponents] = field(default_factory=list[RunComponents])
@@ -203,7 +212,20 @@ class MemoryAssembly:
         blackboard.write(ActorId("human"), {"spec.md": b"# Toy\n"}, "spec")
         leases = FakeLeases(clock=self.clock)
         indexer = SwitchedIndexer()
-        router = SwitchedRouter(arm=context.arm, leases=leases)
+        router: Router
+        if self.use_real_router:
+            router = KeyValueRouter(
+                store=MemoryKeyValueStore(
+                    clock=self.clock, namespace=f"{context.run_id}-router"
+                ),
+                leases=leases,
+                indexer=indexer,
+                arm=context.arm,
+                params=context.params,
+                clock=self.clock,
+            )
+        else:
+            router = SwitchedRouter(arm=context.arm, leases=leases)
         executor = MemoryExecutor(
             clock=self.clock,
             programs={},
@@ -268,3 +290,28 @@ class WaitingRunner:
 
 def random_for_tests() -> Random:
     return Random(0)
+
+
+def result_ready_event(submitter: ActorId, local_number: int = 1) -> str:
+    """A result_ready event file as the eval service writes it."""
+    return json.dumps(
+        {
+            "local_id": f"eval_service/{local_number:05d}",
+            "ts": 0.0,
+            "actor": "eval_service",
+            "role": "eval_service",
+            "type": "result_ready",
+            "data": {
+                "candidate": "9f3a",
+                "claim_id": "c-eval_service-00001",
+                "approach": "a-01",
+                "submitter": submitter,
+                "submitter_checkpoint": None,
+                "baseline": "baseline@0",
+                "paired": {"mean": 0.1, "se": 0.01, "n_items": 5, "n_reps": 1},
+                "per_item": "",
+                "score": 1.0,
+                "level": "toy_slow",
+            },
+        }
+    )

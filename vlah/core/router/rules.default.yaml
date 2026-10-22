@@ -1,0 +1,71 @@
+# The router's rules (v2.2 section 8). Each entry fires when an event of one of the
+# `events` types (or `claim`: a newly merged claim) meets the lease predicate `match`.
+# `match` names one predicate from vlah/core/router/rules.py. `kind` is hard (stop
+# the current tool call) or soft (wait for the next sync point). `priority` orders
+# pending hard interrupts: the lower number is kept and shown first. `enabled_by`
+# names the ArmConfig flag that turns the rule on (D58). `reason` is a template;
+# its fields are listed in rules.py. Rule 7, everything else, is the absence of a
+# rule: it waits for diff_since.
+
+- id: result-ready
+  rule: 1
+  events: [result_ready]
+  match: submitted_by_agent
+  kind: hard
+  priority: 6
+  enabled_by: router_rule1
+  reason: "The result for candidate {candidate} has arrived. Go claim the follow-up task whose for_agent is you."
+
+- id: target-changed
+  rule: 2
+  events: [claim_status]
+  match: targets_lease_claim
+  kind: hard
+  priority: 3
+  enabled_by: router_rules_2_5
+  reason: "{target}, which your task is about, moved to {to}. {event_reason}"
+
+- id: approach-closed
+  rule: 3
+  events: [approach_status, allocation]
+  match: closes_lease_approach
+  kind: hard
+  priority: 2
+  enabled_by: router_rules_2_5
+  reason: "Your approach {approach} is now {to}. {event_reason}"
+
+- id: dependency-refuted
+  rule: 4
+  events: [claim_status]
+  match: refutes_dependency_confirmed
+  kind: hard
+  priority: 4
+  enabled_by: router_rules_2_5
+  reason: "{target}, which your work depends on, was refuted by {actor}. {event_reason}"
+
+- id: human-input
+  rule: 5
+  events: [claim]
+  match: human_claim_on_approach
+  kind: hard
+  priority: 1
+  enabled_by: router_rules_2_5
+  reason: "A human wrote {claim} about your approach {approach}. Read it before you continue."
+
+- id: rebase-overlap
+  rule: 6
+  events: [baseline_advanced]
+  match: touches_lease_files
+  kind: hard
+  priority: 5
+  enabled_by: router_rule6_baseline_push
+  reason: "Baseline {baseline} merged changes to files you touched ({files}). Rebase onto the new baseline."
+
+- id: rebase-elsewhere
+  rule: 6
+  events: [baseline_advanced]
+  match: misses_lease_files
+  kind: soft
+  priority: 5
+  enabled_by: router_rule6_baseline_push
+  reason: "Baseline {baseline} advanced; it does not touch your files."
