@@ -35,5 +35,9 @@ class SignalSource(Protocol):
         ...
 
     def poll(self, job_id: str) -> ScoreResult | None:
-        """The score once it is visible, else None."""
+        """The score once it is visible, else None.
+
+        A judge that answered a repeat from its cache instead of running it says so
+        with is_cached; a first submission of a candidate is always a run.
+        """
         ...

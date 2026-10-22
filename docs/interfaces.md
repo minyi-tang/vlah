@@ -177,3 +177,4 @@ The layout and a test vector are posted on #10. `tests/contract/test_candidate_h
   - `[proposed]` items are gap-fills, recorded in `DECISIONS.md` when they are implemented.
 - **Time is epoch seconds** from an injected `Clock`. Randomness is a seeded `random.Random` passed in by the runtime.
 - **Names follow [coding_style.md](coding_style.md).** Wire-schema names from the spec stay as they are (`seq`, `ts`, `n_items`, `n_reps`, `from`).
+- **A judge may answer a repeat from its cache.** A `SignalSource` that did not run a resubmitted candidate returns its `ScoreResult` with `is_cached: true` (the testbed's `duplicate: true`, TB§11.3); a first submission is always a run. The eval client charges neither quota nor budget for a cache hit, and `n_reps` leaves it out (D73). The fake judge in `vlah/adapters/memory/signal_source.py` caches by actor, candidate hash and dataset.
