@@ -141,7 +141,7 @@ class LadderRunner:
 
     def submit(self, job: EvalJob) -> None:
         level = job.levels[job.level_index]
-        if not self.quota.allows(job.kind, job.caller, level.declaration):
+        if not self.quota.allows(job.kind, job.caller, level.declaration, job.dataset):
             return
         else:
             manifest = job.manifest.model_copy(
@@ -152,15 +152,24 @@ class LadderRunner:
                 payload_directory=job.candidate_directory,
                 manifest=manifest,
             )
-            job.job_id = level.submit(candidate, job.caller, job.baseline, "dev")
+            job.job_id = level.submit(candidate, job.caller, job.baseline, job.dataset)
             job.submitted_at_seconds = self.clock.now_seconds()
             job.error_count = 0
             self.quota.record(
-                job.kind, job.caller, level.declaration.id, job.submitted_at_seconds
+                job.kind,
+                job.caller,
+                level.declaration.id,
+                job.submitted_at_seconds,
+                job.dataset,
             )
 
     def level_end(self, job: EvalJob, score: ScoreResult) -> LevelEnd | None:
-        """Pair and check the level; None while the baseline's scores are not known."""
+        """Pair and check the level; None while the baseline's scores are not known.
+
+        An audit measurement (D72) is never held: when the baseline's audit scores
+        are unknown its paired result is None, and the Integrator pairs the
+        per-seed scores itself.
+        """
         if score.value is None:
             reasons = score.extra.get("reasons") or score.extra.get("error") or "none"
             return LevelEnd(
@@ -172,15 +181,21 @@ class LadderRunner:
             )
         else:
             level_id = job.levels[job.level_index].declaration.id
-            baseline_per_seed = self.baseline_scores(level_id, job.baseline, "dev")
-            if baseline_per_seed is None:
+            baseline_per_seed = self.baseline_scores(
+                level_id, job.baseline, job.dataset
+            )
+            if baseline_per_seed is None and job.dataset == "dev":
                 logger.info(
                     f"holding {job.candidate_hash}: no scores for {job.baseline} yet"
                 )
                 return None
             else:
-                paired = pair_per_seed(
-                    score.per_seed, baseline_per_seed, 0 if score.is_cached else 1
+                paired = (
+                    None
+                    if baseline_per_seed is None
+                    else pair_per_seed(
+                        score.per_seed, baseline_per_seed, 0 if score.is_cached else 1
+                    )
                 )
                 if score.constraint_ok is False:
                     failure: tuple[str, str] | None = (
@@ -207,6 +222,7 @@ class LadderRunner:
                     job.caller,
                     level.declaration.id,
                     job.submitted_at_seconds,
+                    job.dataset,
                 )
             else:
                 self.budget.record(
@@ -256,6 +272,7 @@ class LadderRunner:
                     status=new_status,
                     submitted_at_seconds=job.submitted_at_seconds,
                     is_cached=score.is_cached,
+                    dataset=job.dataset,
                 )
             )
             job.held_score = None
@@ -327,6 +344,10 @@ class LadderRunner:
                     score=score,
                     level=level_id,
                     constraint_ok=constraint_ok,
+                    per_seed=(
+                        job.level_results[-1].per_seed if job.level_results else ()
+                    ),
+                    dataset=job.dataset,
                 ),
             )
         else:

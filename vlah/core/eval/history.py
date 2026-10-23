@@ -94,5 +94,9 @@ def replay_recorded_runs(blackboard: Blackboard, quota: QuotaTracker) -> None:
                     continue
                 else:
                     quota.record(
-                        kind, result.submitter, level.level, level.submitted_at_seconds
+                        kind,
+                        result.submitter,
+                        level.level,
+                        level.submitted_at_seconds,
+                        level.dataset,
                     )

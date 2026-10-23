@@ -2,7 +2,7 @@
 
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Protocol
+from typing import Literal, Protocol
 
 import yaml
 
@@ -35,6 +35,9 @@ class BaselineScores(Protocol):
         ...
 
 
+MeasurementDataset = Literal["dev", "audit"]
+
+
 @dataclass(frozen=True, kw_only=True)
 class ConfirmToken:
     caller: ActorId
@@ -56,6 +59,8 @@ class EvalJob:
     claim_id: str
     predictions: dict[str, float]
     levels: tuple[SignalSource, ...]
+    # The judge's dataset: "dev" for every run but a spot check's audit measurement (D72).
+    dataset: MeasurementDataset = "dev"
     level_index: int = 0
     job_id: str | None = None
     submitted_at_seconds: float | None = None
@@ -85,6 +90,7 @@ class NewJob:
     levels: tuple[SignalSource, ...]
     parent_candidate: str | None
     rationale: str
+    dataset: MeasurementDataset = "dev"
 
 
 def load_manifest(candidate_directory: Path) -> CandidateManifest:
