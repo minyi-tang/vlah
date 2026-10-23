@@ -64,8 +64,9 @@ def measured_claims_by_hash(blackboard: Blackboard) -> dict[str, str]:
 def replay_recorded_runs(blackboard: Blackboard, quota: QuotaTracker) -> None:
     """Charge the quota for every judge run a result.json records, remeasures included.
 
-    A hash has one result.json, so a duplicate that ran again without dedup (B1), or a
-    judge failure that was resubmitted, is counted once.
+    A hash has one result.json, so a duplicate that ran again without dedup (B1) is
+    counted once, and a run after a judge failure not at all: the first result.json
+    has no entry for the failed level, and the rerun's is never written.
     """
     for path in blackboard.list_paths("candidates/", None):
         # A payload file may be called result.json too; only the top-level one counts.

@@ -14,6 +14,7 @@ from tests.fixtures.runtime import (
     random_for_tests,
     toy_problem,
 )
+from tests.fixtures.worker import FakeToolServer
 from vlah.arms.config import ArmName
 from vlah.core.router.router import KeyValueRouter
 from vlah.core.types.claims import Claim, EvidenceRef, render_claim
@@ -46,8 +47,10 @@ def test_l0_10_arm_switches(tmp_path: Path, arm: ArmName, is_on: bool) -> None:
         runner=WaitingRunner(),
     ).prepare()
     components = run.components
-    tools = components.registry
+    tool_server = components.tool_server
     router = components.router
+    assert isinstance(tool_server, FakeToolServer) and tool_server.tools is not None
+    tools = tool_server.tools
     assert isinstance(tools, HerdTools) and isinstance(router, KeyValueRouter)
     assert tools.arm is run.context.arm and router.arm is run.context.arm
 
