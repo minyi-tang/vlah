@@ -1,11 +1,12 @@
 """Three-way merge of candidate directories (rebase onto the current baseline).
 
-Text files use ``git merge-file`` (diff3 semantics); YAML parameter files merge key by key.
+Text files use git merge-file (diff3 semantics); YAML parameter files merge key by key.
 A conflict anywhere means the whole rebase conflicts (-> compose task).
 """
 
 from __future__ import annotations
 
+import difflib
 import shutil
 import subprocess
 import tempfile
@@ -15,61 +16,68 @@ import yaml
 
 from testbed.problem_api import iter_candidate_files
 
-_MISSING = object()
+MISSING = object()
 
 
 class Conflict(Exception):
     pass
 
 
-def _files(d: Path | None) -> dict[str, bytes]:
-    if d is None or not Path(d).exists():
+def read_candidate_files(candidate_dir: Path | None) -> dict[str, bytes]:
+    if candidate_dir is None or not Path(candidate_dir).exists():
         return {}
-    return {rel: p.read_bytes() for rel, p in iter_candidate_files(Path(d))}
+    return {
+        relative_path: path.read_bytes()
+        for relative_path, path in iter_candidate_files(Path(candidate_dir))
+    }
 
 
-def merge_yaml(base, ours, theirs, path=""):
+def merge_yaml(base, ours, theirs, key_path=""):
     if theirs == base:
         return ours
     if ours == base or ours == theirs:
         return theirs
-    if base is _MISSING and isinstance(ours, dict) and isinstance(theirs, dict):
+    if base is MISSING and isinstance(ours, dict) and isinstance(theirs, dict):
         base = {}  # both sides added the same mapping: merge inside it
     if isinstance(base, dict) and isinstance(ours, dict) and isinstance(theirs, dict):
-        out = {}
-        for k in list(dict.fromkeys([*base, *ours, *theirs])):
-            b, o, t = (
-                base.get(k, _MISSING),
-                ours.get(k, _MISSING),
-                theirs.get(k, _MISSING),
+        merged = {}
+        for yaml_key in list(dict.fromkeys([*base, *ours, *theirs])):
+            base_value, ours_value, theirs_value = (
+                base.get(yaml_key, MISSING),
+                ours.get(yaml_key, MISSING),
+                theirs.get(yaml_key, MISSING),
             )
-            v = merge_yaml(b, o, t, f"{path}.{k}")
-            if v is not _MISSING:
-                out[k] = v
-        return out
-    raise Conflict(f"yaml key {path or '<root>'}: both sides changed it differently")
+            merged_value = merge_yaml(
+                base_value, ours_value, theirs_value, f"{key_path}.{yaml_key}"
+            )
+            if merged_value is not MISSING:
+                merged[yaml_key] = merged_value
+        return merged
+    raise Conflict(
+        f"yaml key {key_path or '<root>'}: both sides changed it differently"
+    )
 
 
 def merge_text(base: bytes, ours: bytes, theirs: bytes, name: str) -> bytes:
-    with tempfile.TemporaryDirectory() as td:
-        td = Path(td)
-        for n, b in (("ours", ours), ("base", base), ("theirs", theirs)):
-            (td / n).write_bytes(b)
-        r = subprocess.run(
+    with tempfile.TemporaryDirectory() as temp_dir_name:
+        temp_dir = Path(temp_dir_name)
+        for side, content in (("ours", ours), ("base", base), ("theirs", theirs)):
+            (temp_dir / side).write_bytes(content)
+        merge_run = subprocess.run(
             [
                 "git",
                 "merge-file",
                 "-p",
                 "--diff3",
-                str(td / "ours"),
-                str(td / "base"),
-                str(td / "theirs"),
+                str(temp_dir / "ours"),
+                str(temp_dir / "base"),
+                str(temp_dir / "theirs"),
             ],
             capture_output=True,
         )
-        if r.returncode != 0:
+        if merge_run.returncode != 0:
             raise Conflict(f"{name}: text conflict")
-        return r.stdout
+        return merge_run.stdout
 
 
 def three_way(
@@ -77,94 +85,123 @@ def three_way(
 ) -> list[str]:
     """Write the rebased candidate into out_dir. Returns files that differ from ours (files_changed).
     Raises Conflict."""
-    b, o, t = _files(base_dir), _files(ours_dir), _files(theirs_dir)
+    base_files, ours_files, theirs_files = (
+        read_candidate_files(base_dir),
+        read_candidate_files(ours_dir),
+        read_candidate_files(theirs_dir),
+    )
     merged: dict[str, bytes | None] = {}
-    for rel in sorted(set(b) | set(o) | set(t)):
-        bv, ov, tv = b.get(rel), o.get(rel), t.get(rel)
-        if tv == bv:
-            mv = ov
-        elif ov == bv or ov == tv:
-            mv = tv
-        elif None in (bv, ov, tv):
-            raise Conflict(f"{rel}: added/deleted on both sides")
-        elif rel.endswith((".yaml", ".yml")):
+    for relative_path in sorted(set(base_files) | set(ours_files) | set(theirs_files)):
+        base_bytes, ours_bytes, theirs_bytes = (
+            base_files.get(relative_path),
+            ours_files.get(relative_path),
+            theirs_files.get(relative_path),
+        )
+        if theirs_bytes == base_bytes:
+            merged_bytes = ours_bytes
+        elif ours_bytes == base_bytes or ours_bytes == theirs_bytes:
+            merged_bytes = theirs_bytes
+        elif None in (base_bytes, ours_bytes, theirs_bytes):
+            raise Conflict(f"{relative_path}: added/deleted on both sides")
+        elif relative_path.endswith((".yaml", ".yml")):
             try:
-                y = merge_yaml(
-                    yaml.safe_load(bv) or {},
-                    yaml.safe_load(ov) or {},
-                    yaml.safe_load(tv) or {},
+                merged_yaml = merge_yaml(
+                    yaml.safe_load(base_bytes) or {},
+                    yaml.safe_load(ours_bytes) or {},
+                    yaml.safe_load(theirs_bytes) or {},
                 )
-            except yaml.YAMLError as e:
-                raise Conflict(f"{rel}: unparsable yaml ({e})")
-            mv = yaml.safe_dump(y, sort_keys=True).encode()
+            except yaml.YAMLError as error:
+                raise Conflict(f"{relative_path}: unparsable yaml ({error})")
+            merged_bytes = yaml.safe_dump(merged_yaml, sort_keys=True).encode()
         else:
-            mv = merge_text(bv, ov, tv, rel)
-        merged[rel] = mv
+            merged_bytes = merge_text(
+                base_bytes, ours_bytes, theirs_bytes, relative_path
+            )
+        merged[relative_path] = merged_bytes
     out_dir = Path(out_dir)
     if out_dir.exists():
         shutil.rmtree(out_dir)
     out_dir.mkdir(parents=True)
-    changed = []
-    for rel, data in merged.items():
-        if data is None:
-            if rel in o:
-                changed.append(rel)
+    changed_files = []
+    for relative_path, file_bytes in merged.items():
+        if file_bytes is None:
+            if relative_path in ours_files:
+                changed_files.append(relative_path)
             continue
-        p = out_dir / rel
-        p.parent.mkdir(parents=True, exist_ok=True)
-        p.write_bytes(data)
-        if o.get(rel) != data:
-            changed.append(rel)
-    return changed
+        out_path = out_dir / relative_path
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        out_path.write_bytes(file_bytes)
+        if ours_files.get(relative_path) != file_bytes:
+            changed_files.append(relative_path)
+    return changed_files
 
 
-def _flat(y, prefix=""):
-    if isinstance(y, dict):
-        out = {}
-        for k, v in y.items():
-            out.update(_flat(v, f"{prefix}.{k}"))
-        return out
-    return {prefix: y}
+def flatten_yaml(value, prefix=""):
+    if isinstance(value, dict):
+        leaves = {}
+        for yaml_key, child in value.items():
+            leaves.update(flatten_yaml(child, f"{prefix}.{yaml_key}"))
+        return leaves
+    return {prefix: value}
 
 
-def distance(a_dir: Path, b_dir: Path) -> int:
+def distance(left_dir: Path, right_dir: Path) -> int:
     """Edit distance between two candidates: differing lines (text) or differing leaf keys (YAML)."""
-    import difflib
-
-    a, b = _files(a_dir), _files(b_dir)
+    left_files, right_files = read_candidate_files(left_dir), read_candidate_files(
+        right_dir
+    )
     total = 0
-    for rel in set(a) | set(b):
-        x, y = a.get(rel), b.get(rel)
-        if x == y:
+    for relative_path in set(left_files) | set(right_files):
+        left_bytes, right_bytes = left_files.get(relative_path), right_files.get(
+            relative_path
+        )
+        if left_bytes == right_bytes:
             continue
-        if rel.endswith((".yaml", ".yml")):
+        if relative_path.endswith((".yaml", ".yml")):
             try:
-                fx = _flat(yaml.safe_load(x) or {}) if x is not None else {}
-                fy = _flat(yaml.safe_load(y) or {}) if y is not None else {}
+                left_leaves = (
+                    flatten_yaml(yaml.safe_load(left_bytes) or {})
+                    if left_bytes is not None
+                    else {}
+                )
+                right_leaves = (
+                    flatten_yaml(yaml.safe_load(right_bytes) or {})
+                    if right_bytes is not None
+                    else {}
+                )
                 total += sum(
                     1
-                    for k in set(fx) | set(fy)
-                    if fx.get(k, _MISSING) != fy.get(k, _MISSING)
+                    for leaf_key in set(left_leaves) | set(right_leaves)
+                    if left_leaves.get(leaf_key, MISSING)
+                    != right_leaves.get(leaf_key, MISSING)
                 )
                 continue
             except yaml.YAMLError:
                 pass
-        xl = x.decode(errors="replace").splitlines() if x is not None else []
-        yl = y.decode(errors="replace").splitlines() if y is not None else []
+        left_lines = (
+            left_bytes.decode(errors="replace").splitlines()
+            if left_bytes is not None
+            else []
+        )
+        right_lines = (
+            right_bytes.decode(errors="replace").splitlines()
+            if right_bytes is not None
+            else []
+        )
         for tag, i1, i2, j1, j2 in difflib.SequenceMatcher(
-            None, xl, yl, autojunk=False
+            None, left_lines, right_lines, autojunk=False
         ).get_opcodes():
             if tag != "equal":
                 total += max(i2 - i1, j2 - j1)
     return total
 
 
-def copy_tree(src: Path, dst: Path):
-    dst = Path(dst)
-    if dst.exists():
-        shutil.rmtree(dst)
-    dst.mkdir(parents=True)
-    for rel, p in iter_candidate_files(Path(src)):
-        q = dst / rel
-        q.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(p, q)
+def copy_tree(source_dir: Path, destination_dir: Path):
+    destination_dir = Path(destination_dir)
+    if destination_dir.exists():
+        shutil.rmtree(destination_dir)
+    destination_dir.mkdir(parents=True)
+    for relative_path, path in iter_candidate_files(Path(source_dir)):
+        destination = destination_dir / relative_path
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(path, destination)

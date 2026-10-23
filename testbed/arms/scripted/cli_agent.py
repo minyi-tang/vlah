@@ -1,4 +1,4 @@
-"""A deterministic stand-in for an LLM agent, for smoke-testing `tb run` end to end (problem A).
+"""A deterministic stand-in for an LLM agent, for smoke-testing tb run end to end (problem A).
 
 It only uses what a worker has: its workspace (problem/, work/, baseline/, PROMPT.md) and the tb
 commands. It writes PLAN.md, edits work/policy.py (one idea per actor), checks it on the fast tier,
@@ -41,64 +41,71 @@ def order(queue, state):
 """,
     ),
 }
+STATUS_POLL_SECONDS = 2
 
 
-def tb(*args):
-    r = subprocess.run(
-        [sys.executable, "-m", "testbed.cli.main", *args],
+def tb(*tb_args):
+    completed = subprocess.run(
+        [sys.executable, "-m", "testbed.cli.main", *tb_args],
         capture_output=True,
         text=True,
     )
-    if r.returncode != 0:
-        raise RuntimeError(f"tb {' '.join(args)} failed: {r.stderr or r.stdout}")
-    return r.stdout
+    if completed.returncode != 0:
+        raise RuntimeError(
+            f"tb {' '.join(tb_args)} failed: {completed.stderr or completed.stdout}"
+        )
+    return completed.stdout
 
 
 def main():
     actor = os.environ.get("TB_ACTOR", "w1")
-    idx = (int(actor[1:]) - 1) if actor[1:].isdigit() else 0
-    direction, code = IDEAS[idx % len(IDEAS)]
-    ws = Path.cwd()
-    (ws / "PLAN.md").write_text(
+    actor_index = (int(actor[1:]) - 1) if actor[1:].isdigit() else 0
+    direction, code = IDEAS[actor_index % len(IDEAS)]
+    workspace = Path.cwd()
+    (workspace / "PLAN.md").write_text(
         f"# PLAN ({actor})\n\nOne direction: {direction}. One slow submission.\n"
     )
-    cand = ws / "cand"
-    if cand.exists():
-        shutil.rmtree(cand)
-    shutil.copytree(ws / "baseline", cand)
-    with (cand / "policy.py").open("a") as f:
-        f.write(code)
-    out = ws / "fast.json"
-    tb("fast", str(cand), "--seed", "1", "--out", str(out))
-    fast = json.loads(out.read_text())
+    candidate_dir = workspace / "cand"
+    if candidate_dir.exists():
+        shutil.rmtree(candidate_dir)
+    shutil.copytree(workspace / "baseline", candidate_dir)
+    with (candidate_dir / "policy.py").open("a") as handle:
+        handle.write(code)
+    fast_path = workspace / "fast.json"
+    tb("fast", str(candidate_dir), "--seed", "1", "--out", str(fast_path))
+    fast_result = json.loads(fast_path.read_text())
     print(
-        f"{actor}: fast {fast['score']} vs baseline {fast['baseline_score']}",
+        f"{actor}: fast {fast_result['score']} vs baseline {fast_result['baseline_score']}",
         flush=True,
     )
-    if fast["score"] is None or fast["score"] <= fast["baseline_score"]:
+    if (
+        fast_result["score"] is None
+        or fast_result["score"] <= fast_result["baseline_score"]
+    ):
         return
-    r = json.loads(
+    receipt = json.loads(
         tb(
             "submit",
-            str(cand),
+            str(candidate_dir),
             "--predict",
-            str(fast["score"]),
+            str(fast_result["score"]),
             "--note",
             direction,
             "--direction",
             direction,
         )
     )
-    ticket = r.get("of") or r["ticket"]
+    ticket = receipt.get("of") or receipt["ticket"]
     while True:
-        st = json.loads(tb("status", ticket))
-        if "result" in st:
+        status = json.loads(tb("status", ticket))
+        if "result" in status:
             print(
-                f"{actor}: slow {st['result']['score']} constraint_ok={st['result']['constraint_ok']}",
+                f"{actor}: slow {status['result']['score']}"
+                f" constraint_ok={status['result']['constraint_ok']}",
                 flush=True,
             )
             break
-        time.sleep(2)
+        time.sleep(STATUS_POLL_SECONDS)
     tb("final", ticket)
 
 

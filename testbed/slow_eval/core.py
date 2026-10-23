@@ -20,6 +20,7 @@ import shutil
 import sqlite3
 import threading
 import time
+import uuid
 import zipfile
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -59,6 +60,7 @@ RESERVED_EVENTS = {
     "integrator_frozen",
     "stale_target",
     "agent_restart",
+    "unsafe_no_sandbox",
 }
 
 
@@ -98,6 +100,56 @@ def _problem_fingerprint(root: Path) -> str:
     return h.hexdigest()[:16]
 
 
+class FetchedRows:
+    """The rows of one statement, read in full while the connection lock was held."""
+
+    def __init__(self, rows: list, lastrowid, rowcount: int):
+        self.rows = rows
+        self.lastrowid = lastrowid
+        self.rowcount = rowcount
+
+    def fetchone(self):
+        return self.rows[0] if self.rows else None
+
+    def fetchall(self) -> list:
+        return list(self.rows)
+
+    def __iter__(self):
+        return iter(self.rows)
+
+
+class SerializedConnection:
+    """One sqlite connection used from several threads (the request threads, the publisher and
+    the evaluation pool), with every statement run and read under one lock.
+
+    sqlite's connection object is not safe to step from two threads at once: with
+    check_same_thread=False alone, concurrent calls raise "bad parameter or other API misuse"
+    or return NULL for a column that was just written (issue #106). Reading the rows before the
+    lock is released keeps a cursor from being stepped while another thread runs a statement.
+    """
+
+    def __init__(self, connection: sqlite3.Connection, lock: threading.RLock):
+        self.connection = connection
+        self.lock = lock
+
+    def execute(self, sql: str, parameters=()) -> FetchedRows:
+        with self.lock:
+            cursor = self.connection.execute(sql, parameters)
+            return FetchedRows(cursor.fetchall(), cursor.lastrowid, cursor.rowcount)
+
+    def executescript(self, sql: str) -> None:
+        with self.lock:
+            self.connection.executescript(sql)
+
+    def commit(self) -> None:
+        with self.lock:
+            self.connection.commit()
+
+    def close(self) -> None:
+        with self.lock:
+            self.connection.close()
+
+
 class SlowEval:
     def __init__(
         self, data_dir: Path, clock=None, inline: bool = False, concurrency: int = 2
@@ -109,10 +161,11 @@ class SlowEval:
         self.clock = clock or RealClock()
         self.inline = inline
         self.lock = threading.RLock()
-        self.db = sqlite3.connect(
+        connection = sqlite3.connect(
             self.data / "tb.sqlite", check_same_thread=False, isolation_level=None
         )
-        self.db.row_factory = sqlite3.Row
+        connection.row_factory = sqlite3.Row
+        self.db = SerializedConnection(connection, self.lock)
         self.db.executescript(
             """
         CREATE TABLE IF NOT EXISTS runs (run_id TEXT PRIMARY KEY, arm TEXT, problem TEXT, n INTEGER,
@@ -397,12 +450,10 @@ class SlowEval:
         dataset = body.get("dataset") or "dev"
         if dataset not in ("dev", "audit", "judge"):
             raise ApiError(400, {"reason": "invalid_candidate", "detail": "dataset"})
+        # One staging directory per call: two workers submitting the same bytes at the same
+        # time must not unpack into, and delete, each other's directory (#106).
         staging = (
-            self.data
-            / "runs"
-            / run_id
-            / "cands"
-            / ("staging-" + hashlib.sha1(zbytes).hexdigest())
+            self.data / "runs" / run_id / "cands" / ("staging-" + uuid.uuid4().hex)
         )
         tmp = self._unzip(zbytes, staging)
         try:
@@ -419,10 +470,12 @@ class SlowEval:
             h = candidate_hash(tmp, target)
             ch = content_hash(tmp)
             dest = self.cand_dir(run_id, h)
-            if not dest.exists():
-                dest.parent.mkdir(parents=True, exist_ok=True)
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            try:
                 tmp.rename(dest)
-            else:
+            except OSError:
+                if not dest.exists():  # not the same candidate arriving twice at once
+                    raise
                 shutil.rmtree(tmp, ignore_errors=True)
         except ApiError:
             shutil.rmtree(tmp, ignore_errors=True)
@@ -546,10 +599,12 @@ class SlowEval:
                 "UPDATE tickets SET state='running' WHERE ticket=?", (ticket,)
             )
             run = self.run_row(t["run_id"])
-        knobs = json.loads(run["knobs"])
-        cal = json.loads(run["cal"])
-        cand = self.cand_dir(t["run_id"], t["hash"])
+        # Everything from here on is inside the try: a failure before the evaluation used to leave
+        # the ticket 'running' forever, with the exception swallowed by the pool future (#106).
         try:
+            knobs = json.loads(run["knobs"])
+            cal = json.loads(run["cal"])
+            cand = self.cand_dir(t["run_id"], t["hash"])
             agg = self._evaluate(
                 run["problem"], cand, t["dataset"], knobs.get("slow_seeds")
             )

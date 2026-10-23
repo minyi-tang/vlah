@@ -396,6 +396,12 @@ def main(argv=None):
         default=[],
         help="extra read-only path for the agent sandbox (e.g. a node install); repeatable",
     )
+    s.add_argument(
+        "--unsafe-no-sandbox",
+        action="store_true",
+        help="run the agents and the composer without a sandbox, so they can read hidden material; "
+        "required on hosts without sandbox-exec (non-macOS); recorded as an unsafe_no_sandbox event",
+    )
     s.set_defaults(fn=cmd_run)
 
     s = sub.add_parser(
