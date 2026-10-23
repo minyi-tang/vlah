@@ -3,10 +3,12 @@
 Any harness that speaks MCP can be a worker without code changes. The token in a
 request identifies the agent; the tools are HerdTools methods called for it. Two
 plain HTTP endpoints serve the harness's tool hook: POST /hook/check returns the
-pending hard interrupt (or null), POST /hook/ack acknowledges one.
+pending hard interrupt (or null), POST /hook/ack acknowledges it; any other id
+is a 409.
 """
 
 from dataclasses import dataclass
+from pathlib import Path
 
 import uvicorn
 from mcp.server.auth.middleware.auth_context import get_access_token
@@ -170,8 +172,14 @@ class McpToolServer:
                 except ValueError:
                     body = None
                 if isinstance(body, dict) and isinstance(body.get("interrupt_id"), str):
-                    tools.hook_ack(agent, str(body["interrupt_id"]))
-                    return JSONResponse({"acknowledged": True})
+                    interrupt_id = str(body["interrupt_id"])
+                    if tools.hook_ack(agent, interrupt_id):
+                        return JSONResponse({"acknowledged": True})
+                    else:
+                        return JSONResponse(
+                            {"error": f"{interrupt_id} is not pending for {agent}"},
+                            status_code=409,
+                        )
                 else:
                     return JSONResponse(
                         {"error": "interrupt_id is required"}, status_code=400
@@ -181,6 +189,11 @@ class McpToolServer:
         return self.server.streamable_http_app(
             streamable_http_path=MCP_PATH, host=self.host
         )
+
+    def register_agent(
+        self, agent: ActorId, sandbox_root: Path, task_id: str | None = None
+    ) -> str:
+        return self.tools.register_agent(agent, sandbox_root, task_id)
 
     def endpoint_for(self, agent: ActorId) -> ToolEndpoint:
         return ToolEndpoint(

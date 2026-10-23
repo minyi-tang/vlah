@@ -1,18 +1,20 @@
 """The herd's tools: write gates, read scope by arm, recorder events, sync-point diffs (v2.2 section 7)."""
 
 import threading
+from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import pytest
 
-from tests.fixtures.tools import make_tools_harness
+from tests.fixtures.tools import ToolsHarness, make_tools_harness
 from vlah.arms.config import PRESETS, ArmName
 from vlah.core.types.claims import Claim, EvidenceRef, render_claim
 from vlah.core.types.ids import ActorId
 from vlah.core.types.interrupts import Interrupt
+from vlah.core.types.params import Params
 from vlah.core.types.tasks import Task
-from vlah.tools.herd_tools import ToolReply
+from vlah.tools.herd_tools import HerdTools, ToolReply
 
 pytestmark = pytest.mark.tools
 
@@ -326,3 +328,65 @@ def test_two_agents_write_at_once(tmp_path: Path) -> None:
         )
     assert all("written" in reply.result for reply in replies)
     assert len(harness.recorder.events) == 2
+
+
+def test_a_rebuilt_tool_server_still_reports_the_tasks_claims(tmp_path: Path) -> None:
+    """A restart forgot every claim, so the worker loop requeued a task that had one."""
+    harness = make_tools_harness(tmp_path, PRESETS["S2"])
+    harness.tools.register_agent(WORKER, tmp_path, TASK.id)
+    harness.blackboard.write(ActorId("human"), {"spec.md": b"spec"}, "spec")
+    followup = TASK.model_copy(
+        update={"refs": ("c-eval_service-00001", "candidates/9f3a/result.json")}
+    )
+    harness.leases.acquire(WORKER, followup, "handle-1")
+    path, text = claim_text(WORKER, 1, "insight", EvidenceRef(path="spec.md"))
+    assert "error" not in harness.tools.repo_write(WORKER, {path: text}).result
+    rebuilt = HerdTools(
+        blackboard=harness.blackboard,
+        objects=harness.objects,
+        indexer=harness.tools.indexer,
+        eval_service=harness.eval_service,
+        leases=harness.leases,
+        router=harness.router,
+        recorder=harness.recorder,
+        arm=PRESETS["S2"],
+        params=Params(),
+        clock=harness.clock,
+        run_id="r-tools",
+    )
+    rebuilt.register_agent(WORKER, tmp_path, TASK.id)
+    assert rebuilt.claims_written(WORKER, TASK.id) == ("c-worker-01-00001",)
+    assert harness.tools.claims_written(WORKER, TASK.id) == (
+        "c-worker-01-00001",
+    ), "the lease and the booking name the same claim once"
+    harness.leases.release(WORKER)
+    assert rebuilt.claims_written(WORKER, TASK.id) == ()
+
+
+def surprise_with(harness: ToolsHarness, pointer: str) -> ToolReply:
+    return harness.tools.surprise(WORKER, "odd", pointer, "a-01")
+
+
+def write_with(harness: ToolsHarness, pointer: str) -> ToolReply:
+    path, text = claim_text(WORKER, 1, "insight", EvidenceRef(trace=pointer))
+    return harness.tools.repo_write(WORKER, {path: text})
+
+
+@pytest.mark.parametrize("cite", [surprise_with, write_with])
+def test_private_evidence_is_refused_without_looking_it_up(
+    tmp_path: Path, cite: Callable[[ToolsHarness, str], ToolReply]
+) -> None:
+    """The blackboard's receipt told a worker whether a private key existed (D63)."""
+    harness = make_tools_harness(tmp_path, PRESETS["S2"])
+    harness.tools.register_agent(WORKER, tmp_path)
+    existing = harness.objects.put("eval/holdout.json", b"secret", is_private=True)
+    missing = "private://eval/nothing.json"
+    replies = {pointer: cite(harness, pointer) for pointer in (existing, missing)}
+    errors = {
+        pointer: str(reply.result["error"]).replace(pointer, "<pointer>")
+        for pointer, reply in replies.items()
+    }
+    assert "is private" in errors[existing]
+    assert errors[existing] == errors[missing], "the reply must not depend on existence"
+    assert harness.blackboard.stats().merge_count == 0
+    assert harness.recorder.events == []

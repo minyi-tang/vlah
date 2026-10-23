@@ -5,6 +5,7 @@ in a long sandbox command never looks dead.
 """
 
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Protocol
 
 from vlah.core.types.base import FrozenModel
@@ -76,6 +77,18 @@ class Executor(Protocol):
 
     def wait(self, handle: Handle, timeout_seconds: float | None) -> ExitInfo | None:
         """Exit information, or None if the session is still running at the timeout."""
+        ...
+
+    def sandbox_path(self, agent: ActorId, task_id: str) -> Path:
+        """Where a task's sandbox lives; eval_request paths resolve inside it."""
+        ...
+
+    def transcript_path(self, handle: Handle) -> Path:
+        """Where the session's current process writes the transcript the harness reads."""
+        ...
+
+    def base_revision(self, agent: ActorId, task_id: str) -> str:
+        """What the task's target/ started from, for the working-directory diff (D77)."""
         ...
 
     def checkpoint(self, handle: Handle) -> bytes:

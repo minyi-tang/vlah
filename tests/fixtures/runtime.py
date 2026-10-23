@@ -1,8 +1,7 @@
 """A run assembled from fakes and in-memory stores, for the runtime's tests.
 
-Components that do not exist yet (Router, Indexer, Integrator, budget, stop rules,
-metrics) are fakes here. The router and indexer fakes honor the arm's switches, so
-the runtime's wiring of one ArmConfig into every component is observable (L0-10).
+The router and the indexer are the real ones over memory stores. Components that do
+not exist yet (Integrator, budget, stop rules, metrics) are fakes here.
 """
 
 import json
@@ -11,7 +10,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from random import Random
 
-from tests.fixtures.fakes import FakeIndexer, FakeLeases, FakeRouter, RecordingBudget
+from tests.fixtures.fakes import FakeLeases, FakeRouter, RecordingBudget
 from tests.fixtures.herd import TOY_APPROACH, TOY_SOURCE, make_store_blackboard
 from tests.fixtures.tools import RecordingRecorder, ScriptedEval
 from tests.fixtures.worker import (
@@ -21,10 +20,11 @@ from tests.fixtures.worker import (
     TranscriptHarness,
 )
 from vlah.adapters.memory.executor import MemoryExecutor, ScriptedHarness
-from vlah.adapters.memory.store import MemoryKeyValueStore
+from vlah.adapters.memory.model import MemoryModel
+from vlah.adapters.memory.store import MemoryKeyValueStore, MemoryVectorIndex
 from vlah.arms.config import ArmConfig
 from vlah.core.blackboard.api import MergedCommit, PublicProblemFiles
-from vlah.core.indexer.api import Diff, Hit, WorkingSet
+from vlah.core.indexer.indexer import StoreIndexer
 from vlah.core.metrics.api import StandingMetrics
 from vlah.core.problem.api import AdapterChoice, HerdConfig, Problem
 from vlah.core.queue.api import Leases
@@ -38,6 +38,7 @@ from vlah.core.types.interrupts import Interrupt
 from vlah.core.types.params import EgressPolicy, Limits, Params
 from vlah.core.worker.loop import WorkerDeps
 from vlah.runtime.assembly import RunComponents, RunContext
+from vlah.runtime.herd import top_level_source
 from vlah.tools.herd_tools import HerdTools
 
 BASELINE_ZERO = BaselineRecord(k=0, parent=None, candidates=(), created_ts=0.0)
@@ -62,32 +63,6 @@ def toy_problem(root: Path, worker_count: int = 2) -> Problem:
             harness=AdapterChoice(kind="scripted"),
         ),
     )
-
-
-@dataclass(kw_only=True)
-class SwitchedIndexer(FakeIndexer):
-    """Search and diffs honor arm.search and arm.diff_since (D58)."""
-
-    def search(
-        self, query: str, limit: int, viewer: ActorId, arm: ArmConfig
-    ) -> tuple[Hit, ...]:
-        if arm.search == "off":
-            return ()
-        else:
-            return super().search(query, limit, viewer, arm)
-
-    def diff_since(
-        self,
-        cursor: int,
-        working_set: WorkingSet,
-        viewer: ActorId,
-        max_tokens: int,
-        arm: ArmConfig,
-    ) -> Diff:
-        if arm.diff_since in ("off", "none"):
-            return Diff(items=(), cursor=cursor, omitted_count=0, rendered="")
-        else:
-            return Diff(items=(), cursor=cursor + 1, omitted_count=0, rendered="news")
 
 
 @dataclass(kw_only=True)
@@ -211,7 +186,14 @@ class MemoryAssembly:
         blackboard = make_store_blackboard(self.clock, name=context.run_id)
         blackboard.write(ActorId("human"), {"spec.md": b"# Toy\n"}, "spec")
         leases = FakeLeases(clock=self.clock)
-        indexer = SwitchedIndexer()
+        indexer = StoreIndexer(
+            blackboard=blackboard,
+            vectors=MemoryVectorIndex(),
+            model=MemoryModel(),
+            params=context.params,
+            clock=self.clock,
+            top_level=top_level_source(context.problem.sources),
+        )
         router: Router
         if self.use_real_router:
             router = KeyValueRouter(
@@ -230,6 +212,7 @@ class MemoryAssembly:
             clock=self.clock,
             programs={},
             heartbeat_interval_seconds=context.params.heartbeat_interval_seconds,
+            sandbox_root=context.run_root / "sandboxes",
         )
         tools = HerdTools(
             blackboard=blackboard,

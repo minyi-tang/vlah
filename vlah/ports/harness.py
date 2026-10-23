@@ -63,6 +63,14 @@ class Harness(Protocol):
 
     def usage(self, transcript_path: Path) -> ContextUsage: ...
 
+    def recent_tool_calls(self, transcript_path: Path, count: int) -> tuple[str, ...]:
+        """The last count tool calls in a transcript, one line each, for the D77 pack."""
+        ...
+
+    def rate_limit_retries(self, transcript_path: Path) -> int:
+        """How often the model API throttled the session (C7)."""
+        ...
+
     def export_state(self, handle: Handle) -> bytes:
         """Raises NotSupportedError when supports_checkpoint is False."""
         ...
