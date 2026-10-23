@@ -2,8 +2,7 @@
 
 Reads the per-site / per-class breakdown that `tb fast <dir> --out r.json` writes and compares it
 with the baseline on the same public seed (baseline_scores.json). Writes gap.md: where the waiting
-time is, split by site, job size, estimated duration and user, plus the mechanism counters
-(cold starts, off-rack placements, overloaded time).
+time is, split by site, job size, estimated duration and user.
 
     tb fast work --seed 1 --out r.json
     python problem/map/gap.py r.json [--out gap.md]
@@ -36,9 +35,7 @@ def main():
         "",
     ]
     by = r.get("extra", {}).get("by_class", {})
-    mech = r.get("extra", {}).get("mechanisms", {})
     bby = base.get("by_class", {})
-    bmech = base.get("mechanisms", {})
     items = {it["id"]: it["value"] for it in r.get("per_item", [])}
     bitems = {it["id"]: it["value"] for it in base.get("per_item", [])}
     lines += [
@@ -57,8 +54,6 @@ def main():
         lines += [
             "",
             f"## {s}",
-            "",
-            f"mechanisms: {mech.get(s)}  (baseline: {bmech.get(s)})",
             "",
             "| class | n | mean | p99 | base mean | delta |",
             "| --- | --- | --- | --- | --- | --- |",

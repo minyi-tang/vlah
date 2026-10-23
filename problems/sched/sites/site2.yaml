@@ -1,10 +1,12 @@
 id: 2
-summary: Two daily peaks (09:00 and 18:00, one hour each, 2.3x arrival rate); otherwise quiet. Machines slow down when overloaded.
+summary: >-
+  Complaints come in waves at certain times of day: jobs that normally finish quickly take much longer
+  then, and so does everything else running at the time.
 machines: 16
 cores_per_machine: 8
 racks: 1
-arrival: {kind: peaks, utilization: 0.5, peaks_h: [9, 18], peak_len_h: 1, peak_factor: 2.3}
-duration: {kind: lognormal, mean_s: 1200, sigma_log: 0.3}
-users: {n: 20}
+arrival: {kind: peaks, utilization: 0.5, peaks_h: [10, 17], peak_len_h: 1, peak_factor: 2.3}
+duration: {kind: lognormal, mean_s: 1140, sigma_log: 0.3}
+users: {n: 24}
 mechanisms:
-  overload: {busy_frac: 0.9, slowdown: 1.5}   # busy cores > 90% => remaining work of every running job advances 1.5x slower
+  overload: {busy_frac: 0.9, slowdown: 1.5}   # busy cores above the fraction => every running job advances slower

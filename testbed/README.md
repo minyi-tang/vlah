@@ -38,11 +38,14 @@ source .venv/bin/activate       # optional: the commands below then work without
 
 ## Hidden material and run state (never in git)
 
-Problem A's hidden seeds, reference policy and ingredient probes are **not committed** (issue #10, §2;
+Problem A's hidden seeds, reference policy, ingredient probes and **the judge's site profiles**
+(`sites/common.yaml` and `sites/site1..6.yaml`, DECISIONS A16) are **not committed** (issue #10, §2;
 CI's `no-hidden-material` job and `tests/testbed/test_no_hidden_material.py` check this). The testbed
 looks for them in `$TB_PRIVATE/sched/`, then `private/testbed/sched/` (gitignored), then
 `~/.vlah-private/testbed/sched/`. Ask the maintainer for a copy. Without them the problem still works for
-workers (`tb fast`, packing), and the tests that need them skip. `TB_PRIVATE=none` simulates their absence.
+workers (`tb fast`, packing, on the public-tier profiles in `problems/sched/sites/`), and the tests that
+need them skip. A machine that has the hidden seeds but not the judge's `sites/` refuses to load the
+problem rather than judge on the public tier. `TB_PRIVATE=none` simulates their absence.
 
 Run state (slow-eval data and its system key, runs, precheck and extras output) goes to
 `private/testbed/var/` (or `$TB_STATE_DIR`). Workers get only `tb pack-problem` output; their sandbox

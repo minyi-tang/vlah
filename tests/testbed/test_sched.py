@@ -7,6 +7,7 @@ import time
 from typing import Any
 
 import pytest
+import yaml
 
 from testbed.cli.pack import leaked, pack_problem
 from testbed.problem_api import load_problem
@@ -37,8 +38,14 @@ def write_policy(tmp_path, code, name="cand"):
 
 
 def short_problem(hours=2):
+    """The public tier with a short trace, for tests that only need a few scheduling passes."""
     problem = type(PROBLEM)(PROBLEM.root)
-    problem.common = dict(problem.common, horizon_s=hours * 3600, drain_cap_s=3600)
+    problem.public_common = dict(
+        problem.public_common,
+        horizon_s=hours * 3600,
+        fast_horizon_s=hours * 3600,
+        drain_cap_s=3600,
+    )
     return problem
 
 
@@ -125,7 +132,7 @@ def order(queue, state):
     )
     problem = short_problem()
     result = problem.assemble_sites(
-        [problem.site_result(str(candidate_dir), 1, i) for i in (0, 4)]
+        [problem.site_result(str(candidate_dir), 1, i, tier="fast") for i in (0, 4)]
     )
     assert result["score"] is None and result["extra"]["timed_out"] is True
 
@@ -133,14 +140,18 @@ def order(queue, state):
 def test_invalid_answers_count_as_timeouts(tmp_path):
     candidate_dir = write_policy(tmp_path, "def order(queue, state):\n    return []\n")
     problem = short_problem()
-    result = problem.assemble_sites([problem.site_result(str(candidate_dir), 1, 4)])
+    result = problem.assemble_sites(
+        [problem.site_result(str(candidate_dir), 1, 4, tier="fast")]
+    )
     assert result["score"] is None and result["extra"]["timeout_ratio"] > 0.01
 
 
 def test_crashing_import_voids(tmp_path):
     candidate_dir = write_policy(tmp_path, "raise RuntimeError('boom')\n")
     problem = short_problem()
-    result = problem.assemble_sites([problem.site_result(str(candidate_dir), 1, 4)])
+    result = problem.assemble_sites(
+        [problem.site_result(str(candidate_dir), 1, 4, tier="fast")]
+    )
     assert result["score"] is None and "boom" in result["extra"]["reason"]
 
 
@@ -185,3 +196,68 @@ def order(queue, state):
     assert "net=open" not in message
     if sys.platform == "darwin":
         assert "read=open" not in message
+
+
+# ------------------------------------------------------------------ two tiers of site profiles (A16-A18)
+
+
+def test_fast_tier_uses_the_public_profiles_and_slow_tier_the_judges():
+    common, sites = PROBLEM.profiles("fast")
+    assert common is PROBLEM.public_common and sites is PROBLEM.public_sites
+    assert PROBLEM.horizon("fast") == PROBLEM.public_common["fast_horizon_s"]
+    if PROBLEM.hidden is None:
+        with pytest.raises(PermissionError):
+            PROBLEM.profiles("slow")
+    else:
+        common, sites = PROBLEM.profiles("slow")
+        assert common is PROBLEM.judge_common and sites is PROBLEM.judge_sites
+        # probes and precheck see the judge's sites
+        assert PROBLEM.sites is PROBLEM.judge_sites
+
+
+def test_judge_machine_without_judge_sites_refuses_to_load(tmp_path, monkeypatch):
+    private = tmp_path / "private" / "sched"
+    private.mkdir(parents=True)
+    (private / "problem.yaml").write_text("seeds: {dev: [7]}\n")  # seeds but no sites/
+    monkeypatch.setenv("TB_PRIVATE", str(tmp_path / "private"))
+    with pytest.raises(FileNotFoundError, match="site profiles are missing"):
+        type(PROBLEM)(PROBLEM.root)
+
+
+def test_policy_sees_only_the_plant_of_a_site(tmp_path):
+    candidate_dir = write_policy(
+        tmp_path,
+        "def order(queue, state):\n"
+        "    raise RuntimeError('profile=' + ','.join(sorted(state.site_profile)))\n",
+    )
+    problem = short_problem(hours=1)
+    # site 2, which has a mechanism
+    result = problem.site_result(str(candidate_dir), 1, 1, tier="fast")
+    seen = next(e for e in result["errors"] if "profile=" in e).split("profile=")[1]
+    assert seen.split(",")[0:4] == ["cores_per_machine", "id", "machines", "racks"]
+    assert "mechanisms" not in seen and "arrival" not in seen
+
+
+@pytest.mark.timeout(300)
+def test_worker_copy_reports_no_mechanism_counters(tmp_path):
+    out = pack_problem("sched", tmp_path / "packed")
+    scores = json.loads((out / "baseline_scores.json").read_text())
+    assert all("mechanisms" not in detail for detail in scores["fast_detail"].values())
+    packed = load_problem(out)
+    result = packed.evaluate(packed.baseline_dir(), "fast", 1)
+    assert "mechanisms" not in result["extra"] and "by_class" in result["extra"]
+    # The site summaries describe symptoms, not the mechanisms or their numbers.
+    joined = " ".join(
+        yaml.safe_load(f.read_text())["summary"]
+        for f in sorted((out / "sites").glob("site*.yaml"))
+    ).lower()
+    for giveaway in (
+        "2x",
+        "12 minutes",
+        "20 minutes",
+        "60%",
+        "overload",
+        "rack",
+        "2.3x",
+    ):
+        assert giveaway not in joined, giveaway

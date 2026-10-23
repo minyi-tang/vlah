@@ -17,6 +17,9 @@ from testbed.sandbox.proc import HostDied, HostProcess, HostTimeout
 
 SIM_DIR = Path(__file__).resolve().parent
 HOST_FILES = [SIM_DIR / "policy_host.py", SIM_DIR / "policy_api.py"]
+# What a policy may see of a site profile: its plant, never its workload or mechanism settings
+# (testbed/DECISIONS.md A18; policy_api.State.site_profile).
+PLANT_KEYS = ("id", "machines", "cores_per_machine", "racks")
 
 
 class PolicyDriver:
@@ -41,12 +44,13 @@ class PolicyDriver:
                     yaml.safe_load((candidate_dir / "params.yaml").read_text()) or {}
                 )
         self.proc = HostProcess(HOST_FILES, "policy_host.py", extra)
+        plant = {key: site_profile[key] for key in PLANT_KEYS if key in site_profile}
         r = self.proc.request(
             {
                 "op": "init",
                 "site": site,
                 "params": params,
-                "site_profile": site_profile,
+                "site_profile": plant,
                 "timeout": timeout,
                 "budget_s": budget_s,
             },
