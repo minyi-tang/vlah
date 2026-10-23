@@ -224,8 +224,12 @@ class MemoryAssembly:
                 params=context.params,
                 clock=self.clock,
                 run_id=context.run_id,
+                is_compose=is_compose,
             )
-            for arm in (context.arm, compose_arm(context.arm))
+            for arm, is_compose in (
+                (context.arm, False),
+                (compose_arm(context.arm), True),
+            )
         )
         components = RunComponents(
             blackboard=blackboard,

@@ -4,7 +4,8 @@ These are the herd-side hooks (D60 layer 1):
 - every call checks for a pending hard interrupt and attaches it;
 - writes are first gated here (new paths, own prefix only), then by the blackboard;
 - each claim is merged at once and added to the writer's lease;
-- an eval request gets the sync-point diff;
+- an eval request gets the sync-point diff, and the compose slot's tool server marks
+  it as compose work (D74);
 - after repeated failures every reply carries the diff (S2 only).
 
 The MCP SDK runs each tool call on a worker thread, so calls arrive concurrently.
@@ -107,6 +108,7 @@ class HerdTools:
         params: Params,
         clock: Clock,
         run_id: str,
+        is_compose: bool = False,
     ) -> None:
         self.blackboard = blackboard
         self.objects = objects
@@ -119,6 +121,7 @@ class HerdTools:
         self.params = params
         self.clock = clock
         self.run_id = run_id
+        self.is_compose = is_compose
         self.recording = RecorderClient(
             recorder=recorder, clock=clock, run_id=run_id, arm=arm
         )
@@ -395,6 +398,7 @@ class HerdTools:
                     rationale=rationale,
                     confirm_token=confirm_token,
                     baseline=baseline,
+                    kind="compose" if self.is_compose else "worker",
                 ),
                 agent,
             )

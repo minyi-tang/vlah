@@ -167,6 +167,22 @@ def test_a_pending_interrupt_rides_on_the_reply_and_the_call_still_runs(
     assert reply.result["content"] == "spec"
 
 
+@pytest.mark.parametrize("is_compose", [False, True])
+def test_only_the_compose_tool_server_sends_compose_requests(
+    tmp_path: Path, is_compose: bool
+) -> None:
+    """The compose slot's requests reached the eval service as worker requests, so
+    the arm's dedup and confirmation applied to them (#56 R5, D74)."""
+    harness = make_tools_harness(tmp_path, PRESETS["S2"], is_compose=is_compose)
+    harness.tools.register_agent(WORKER, tmp_path)
+    (tmp_path / "candidate").mkdir()
+    harness.tools.eval_request(
+        WORKER, "candidate", {"slow": 1.0}, "composed", (), None, None
+    )
+    (request,) = harness.eval_service.requests
+    assert request.kind == ("compose" if is_compose else "worker")
+
+
 def test_candidate_paths_cannot_leave_the_sandbox(tmp_path: Path) -> None:
     harness = make_tools_harness(tmp_path, PRESETS["S2"])
     sandbox = tmp_path / "sandbox"

@@ -23,6 +23,7 @@ from tests.fixtures.runtime import (
     result_ready_event,
     toy_problem,
 )
+from tests.fixtures.tools import ScriptedEval
 from tests.fixtures.worker import FakeToolServer
 from vlah.adapters.memory.signal_source import FAKE_SCORE_FILE_NAME, FakeSlowSource
 from vlah.adapters.memory.store import MemoryKeyValueStore
@@ -275,6 +276,8 @@ def test_the_compose_slot_gets_the_same_tools_in_every_arm(
         COMPOSE_AGENT, "composed", {TOY_SOURCE.id: 1.0}, "a and b", (), None, None
     )
     assert reply.diff is None, "no sync-point diff for compose, whatever the arm"
+    assert isinstance(tools.eval_service, ScriptedEval)
+    assert tools.eval_service.requests[-1].kind == "compose"
     run.supervisor.finish()
 
 
