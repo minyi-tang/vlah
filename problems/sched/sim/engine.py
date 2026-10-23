@@ -211,7 +211,8 @@ class SiteSim:
             if not warm:
                 self.stats["cold_starts"] += 1
                 if self.startup.get("counts_as_wait"):
-                    # the job waits for its environment to be prepared; its cores are not held meanwhile
+                    # score-only penalty (DECISIONS A14): the job starts now and holds its cores
+                    # only for its run time, but the overhead is charged to its wait
                     j["wait"] += self.startup["overhead_s"]
                 else:
                     work += self.startup["overhead_s"]
