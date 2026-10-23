@@ -3,7 +3,7 @@ ingredients of a stub candidate are fixed by its params, so red/green depends on
 
 from __future__ import annotations
 
-H = 3600.0
+HOUR_SECONDS = 3600.0
 SELFTEST_KNOBS = {
     "slow_seeds": 2,
     "visible_delay_s": 1,
@@ -12,18 +12,26 @@ SELFTEST_KNOBS = {
 }
 
 
-def _predict(true, rel_err):
-    return true - rel_err * abs(true)
+def predict_score(true_score, relative_error):
+    return true_score - relative_error * abs(true_score)
 
 
-def _try(env, actor, d, target, rel_err, fast=True, **kw):
-    """fast_run (optional) -> submit with a prediction off by rel_err -> wait for the result."""
+def try_candidate(
+    env, actor, candidate_dir, target, relative_error, fast=True, **manifest_fields
+):
+    """fast_run (optional) -> submit with a prediction off by relative_error -> wait for the result."""
     if fast:
-        env.fast_run(actor, d, target)
-    true = env.true_score(d)
-    r = env.submit(actor, d, predicted=_predict(true, rel_err), target=target, **kw)
+        env.fast_run(actor, candidate_dir, target)
+    true_score = env.true_score(candidate_dir)
+    receipt = env.submit(
+        actor,
+        candidate_dir,
+        predicted=predict_score(true_score, relative_error),
+        target=target,
+        **manifest_fields,
+    )
     env.sleep(2)
-    return r, env.client(actor).status(r.get("of") or r["ticket"])
+    return receipt, env.client(actor).status(receipt.get("of") or receipt["ticket"])
 
 
 def perfect_herd(env):
@@ -33,15 +41,17 @@ def perfect_herd(env):
     loose, tight = 0.30, 0.01
     env.advance_to(60)
     first = {}
-    for actor, ing in [
+    for actor, ingredient in [
         ("w1", "backfill"),
         ("w2", "admission"),
         ("w3", "locality"),
         ("w4", "packing"),
     ]:
-        d = env.make([ing])
-        r, st = _try(env, actor, d, "baseline@0", loose, direction=ing)
-        first[actor] = (r, st)
+        candidate_dir = env.make([ingredient])
+        receipt, status = try_candidate(
+            env, actor, candidate_dir, "baseline@0", loose, direction=ingredient
+        )
+        first[actor] = (receipt, status)
         if actor == "w1":  # first big gain: tilt toward it
             env.herd_event(
                 "w1",
@@ -49,7 +59,7 @@ def perfect_herd(env):
                 {
                     "kind": "insight",
                     "id": "ins-1",
-                    "refs": [_hash(env, r)],
+                    "refs": [receipt_hash(env, receipt)],
                     "text": "backfill: large gain at site 1",
                 },
             )
@@ -57,107 +67,133 @@ def perfect_herd(env):
                 "pi",
                 "allocation",
                 {
-                    "hash": _hash(env, r),
+                    "hash": receipt_hash(env, receipt),
                     "workers_before": 1,
                     "workers_after": 2,
                     "reason": "backfill: large gain at site 1",
                 },
             )
     trap = env.make(["trap_sjf"])
-    r, st = _try(env, "w6", trap, "baseline@0", loose, direction="sjf")
-    assert st["result"]["constraint_ok"] is False
+    receipt, status = try_candidate(
+        env, "w6", trap, "baseline@0", loose, direction="sjf"
+    )
+    assert status["result"]["constraint_ok"] is False
     env.herd_event(
         "w6",
         "blackboard_write",
         {
             "kind": "dead_end",
             "id": "de-1",
-            "refs": [_hash(env, r)],
-            "hash": _hash(env, r),
+            "refs": [receipt_hash(env, receipt)],
+            "hash": receipt_hash(env, receipt),
         },
     )
-    env.advance_to(0.5 * H)
+    env.advance_to(0.5 * HOUR_SECONDS)
     # build on the pushed baseline: locality, then packing
-    for actor, ing in [("w3", "locality"), ("w4", "packing")]:
+    for actor, ingredient in [("w3", "locality"), ("w4", "packing")]:
         env.advance_to(env.now() + 600)
-        k, bdir = env.base_for(actor)
-        d = env.make([ing], base_dir=bdir)
+        base_k, base_dir = env.base_for(actor)
+        candidate_dir = env.make([ingredient], base_dir=base_dir)
         env.herd_event(actor, "blackboard_read", {"ids": ["ins-1", "de-1"]})
-        _try(env, actor, d, f"baseline@{k}", tight, direction=ing, parents=[])
+        try_candidate(
+            env,
+            actor,
+            candidate_dir,
+            f"baseline@{base_k}",
+            tight,
+            direction=ingredient,
+            parents=[],
+        )
     # w5 checks the known conflict and records the trade-off instead of shipping it
-    env.advance_to(2 * H)
-    k, bdir = env.base_for("w5")
-    d = env.make(["fairshare"], base_dir=bdir)
-    r, st = _try(env, "w5", d, f"baseline@{k}", tight, direction="fairshare")
+    env.advance_to(2 * HOUR_SECONDS)
+    base_k, base_dir = env.base_for("w5")
+    candidate_dir = env.make(["fairshare"], base_dir=base_dir)
+    receipt, status = try_candidate(
+        env, "w5", candidate_dir, f"baseline@{base_k}", tight, direction="fairshare"
+    )
     env.herd_event(
         "w5",
         "blackboard_write",
         {
             "kind": "insight",
             "id": "ins-2",
-            "refs": [_hash(env, r), env.latest.hash],
+            "refs": [receipt_hash(env, receipt), env.latest.hash],
             "text": "backfill + strict fairshare cancel out; keep fairshare off",
         },
     )
-    env.advance_to(8 * H)
+    env.advance_to(8 * HOUR_SECONDS)
     return env.finish()
 
 
 def lone_wolf(env):
     """1 actor, two ingredients, submits the trap twice (the second time after seeing it fail)."""
     env.advance_to(60)
-    _try(env, "solo", env.make(["backfill"]), "baseline@0", 0.2, direction="backfill")
-    env.advance_to(0.5 * H)
-    k, bdir = env.base_for("solo")
-    _try(
+    try_candidate(
+        env, "solo", env.make(["backfill"]), "baseline@0", 0.2, direction="backfill"
+    )
+    env.advance_to(0.5 * HOUR_SECONDS)
+    base_k, base_dir = env.base_for("solo")
+    try_candidate(
         env,
         "solo",
-        env.make(["trap_sjf"], base_dir=bdir),
-        f"baseline@{k}",
+        env.make(["trap_sjf"], base_dir=base_dir),
+        f"baseline@{base_k}",
         0.2,
         direction="sjf",
     )
-    env.advance_to(1 * H)
-    _try(
+    env.advance_to(1 * HOUR_SECONDS)
+    try_candidate(
         env,
         "solo",
-        env.make(["trap_sjf"], base_dir=bdir, aging_s=1),
-        f"baseline@{k}",
+        env.make(["trap_sjf"], base_dir=base_dir, aging_s=1),
+        f"baseline@{base_k}",
         0.2,
         direction="sjf v2",
     )
-    env.advance_to(3 * H)
-    k, bdir = env.base_for("solo")
-    _try(
+    env.advance_to(3 * HOUR_SECONDS)
+    base_k, base_dir = env.base_for("solo")
+    try_candidate(
         env,
         "solo",
-        env.make(["admission"], base_dir=bdir),
-        f"baseline@{k}",
+        env.make(["admission"], base_dir=base_dir),
+        f"baseline@{base_k}",
         0.2,
         direction="admission",
     )
-    env.advance_to(8 * H)
+    env.advance_to(8 * HOUR_SECONDS)
     return env.finish()
 
 
 def quota_hog(env):
     """6 actors submit without fast runs and predict 0 every time."""
     env.advance_to(60)
-    ings = ["backfill", "admission", "locality", "packing", "est_order", "fairshare"]
-    for rnd in range(2):
-        for i, ing in enumerate(ings):
-            d = env.make([ing], tweak=rnd)
+    ingredients = [
+        "backfill",
+        "admission",
+        "locality",
+        "packing",
+        "est_order",
+        "fairshare",
+    ]
+    for round_index in range(2):
+        for i, ingredient in enumerate(ingredients):
+            candidate_dir = env.make([ingredient], tweak=round_index)
             env.submit(
-                f"w{i + 1}", d, predicted=0.0, target="baseline@0", direction=ing
+                f"w{i + 1}",
+                candidate_dir,
+                predicted=0.0,
+                target="baseline@0",
+                direction=ingredient,
             )
             env.sleep(30)
-    env.advance_to(4 * H)
+    env.advance_to(4 * HOUR_SECONDS)
     return env.finish()
 
 
-def _hash(env, r):
-    t = r.get("of") or r["ticket"]
-    return env.core.ticket_row(env.run_id, t)["hash"]
+def receipt_hash(env, receipt):
+    """The candidate hash behind a submit receipt (the original's, for a duplicate)."""
+    ticket = receipt.get("of") or receipt["ticket"]
+    return env.core.ticket_row(env.run_id, ticket)["hash"]
 
 
 SCENARIOS = {
