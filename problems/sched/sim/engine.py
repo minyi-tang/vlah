@@ -209,8 +209,12 @@ class SiteSim:
                 or (now - m["recent"].get(j["user"], -1e18)) <= self.startup["window_s"]
             )
             if not warm:
-                work += self.startup["overhead_s"]
                 self.stats["cold_starts"] += 1
+                if self.startup.get("counts_as_wait"):
+                    # the job waits for its environment to be prepared; its cores are not held meanwhile
+                    j["wait"] += self.startup["overhead_s"]
+                else:
+                    work += self.startup["overhead_s"]
         j["wait"] += now - j["enqueue_t"]
         if j["start_t"] is None:
             j["start_t"] = now

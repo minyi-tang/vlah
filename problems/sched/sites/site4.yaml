@@ -1,5 +1,7 @@
 id: 4
-summary: Many small single-core jobs from many users; starting a job costs 120 s unless the same user ran on that machine in the last 10 minutes.
+summary: >-
+  Many small single-core jobs from 60 users. A job whose user has not run on that machine in the last
+  20 minutes first waits 12 minutes for its environment to be prepared (the cores are not held meanwhile).
 machines: 4
 cores_per_machine: 8
 racks: 1
@@ -8,4 +10,4 @@ duration: {kind: uniform, min_s: 60, max_s: 180}
 cores: {1: 1.0}
 users: {n: 60}
 mechanisms:
-  startup: {overhead_s: 120, window_s: 600}
+  startup: {overhead_s: 720, window_s: 1200, counts_as_wait: true}
