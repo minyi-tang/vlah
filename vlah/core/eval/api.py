@@ -16,8 +16,17 @@ EvalStatus = Literal[
 ]
 
 
+EvalRequestKind = Literal["worker", "compose"]
+
+
 class EvalRequest(FrozenModel):
-    """What a worker sends with eval_request; predictions are keyed by source id (D37)."""
+    """What a worker sends with eval_request; predictions are keyed by source id (D37).
+
+    kind is set by the tool server, never by the agent: a compose request is the
+    Integrator's work (D74), so it skips confirmation, hash dedup and the dead-end
+    presearch in every arm and is charged to the Integrator's quota, never a
+    worker's. Validation, gates and the ladder are the same for both kinds.
+    """
 
     candidate_directory: Path
     parents: tuple[str, ...] = ()
@@ -25,6 +34,7 @@ class EvalRequest(FrozenModel):
     rationale: str
     confirm_token: str | None = None
     baseline: str | None = None
+    kind: EvalRequestKind = "worker"
 
 
 class SimilarItem(FrozenModel):
@@ -60,7 +70,10 @@ class RemeasureRequest(FrozenModel):
 
 class EvalService(Protocol):
     def request(self, request: EvalRequest, caller: ActorId) -> EvalResponse:
-        """Validate, search for similar work, run gates, dedup, and queue (D57)."""
+        """Validate, search for similar work, run gates, dedup, and queue (D57).
+
+        A compose request (kind "compose") runs like a remeasure with respect to
+        sharing: no confirmation, no dedup, no presearch, the Integrator's quota."""
         ...
 
     def remeasure(self, request: RemeasureRequest) -> str:
