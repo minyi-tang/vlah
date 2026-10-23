@@ -30,6 +30,8 @@ def test_l0_19_arm_fairness(tmp_path: Path) -> None:
     clock = FakeClock()
     integrator_settings = []
     for arm in ARMS:
+        # B0 is one agent (D58); the sharing arms get a pool.
+        worker_count = 1 if arm == "B0" else 3
         assembly = MemoryAssembly(clock=clock, root=tmp_path)
         run = build_herd(
             problem,
@@ -37,7 +39,7 @@ def test_l0_19_arm_fairness(tmp_path: Path) -> None:
             assembly,
             f"r-{arm}",
             root=tmp_path,
-            worker_count=3,
+            worker_count=worker_count,
             duration_seconds=60.0,
             clock=clock,
             random=random_for_tests(),
@@ -50,7 +52,8 @@ def test_l0_19_arm_fairness(tmp_path: Path) -> None:
         integrator_settings.append(integrator.params.model_dump())
         pool = [slot for slot in run.supervisor.slots if not slot.is_compose]
         (compose,) = [slot for slot in run.supervisor.slots if slot.is_compose]
-        assert len(pool) == 3 and COMPOSE_AGENT not in [slot.agent for slot in pool]
+        assert len(pool) == worker_count
+        assert COMPOSE_AGENT not in [slot.agent for slot in pool]
         assert compose.agent == COMPOSE_AGENT
         assert compose.deps.task_queue is run.components.compose_queue
         assert all(slot.deps.task_queue is run.components.task_queue for slot in pool)
