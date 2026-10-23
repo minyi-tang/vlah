@@ -1,11 +1,12 @@
 """The blackboard over a VersionedStore: checks, one merge at a time, parsed commits (D30, D31, D33, D56).
 
 Every write is checked synchronously before anything is committed:
-- the path is allowed for the writer;
+- the path is one git can hold, and is allowed for the writer;
+- a claim or event file has the shape its checks expect;
 - nothing that exists is changed, and no file takes a directory's name or sits
   inside a file's name (git would delete what is there);
 - claims, events and manifests parse;
-- every evidence pointer resolves.
+- every evidence pointer resolves, and only a private reader cites private data (D63).
 
 Writes are merged one at a time, and subscribers get each merge parsed: events
 carry the sequence numbers they were given. Delivery is strictly in sequence
@@ -37,7 +38,7 @@ from vlah.core.types.candidates import CandidateManifest
 from vlah.core.types.claims import Claim, EvidenceRef, parse_claim
 from vlah.core.types.clock import Clock
 from vlah.core.types.events import Event, event_from_json
-from vlah.core.types.ids import ActorId, role_of_actor
+from vlah.core.types.ids import ActorId, Role, role_of_actor
 from vlah.core.types.paths import may_create
 from vlah.ports.errors import NotSupportedError
 from vlah.ports.store import MergeResult, ObjectStore, VersionedStore
@@ -48,8 +49,14 @@ EVENT_PATH_PATTERN = re.compile(
 )
 MANIFEST_PATH_PATTERN = re.compile(r"candidates/(?P<hash>[^/]+)/manifest\.yaml")
 CANDIDATE_PATH_PATTERN = re.compile(r"candidates/(?P<hash>[^/]+)/.+")
+CLAIM_PREFIX = "claims/"
+EVENT_PREFIX = "events/"
 SEQUENCE_POINTER_PREFIX = "events/_seq/"
-OBJECT_POINTER_PREFIXES = ("object://", "private://")
+GIT_DIRECTORY_SEGMENT = ".git"
+PRIVATE_POINTER_PREFIX = "private://"
+OBJECT_POINTER_PREFIXES = ("object://", PRIVATE_POINTER_PREFIX)
+# Only these roles hold private-store credentials (D63); the object store enforces reads.
+PRIVATE_EVIDENCE_ROLES: frozenset[Role] = frozenset({"eval_service", "critic", "human"})
 
 logger = logging.getLogger(__name__)
 
@@ -79,6 +86,16 @@ class CheckedFiles:
 
 def strip_fragment(pointer: str) -> str:
     return pointer.split("#", 1)[0]
+
+
+def unsafe_path_reason(path: str) -> str | None:
+    """Why git could never hold path: a control character or a .git segment."""
+    if any(character < " " or character == "\x7f" for character in path):
+        return "paths cannot contain control characters"
+    elif any(segment.lower() == GIT_DIRECTORY_SEGMENT for segment in path.split("/")):
+        return f"paths cannot contain a {GIT_DIRECTORY_SEGMENT} segment"
+    else:
+        return None
 
 
 def evidence_pointer(evidence: EvidenceRef) -> str:
@@ -160,14 +177,9 @@ class StoreBlackboard:
                 pass
         for path, claim in sorted(checked.claims.items()):
             for evidence in claim.evidence:
-                if not self.resolves(evidence, files, checked):
-                    violations.append(
-                        Violation(
-                            path=path,
-                            rule="dangling_evidence",
-                            message=f"evidence {evidence_pointer(evidence)!r} does not resolve",
-                        )
-                    )
+                violation = self.check_evidence(actor, path, evidence, files, checked)
+                if violation is not None:
+                    violations.append(violation)
                 else:
                     pass
         return tuple(violations), checked
@@ -180,6 +192,11 @@ class StoreBlackboard:
         files: Mapping[str, bytes],
         checked: CheckedFiles,
     ) -> Violation | None:
+        unsafe_reason = unsafe_path_reason(path)
+        if unsafe_reason is not None:
+            return Violation(path=path, rule="path_not_allowed", message=unsafe_reason)
+        else:
+            pass
         try:
             is_allowed = may_create(actor, path)
         except ValueError as error:
@@ -189,6 +206,22 @@ class StoreBlackboard:
                 path=path,
                 rule="path_not_allowed",
                 message=f"{actor} may not create {path}",
+            )
+        elif path.startswith(CLAIM_PREFIX) and not CLAIM_PATH_PATTERN.fullmatch(path):
+            return Violation(
+                path=path,
+                rule="path_not_allowed",
+                message="a claim is written at claims/<author>/<claim id>.md",
+            )
+        elif (
+            path.startswith(EVENT_PREFIX)
+            and not path.startswith(SEQUENCE_POINTER_PREFIX)
+            and not EVENT_PATH_PATTERN.fullmatch(path)
+        ):
+            return Violation(
+                path=path,
+                rule="path_not_allowed",
+                message="an event is written at events/<actor>/<number>.json",
             )
         elif self.store.exists(path):
             return Violation(
@@ -307,6 +340,34 @@ class StoreBlackboard:
         except (ValueError, UnicodeDecodeError, yaml.YAMLError) as error:
             return Violation(path=path, rule="invalid_manifest", message=str(error))
         return None
+
+    def check_evidence(
+        self,
+        actor: ActorId,
+        claim_path: str,
+        evidence: EvidenceRef,
+        files: Mapping[str, bytes],
+        checked: CheckedFiles,
+    ) -> Violation | None:
+        """A private pointer is refused before it is looked up, so the writer learns nothing (D63)."""
+        pointer = strip_fragment(evidence_pointer(evidence))
+        if (
+            pointer.startswith(PRIVATE_POINTER_PREFIX)
+            and role_of_actor(actor) not in PRIVATE_EVIDENCE_ROLES
+        ):
+            return Violation(
+                path=claim_path,
+                rule="path_not_allowed",
+                message=f"{actor} may not cite {PRIVATE_POINTER_PREFIX} evidence (D63)",
+            )
+        elif not self.resolves(evidence, files, checked):
+            return Violation(
+                path=claim_path,
+                rule="dangling_evidence",
+                message=f"evidence {evidence_pointer(evidence)!r} does not resolve",
+            )
+        else:
+            return None
 
     def resolves(
         self, evidence: EvidenceRef, files: Mapping[str, bytes], checked: CheckedFiles

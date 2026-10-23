@@ -25,8 +25,8 @@ from vlah.core.router.api import Router
 from vlah.core.stop.api import StopRules
 from vlah.core.types.clock import Clock
 from vlah.core.types.params import Params
-from vlah.core.worker.loop import AgentRegistry, SessionFiles, WorkerHarness
 from vlah.ports.executor import Executor
+from vlah.ports.harness import Harness
 from vlah.tools.api import ToolServer
 
 
@@ -61,10 +61,8 @@ class RunComponents:
     stop_rules: StopRules
     metrics: Metrics
     executor: Executor
-    sessions: SessionFiles
-    harness: WorkerHarness
+    harness: Harness
     tool_server: ToolServer
-    registry: AgentRegistry
     target_repository: str
     target_ref: str
 
