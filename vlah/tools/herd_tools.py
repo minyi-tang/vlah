@@ -139,7 +139,9 @@ class HerdTools:
         Tokens are credentials, so they come from secrets, never from the seeded
         random generator. task_id attributes claims written before the lease exists.
         """
-        cursor = self.blackboard.head_sequence()
+        # Not the blackboard's head: a merge numbered but not yet delivered to the
+        # indexer would fall into the gap and never appear in this agent's diffs.
+        cursor = self.indexer.head_sequence()
         with self.lock:
             token = self.token_by_agent.get(agent) or secrets.token_hex(16)
             self.token_by_agent[agent] = token

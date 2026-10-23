@@ -406,3 +406,27 @@ def test_private_evidence_is_refused_without_looking_it_up(
     assert errors[existing] == errors[missing], "the reply must not depend on existence"
     assert harness.blackboard.stats().merge_count == 0
     assert harness.recorder.events == []
+
+
+def test_a_new_agents_cursor_starts_at_the_indexers_head_not_the_blackboards(
+    tmp_path: Path,
+) -> None:
+    """A merge numbered but not yet folded into the index must still reach the agent's
+    first diff, so the cursor starts where the indexer is (D17)."""
+    harness = make_tools_harness(tmp_path, PRESETS["S2"])
+    worker = ActorId("worker-01")
+    harness.blackboard.write(
+        ActorId("worker-02"),
+        {
+            "events/worker-02/00001.json": (
+                b'{"local_id": "worker-02/00001", "ts": 1.0, "actor": "worker-02", '
+                b'"role": "worker", "type": "claim_status", "target": "c-x", '
+                b'"to": "corroborated"}'
+            )
+        },
+        "numbered by the blackboard, not yet in the index",
+    )
+    assert harness.blackboard.head_sequence() == 1
+    assert harness.tools.indexer.head_sequence() == 0, "the index lags the blackboard"
+    harness.tools.register_agent(worker, tmp_path)
+    assert harness.tools.state(worker).cursor == 0
