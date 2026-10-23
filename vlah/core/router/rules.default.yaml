@@ -1,11 +1,13 @@
 # The router's rules (v2.2 section 8). Each entry fires when an event of one of the
 # `events` types (or `claim`: a newly merged claim) meets the lease predicate `match`.
 # `match` names one predicate from vlah/core/router/rules.py. `kind` is hard (stop
-# the current tool call) or soft (wait for the next sync point). `priority` orders
-# pending hard interrupts: the lower number is kept and shown first. `enabled_by`
-# names the ArmConfig flag that turns the rule on (D58). `reason` is a template;
-# its fields are listed in rules.py. Rule 7, everything else, is the absence of a
-# rule: it waits for diff_since.
+# the current tool call), soft (wait for the next sync point) or revoke (withdraw
+# the pending interrupts of the rule named by `revokes` about the same target).
+# `priority` orders pending hard interrupts: the lower number is shown first and
+# the rest follow, one per acknowledgement. `enabled_by` names the ArmConfig flag
+# that turns the rule on (D58); an entry without it fires in every arm. `reason` is
+# a template; its fields are listed in rules.py. Rule 7, everything else, is the
+# absence of a rule: it waits for diff_since.
 
 - id: result-ready
   rule: 1
@@ -18,7 +20,7 @@
 
 - id: target-changed
   rule: 2
-  events: [claim_status]
+  events: [claim_status, reinstated]
   match: targets_lease_claim
   kind: hard
   priority: 3
@@ -42,6 +44,14 @@
   priority: 4
   enabled_by: router_rules_2_5
   reason: "{target}, which your work depends on, was refuted by {actor}. {event_reason}"
+
+- id: dependency-reinstated
+  rule: 4
+  events: [reinstated, claim_status]
+  match: reinstates_dependency
+  kind: revoke
+  revokes: dependency-refuted
+  enabled_by: router_rules_2_5
 
 - id: human-input
   rule: 5

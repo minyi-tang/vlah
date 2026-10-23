@@ -14,11 +14,12 @@ from tests.fixtures.fakes import FakeIndexer
 from tests.fixtures.tools import make_tools_harness, serving
 from vlah.adapters.memory.store import MemoryKeyValueStore
 from vlah.arms.config import PRESETS
-from vlah.core.router.router import KeyValueRouter
+from vlah.core.router.router import KeyValueRouter, PendingInterrupt
 from vlah.core.types.claims import Claim, EvidenceRef, render_claim
 from vlah.core.types.ids import ActorId
 from vlah.core.types.interrupts import Interrupt
 from vlah.core.types.params import Params
+from vlah.core.types.tasks import Task
 from vlah.tools.herd_tools import HerdTools
 
 pytestmark = pytest.mark.tools
@@ -210,7 +211,19 @@ def test_only_the_pending_interrupt_can_be_acknowledged(tmp_path: Path) -> None:
             hook.interrupt_ack_url, headers=authorized, json={"interrupt_id": "i-x"}
         )
         assert nothing_pending.status_code == 409
-        router.write_hard(interrupt, priority=2)
+        lease = harness.leases.acquire(
+            WORKER,
+            Task(
+                id="t-1", approach="a-01", kind="advance", goal="g", created_by="queue"
+            ),
+            "handle-1",
+        )
+        router.write_hard(
+            lease.task_id,
+            PendingInterrupt(
+                interrupt=interrupt, priority=2, rule_id="target-changed", target="c-x"
+            ),
+        )
         foreign = httpx2.post(
             hook.interrupt_ack_url,
             headers=authorized,
