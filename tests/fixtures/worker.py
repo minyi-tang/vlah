@@ -130,6 +130,15 @@ class FakeToolServer:
     claims: dict[tuple[ActorId, str], list[str]] = field(
         default_factory=dict[tuple[ActorId, str], list[str]]
     )
+    registered: list[tuple[ActorId, Path, str | None]] = field(
+        default_factory=list[tuple[ActorId, Path, str | None]]
+    )
+
+    def register_agent(
+        self, agent: ActorId, sandbox_root: Path, task_id: str | None = None
+    ) -> str:
+        self.registered.append((agent, sandbox_root, task_id))
+        return f"token-{agent}"
 
     def endpoint_for(self, agent: ActorId) -> ToolEndpoint:
         return ToolEndpoint(url="memory://tools/mcp", bearer_token=f"token-{agent}")
@@ -276,6 +285,7 @@ def make_worker_harness(
         clock=clock,
         programs=programs,
         heartbeat_interval_seconds=effective_params.heartbeat_interval_seconds,
+        sandbox_root=tmp_path / "sandboxes",
     )
     task_queue = RecordingTaskQueue()
     leases = StrictLeases(clock=clock)

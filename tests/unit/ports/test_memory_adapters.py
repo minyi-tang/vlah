@@ -111,7 +111,7 @@ def test_vector_index() -> None:
     check_vector_index(MemoryVectorIndex())
 
 
-def test_executor_heartbeats_while_the_agent_is_silent() -> None:
+def test_executor_heartbeats_while_the_agent_is_silent(tmp_path: Path) -> None:
     programs: dict[str, ScriptedProgram] = {
         "sleep": sleep_for_a_day,
         "quick": exit_at_once,
@@ -120,6 +120,7 @@ def test_executor_heartbeats_while_the_agent_is_silent() -> None:
         clock=FakeClock(),
         programs=programs,
         heartbeat_interval_seconds=HEARTBEAT_INTERVAL_SECONDS,
+        sandbox_root=tmp_path / "sandboxes",
     )
     check_executor(
         executor,
@@ -164,7 +165,9 @@ def test_signal_source_hides_results_until_the_latency_passes(tmp_path: Path) ->
     )
 
 
-def test_scripted_harness() -> None:
+def test_scripted_harness(tmp_path: Path) -> None:
+    transcript = tmp_path / "transcript.json"
+    transcript.write_text("")
     check_harness(
         ScriptedHarness(default_program="quick"),
         HarnessCheckInputs(
@@ -177,5 +180,6 @@ def test_scripted_harness() -> None:
                 interrupt_ack_url="memory://tools/hook/ack",
             ),
             workspace=WORKSPACE,
+            transcript_path=transcript,
         ),
     )

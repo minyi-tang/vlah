@@ -56,7 +56,9 @@ def harness(config: CopilotConfig = CONFIG) -> CopilotHarness:
     return CopilotHarness(config=config, params=Params())
 
 
-def test_passes_the_harness_check() -> None:
+def test_passes_the_harness_check(tmp_path: Path) -> None:
+    transcript = tmp_path / "transcript.jsonl"
+    transcript.write_text("")
     check_harness(
         harness(),
         HarnessCheckInputs(
@@ -66,6 +68,7 @@ def test_passes_the_harness_check() -> None:
             tool_endpoint=ENDPOINT,
             hook_config=HOOKS,
             workspace=WORKSPACE,
+            transcript_path=transcript,
         ),
     )
     with pytest.raises(NotSupportedError):

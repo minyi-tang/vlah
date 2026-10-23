@@ -22,16 +22,20 @@ COMPOSE_TAG = "compose"
 RECORDER_KIND_BY_CLAIM_TYPE = {"dead_end": "dead_end", "insight": "insight"}
 
 
-def direct_candidate_hashes(claim: Claim) -> list[str]:
-    pointers = [
+def evidence_pointers(claim: Claim) -> list[str]:
+    """Every path-like pointer the claim cites; claim ids are not paths."""
+    return [
         pointer
         for evidence in claim.evidence
         for pointer in (evidence.candidate, evidence.path, evidence.trace)
         if pointer is not None
     ]
+
+
+def direct_candidate_hashes(claim: Claim) -> list[str]:
     return [
         match.group("hash")
-        for pointer in pointers
+        for pointer in evidence_pointers(claim)
         if (match := CANDIDATE_POINTER_PATTERN.match(pointer)) is not None
     ]
 
