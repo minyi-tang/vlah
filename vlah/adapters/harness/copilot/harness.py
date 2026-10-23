@@ -19,9 +19,9 @@ Copilot compacts the conversation itself at 80% of the window and the CLI cannot
 turn that off; the hook asks the agent to wrap up at context_restart_fraction (70%)
 first. Once a compaction has happened, usage() reports the window as full: the
 context is lossy, so the hook keeps the agent on its wrap-up tools and the loop
-replaces the session from the D77 pack. The model comes from configuration, but an
-administrator-managed setting can override it; the transcript records the model
-actually used, and usage() warns once per session when it differs (P10).
+replaces the session from the D77 pack. The model is the user's configuration: the
+configured one, or any the account chooses when several are allowed; the transcript
+records the model each call ran on, and usage() logs it once per session.
 
 The AgentSpec's egress policy (D75) lists the herd's tool server and hook
 endpoints, the hosts in allowed_urls, and the hosts Copilot itself needs. The
@@ -88,6 +88,9 @@ class CopilotConfig:
     allowed_urls: tuple[str, ...] = ()
     # Hosts Copilot itself reaches to sign in and call the model, port 443.
     copilot_api_hosts: tuple[str, ...] = COPILOT_API_HOSTS
+    # Models a session may run on besides `model`; empty means whatever the account
+    # chooses is fine. The model is the user's configuration, never a herd limit.
+    allowed_models: tuple[str, ...] = ()
     # Passed through to every worker.
     environment: dict[str, str] = field(default_factory=dict[str, str])
 
@@ -226,17 +229,25 @@ class CopilotHarness:
         )
 
     def models_used(self, transcript_path: Path) -> tuple[str, ...]:
-        """The models the session's calls ran on so far; warns once per session
-        when any differs from the configured one (P10)."""
+        """The models the session's calls ran on so far, logged once per session.
+
+        Which model runs is the user's configuration: `model`, plus `allowed_models`
+        when the account may choose among several. A warning is raised only when
+        the configuration names an allowed set and a call ran outside it.
+        """
         models_run = models(transcript_path)
-        unexpected = tuple(model for model in models_run if model != self.config.model)
-        if unexpected and transcript_path not in self.model_mismatches_logged:
+        if models_run and transcript_path not in self.model_mismatches_logged:
             self.model_mismatches_logged.add(transcript_path)
-            logger.warning(
-                f"{transcript_path}: Copilot ran {', '.join(unexpected)}, not the "
-                f"configured {self.config.model}; an account setting can override "
-                "--model, and P10 wants one model for every role"
-            )
+            logger.info(f"{transcript_path}: Copilot ran {', '.join(models_run)}")
+            allowed = {self.config.model, *self.config.allowed_models}
+            unexpected = tuple(model for model in models_run if model not in allowed)
+            if self.config.allowed_models and unexpected:
+                logger.warning(
+                    f"{transcript_path}: Copilot ran {', '.join(unexpected)}, outside "
+                    f"the configured models {', '.join(sorted(allowed))}"
+                )
+            else:
+                pass
         else:
             pass
         return models_run

@@ -1,5 +1,6 @@
 """What the Copilot harness asks Copilot CLI to do, its runner, and how it reads usage."""
 
+import dataclasses
 import json
 import logging
 import os
@@ -142,26 +143,41 @@ def usage_record_line(model: str) -> str:
     return json.dumps({"type": "session.usage_record", "data": {"usage": usage}}) + "\n"
 
 
-def test_a_model_other_than_the_configured_one_is_logged_once(
+def test_the_model_that_ran_is_logged_and_any_model_is_allowed_by_default(
     tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
-    """An account setting can override --model (DECISIONS: gpt-6.1-sol); P10 wants
-    the mismatch visible, and the loop polls usage() every few seconds."""
+    """The model is the user's configuration, not a herd limit: an account that
+    chooses another model than --model raises no warning unless the configuration
+    names an allowed set. The loop polls usage() every few seconds, so one log line."""
     transcript = tmp_path / "events.jsonl"
-    transcript.write_text(usage_record_line("model-from-herd-yaml"))
+    transcript.write_text(
+        usage_record_line("model-from-herd-yaml") + usage_record_line("gpt-6.1-sol")
+    )
     copilot = harness()
-    with caplog.at_level(logging.WARNING, logger="vlah.adapters.harness"):
-        copilot.usage(transcript)
-        assert copilot.models_used(transcript) == ("model-from-herd-yaml",)
-        assert caplog.records == []
-        with transcript.open("a") as lines:
-            lines.write(usage_record_line("gpt-6.1-sol"))
+    with caplog.at_level(logging.INFO, logger="vlah.adapters.harness"):
         copilot.usage(transcript)
         copilot.usage(transcript)
     assert copilot.models_used(transcript) == ("model-from-herd-yaml", "gpt-6.1-sol")
+    (record,) = caplog.records
+    assert record.levelno == logging.INFO and "gpt-6.1-sol" in record.getMessage()
+
+
+def test_a_model_outside_the_configured_set_is_warned_about_once(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    transcript = tmp_path / "events.jsonl"
+    transcript.write_text(
+        usage_record_line("model-from-herd-yaml")
+        + usage_record_line("claude-opus-5-5")
+        + usage_record_line("gpt-6.1-sol")
+    )
+    copilot = harness(dataclasses.replace(CONFIG, allowed_models=("claude-opus-5-5",)))
+    with caplog.at_level(logging.WARNING, logger="vlah.adapters.harness"):
+        copilot.usage(transcript)
+        copilot.usage(transcript)
     (warning,) = caplog.records
     assert "gpt-6.1-sol" in warning.getMessage()
-    assert "model-from-herd-yaml" in warning.getMessage()
+    assert "claude-opus-5-5" not in warning.getMessage().split("outside")[0]
 
 
 def test_usage_comes_from_the_latest_usage_record(tmp_path: Path) -> None:
