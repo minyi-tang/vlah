@@ -15,5 +15,9 @@ def test_git_tracks_no_hidden_material():
     tracked = subprocess.run(
         ["git", "ls-files"], cwd=REPO_ROOT, capture_output=True, text=True, check=True
     ).stdout
-    bad = [f for f in tracked.splitlines() if FORBIDDEN.search(f)]
-    assert bad == []
+    forbidden_paths = [
+        tracked_path
+        for tracked_path in tracked.splitlines()
+        if FORBIDDEN.search(tracked_path)
+    ]
+    assert forbidden_paths == []

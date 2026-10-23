@@ -39,9 +39,9 @@ class SlowEvalMeasurer:
         exempt: bool,
         predicted: float,
     ) -> str:
-        extra = {"quota": "exempt"} if exempt else {}
+        extra_fields = {"quota": "exempt"} if exempt else {}
         try:
-            r = self.client.submit_dir(
+            receipt = self.client.submit_dir(
                 candidate_dir,
                 predicted=predicted,
                 dataset=dataset,
@@ -49,25 +49,26 @@ class SlowEvalMeasurer:
                 note=note,
                 parents=parents,
                 direction="integrator",
-                **extra,
+                **extra_fields,
             )
-        except ServiceError as e:
-            if e.code == 429:
-                raise QuotaExhausted(e.body.get("next_slot_at"))
+        except ServiceError as error:
+            if error.status_code == 429:
+                raise QuotaExhausted(error.body.get("next_slot_at"))
             raise
-        return r.get("of") or r["ticket"]
+        return receipt.get("of") or receipt["ticket"]
 
     def result(self, ticket: str) -> Measurement | None:
-        st = self.client.status(ticket)
-        if st["state"] not in ("done", "failed") or "result" not in st:
+        status = self.client.status(ticket)
+        if status["state"] not in ("done", "failed") or "result" not in status:
             return None
-        res = st["result"]
+        result_fields = status["result"]
         return Measurement(
             ticket,
-            st.get("hash"),
-            res.get("per_seed") or [],
-            res.get("score"),
-            bool(res.get("constraint_ok")) and res.get("score") is not None,
+            status.get("hash"),
+            result_fields.get("per_seed") or [],
+            result_fields.get("score"),
+            bool(result_fields.get("constraint_ok"))
+            and result_fields.get("score") is not None,
         )
 
 
@@ -83,21 +84,21 @@ class Integrator:
         on_advance: Callable[[Version], None] | None = None,
         log: Callable[[str], None] | None = None,
     ):
-        self.c = client.as_actor("integrator")
+        self.client = client.as_actor("integrator")
         self.clock = clock
         self.composer = composer
-        self.log = log or (lambda m: None)
+        self.log = log or (lambda message: None)
         self.core = IntegratorCore(
             config,
             Path(workdir),
             Path(baseline_dir),
-            self.c.calibration(),
+            self.client.calibration(),
             clock,
-            SlowEvalMeasurer(self.c),
+            SlowEvalMeasurer(self.client),
             on_advance,
         )
         self.cursor = 0
-        self.seen: set = set()
+        self.seen_tickets: set = set()
         self.pending_compose: list = []
 
     # views used by the runner, the scripted environment and the tests
@@ -111,83 +112,89 @@ class Integrator:
     merges_since_audit = property(lambda self: self.core.merges_since_audit)
 
     def poll_events(self):
-        ev = self.c.events(self.cursor)
-        self.cursor = ev["next"]
-        for e in ev["events"]:
-            if e["type"] != "result" or self.core.closed:
+        events_page = self.client.events(self.cursor)
+        self.cursor = events_page["next"]
+        for event in events_page["events"]:
+            if event["type"] != "result" or self.core.closed:
                 continue
-            d = e["data"]
-            actor = e.get("actor") or "anon"
+            result_data = event["data"]
+            actor = event.get("actor") or "anon"
             if (
                 actor in IGNORE_FROM
-                or d.get("dataset", "dev") != "dev"
-                or d["ticket"] in self.seen
+                or result_data.get("dataset", "dev") != "dev"
+                or result_data["ticket"] in self.seen_tickets
             ):
                 continue
-            self.seen.add(d["ticket"])
+            self.seen_tickets.add(result_data["ticket"])
             if (
-                d.get("state") != "done"
-                or not d.get("constraint_ok")
-                or d.get("score") is None
+                result_data.get("state") != "done"
+                or not result_data.get("constraint_ok")
+                or result_data.get("score") is None
             ):
                 continue
-            files = self.core.wd / "cands" / d["hash"]
-            if not files.exists():
-                unzip_to(self.c.candidate(d["hash"])["zip_b64"], files)
-                (files / "manifest.yaml").unlink(missing_ok=True)
+            payload_dir = self.core.wd / "cands" / result_data["hash"]
+            if not payload_dir.exists():
+                unzip_to(
+                    self.client.candidate(result_data["hash"])["zip_b64"], payload_dir
+                )
+                (payload_dir / "manifest.yaml").unlink(missing_ok=True)
             self.core.add(
                 VerifiedCandidate(
-                    d["ticket"],
-                    d["hash"],
-                    d.get("target") or "baseline@0",
-                    d.get("per_seed") or [],
-                    d["score"],
-                    files,
+                    result_data["ticket"],
+                    result_data["hash"],
+                    result_data.get("target") or "baseline@0",
+                    result_data.get("per_seed") or [],
+                    result_data["score"],
+                    payload_dir,
                     actor,
                 )
             )
 
     def publish(self, decisions: list[dict]):
         events = []
-        for dec in decisions:
-            data = {k: v for k, v in dec.items() if k != "type"}
-            if dec["type"] == "compose_task":
+        for decision in decisions:
+            event_data = {
+                field: value for field, value in decision.items() if field != "type"
+            }
+            if decision["type"] == "compose_task":
                 if self.composer is not None:
                     produced = self.composer(
-                        dec
+                        decision
                     )  # a Path, None, or a Future resolving to either
                     if produced:
-                        self.pending_compose.append((dec, produced, 0.0))
-                data = {
-                    k: data[k] for k in ("task_id", "candidates", "baseline", "why")
+                        self.pending_compose.append((decision, produced, 0.0))
+                event_data = {
+                    field: event_data[field]
+                    for field in ("task_id", "candidates", "baseline", "why")
                 }
-            elif dec["type"] == "baseline_advanced":
+            elif decision["type"] == "baseline_advanced":
                 self.log(
-                    f"baseline@{dec['baseline']} <- {dec['candidate'][:12]} gain {dec['paired']['mean']:.2f}"
-                    f" (se {dec['paired']['se']:.2f})"
+                    f"baseline@{decision['baseline']} <- {decision['candidate'][:12]}"
+                    f" gain {decision['paired']['mean']:.2f}"
+                    f" (se {decision['paired']['se']:.2f})"
                 )
-            events.append({"type": dec["type"], "data": data})
+            events.append({"type": decision["type"], "data": event_data})
         if events:
-            self.c.post_events(events)
+            self.client.post_events(events)
 
     def flush_compose(self):
-        keep = []
+        still_pending = []
         now = self.clock()
         for task, produced, not_before in self.pending_compose:
             if self.core.closed:
                 break
             if hasattr(produced, "done"):
                 if not produced.done():
-                    keep.append((task, produced, not_before))
+                    still_pending.append((task, produced, not_before))
                     continue
                 produced = produced.result() if produced.exception() is None else None
                 if not produced:
                     continue
             if now < not_before:
-                keep.append((task, produced, not_before))
+                still_pending.append((task, produced, not_before))
                 continue
             try:
-                self.c.as_actor("composer").submit_dir(
+                self.client.as_actor("composer").submit_dir(
                     Path(produced),
                     predicted=task["predicted"],
                     target=task["target"],
@@ -195,10 +202,10 @@ class Integrator:
                     parents=task["candidates"],
                     direction="compose",
                 )
-            except ServiceError as e:
-                if e.code == 429 and e.body.get("next_slot_at"):
-                    keep.append((task, produced, e.body["next_slot_at"]))
-        self.pending_compose = keep
+            except ServiceError as error:
+                if error.status_code == 429 and error.body.get("next_slot_at"):
+                    still_pending.append((task, produced, error.body["next_slot_at"]))
+        self.pending_compose = still_pending
 
     def step(self):
         self.poll_events()
@@ -206,20 +213,25 @@ class Integrator:
         self.publish(self.core.step())
 
     def due(self, now: float):
-        if any(hasattr(x[1], "done") and not x[1].done() for x in self.pending_compose):
+        if any(
+            hasattr(produced, "done") and not produced.done()
+            for _, produced, _ in self.pending_compose
+        ):
             return "wait"
         core_due = self.core.due(now)
         if self.pending_compose and not self.core.closed:
-            nb = min(x[2] for x in self.pending_compose)
-            pending = "now" if now >= nb else nb
+            earliest_not_before = min(
+                not_before for _, _, not_before in self.pending_compose
+            )
+            pending_due = "now" if now >= earliest_not_before else earliest_not_before
             if core_due in ("now", "wait"):
                 return core_due
             if core_due is None:
-                return pending
-            return pending if pending == "now" else min(pending, core_due)
+                return pending_due
+            return pending_due if pending_due == "now" else min(pending_due, core_due)
         return core_due
 
     def finalize(self, wait: Callable[[], None] | None = None) -> Version:
-        v, decisions = self.core.closeout(wait)
+        version, decisions = self.core.closeout(wait)
         self.publish(decisions)
-        return v
+        return version

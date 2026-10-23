@@ -10,36 +10,36 @@ from testbed.scorecard.report import render_many, render_one
 
 @pytest.mark.parametrize("name", list(EXPECT))
 def test_scripted_scorecards(name, tmp_path):
-    events, path = run_scenario(name, tmp_path)
-    sc, bad = check(name, events)
-    assert not bad, bad
-    assert render_one(read_events(path))
+    events, events_path = run_scenario(name, tmp_path)
+    _, mismatches = check(name, events)
+    assert not mismatches, mismatches
+    assert render_one(read_events(events_path))
 
 
 def test_render_many(tmp_path):
-    runs = [run_scenario(n, tmp_path)[0] for n in ("perfect_herd", "lone_wolf")]
-    out = render_many(runs, fmt="md")
-    assert "Breadth" in out and out.count("|") > 20
+    runs = [run_scenario(name, tmp_path)[0] for name in ("perfect_herd", "lone_wolf")]
+    rendered = render_many(runs, fmt="md")
+    assert "Breadth" in rendered and rendered.count("|") > 20
 
 
 def test_recorder_is_append_only_and_validates(tmp_path):
-    r = Recorder(tmp_path / "e.jsonl", "r1", "herd")
-    r.write(
+    recorder = Recorder(tmp_path / "e.jsonl", "r1", "herd")
+    recorder.write(
         "fast_run",
         {"hash": "h", "seed": 1, "score": 1.0, "baseline_score": 0.0},
         ts=1.0,
         actor="w1",
     )
     with pytest.raises(SchemaError):
-        r.write(
+        recorder.write(
             "blackboard_write", {"kind": "dead_end", "id": "x", "refs": []}, ts=2.0
         )  # dead_end needs hash
     with pytest.raises(SchemaError):
-        r.write("submit", {"ticket": "t"}, ts=3.0)
-    r.write(
+        recorder.write("submit", {"ticket": "t"}, ts=3.0)
+    recorder.write(
         "anything_new", {"free": "form"}, ts=4.0
     )  # unknown types are accepted (POST /events takes any type)
-    assert [e["type"] for e in read_events(tmp_path / "e.jsonl")] == [
+    assert [event["type"] for event in read_events(tmp_path / "e.jsonl")] == [
         "fast_run",
         "anything_new",
     ]

@@ -14,49 +14,56 @@ from testbed.scorecard.report import render_many
 
 
 def run_scenario(name, workdir: Path, problem="stub"):
-    fn, arm, n = SCENARIOS[name]
+    scenario, arm, worker_count = SCENARIOS[name]
     env = ScriptedEnv(
         workdir / name,
         problem=problem,
         arm=arm,
-        n=n,
+        n=worker_count,
         run_id=f"r-self-{name}",
         overrides=SELFTEST_KNOBS,
     )
     try:
-        events = fn(env)
-        out = workdir / f"{name}.events.jsonl"
-        shutil.copy(env.events_path(), out)
-        return events, out
+        events = scenario(env)
+        events_copy = workdir / f"{name}.events.jsonl"
+        shutil.copy(env.events_path(), events_copy)
+        return events, events_copy
     finally:
         env.close()
 
 
 def check(name, events):
-    sc = scorecard(events)
-    bad = []
-    for key, want in EXPECT[name].items():
-        got = sc["metrics"][key]["ok"]
+    card = scorecard(events)
+    mismatches = []
+    for metric_key, want in EXPECT[name].items():
+        got = card["metrics"][metric_key]["ok"]
         if got is not want:
-            bad.append(
-                f"{name}.{key}: expected {'green' if want else 'red'}, got {got} ({sc['metrics'][key]})"
+            mismatches.append(
+                f"{name}.{metric_key}: expected {'green' if want else 'red'}, got {got}"
+                f" ({card['metrics'][metric_key]})"
             )
-    return sc, bad
+    return card, mismatches
 
 
-def main(a) -> int:
-    wd = Path(a.out) if a.out else Path(tempfile.mkdtemp(prefix="tb-selftest-"))
-    wd.mkdir(parents=True, exist_ok=True)
-    runs, problems = [], []
+def main(arguments) -> int:
+    workdir = (
+        Path(arguments.out)
+        if arguments.out
+        else Path(tempfile.mkdtemp(prefix="tb-selftest-"))
+    )
+    workdir.mkdir(parents=True, exist_ok=True)
+    runs, mismatches = [], []
     for name in SCENARIOS:
-        events, path = run_scenario(name, wd, a.problem)
-        _, bad = check(name, events)
-        problems += bad
+        events, events_path = run_scenario(name, workdir, arguments.problem)
+        _, scenario_mismatches = check(name, events)
+        mismatches += scenario_mismatches
         runs.append(events)
-        print(f"{name:13s} {'OK' if not bad else 'MISMATCH'}   events: {path}")
+        print(
+            f"{name:13s} {'OK' if not scenario_mismatches else 'MISMATCH'}   events: {events_path}"
+        )
     print()
     print(render_many(runs))
-    for b in problems:
-        print("  !! " + b)
-    print(f"\nSELFTEST {'PASS' if not problems else 'FAIL'}")
-    return 0 if not problems else 1
+    for mismatch in mismatches:
+        print("  !! " + mismatch)
+    print(f"\nSELFTEST {'PASS' if not mismatches else 'FAIL'}")
+    return 0 if not mismatches else 1

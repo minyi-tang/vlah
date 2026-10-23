@@ -16,9 +16,11 @@ import yaml
 from testbed.cli.client import SlowClient
 from testbed.integrator.core import IntegratorConfig
 
+STATUS_POLL_SECONDS = 0.5
+
 
 def main():
-    ap = argparse.ArgumentParser()
+    parser = argparse.ArgumentParser()
     for flag in (
         "--arm",
         "--problem",
@@ -28,26 +30,30 @@ def main():
         "--hours",
         "--integrator-config",
     ):
-        ap.add_argument(flag, required=True)
-    a = ap.parse_args()
+        parser.add_argument(flag, required=True)
+    arguments = parser.parse_args()
     assert (
-        IntegratorConfig.from_json(Path(a.integrator_config).read_text())
+        IntegratorConfig.from_json(Path(arguments.integrator_config).read_text())
         == IntegratorConfig()
     )
-    key = os.environ["TB_SYSTEM_KEY"]
-    candidate = Path(tempfile.mkdtemp(prefix="fake-herd-"))
-    shutil.copytree(Path(a.problem) / "policy", candidate, dirs_exist_ok=True)
-    params = yaml.safe_load((candidate / "params.yaml").read_text())
+    system_key = os.environ["TB_SYSTEM_KEY"]
+    candidate_dir = Path(tempfile.mkdtemp(prefix="fake-herd-"))
+    shutil.copytree(
+        Path(arguments.problem) / "policy", candidate_dir, dirs_exist_ok=True
+    )
+    params = yaml.safe_load((candidate_dir / "params.yaml").read_text())
     params["ingredients"]["backfill"] = True
-    (candidate / "params.yaml").write_text(yaml.safe_dump(params))
-    worker = SlowClient(a.slow_url, a.run_id, "w1", key=key)
+    (candidate_dir / "params.yaml").write_text(yaml.safe_dump(params))
+    worker = SlowClient(arguments.slow_url, arguments.run_id, "w1", key=system_key)
     receipt = worker.submit_dir(
-        candidate, predicted=-900.0, target="baseline@0", direction="backfill"
+        candidate_dir, predicted=-900.0, target="baseline@0", direction="backfill"
     )
     ticket = receipt.get("of") or receipt["ticket"]
     while "result" not in worker.status(ticket):
-        time.sleep(0.5)
-    SlowClient(a.slow_url, a.run_id, "runner", key=key).final(ticket=ticket)
+        time.sleep(STATUS_POLL_SECONDS)
+    SlowClient(arguments.slow_url, arguments.run_id, "runner", key=system_key).final(
+        ticket=ticket
+    )
 
 
 if __name__ == "__main__":
