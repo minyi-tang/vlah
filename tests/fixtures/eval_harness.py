@@ -12,7 +12,7 @@ from tests.fixtures.herd import make_store_blackboard
 from vlah.adapters.memory.signal_source import FAKE_SCORE_FILE_NAME, FakeSlowSource
 from vlah.arms.config import PRESETS, ArmConfig
 from vlah.core.blackboard.blackboard import StoreBlackboard
-from vlah.core.eval.api import EvalRequest
+from vlah.core.eval.api import EvalRequest, EvalRequestKind
 from vlah.core.eval.jobs import GateOutcome
 from vlah.core.eval.service import LadderEvalService
 from vlah.core.indexer.api import Hit
@@ -113,7 +113,9 @@ class EvalHarness:
         )
         return directory
 
-    def request(self, directory: Path, **fields: str | None) -> EvalRequest:
+    def request(
+        self, directory: Path, **fields: str | EvalRequestKind | None
+    ) -> EvalRequest:
         return EvalRequest.model_validate(
             {
                 "candidate_directory": directory,
@@ -148,9 +150,14 @@ def make_eval_harness(
     arm: ArmConfig = PRESETS["S2"],
     declarations: tuple[SourceDecl, ...] = (source_declaration("slow", 1.0, "10m"),),
     gates: tuple[GateSpec, ...] = (),
+    blackboard: StoreBlackboard | None = None,
 ) -> EvalHarness:
+    """A fresh eval client; over an existing blackboard, it is one restarted."""
     clock = FakeClock()
-    blackboard = make_store_blackboard(clock, name="eval")
+    if blackboard is None:
+        blackboard = make_store_blackboard(clock, name="eval")
+    else:
+        pass
     sources = tuple(
         FakeSlowSource(clock=clock, declaration=declaration)
         for declaration in declarations

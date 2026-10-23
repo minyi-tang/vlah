@@ -3,7 +3,8 @@
 Three budgets:
 - each level's daily runs (budget.per_day);
 - each worker's daily runs at the cheaper levels (t1_per_worker_per_day);
-- the Integrator's own remeasure quota, a total and a per-hour cap.
+- the Integrator's own quota, a total and a per-hour cap, spent by its remeasures
+  and by compose candidates, which are its work too (D74).
 
 A submission is charged when it is sent, so the slot is held while the judge works,
 and refunded when the judge reports it answered from its cache (TB section 11.3).
@@ -20,7 +21,7 @@ from vlah.core.types.sources import SourceDecl
 DAY_SECONDS = 86400.0
 HOUR_SECONDS = 3600.0
 
-RequestKind = Literal["worker", "remeasure"]
+RequestKind = Literal["worker", "remeasure", "compose"]
 
 
 @dataclass(kw_only=True)
@@ -43,7 +44,7 @@ class QuotaTracker:
         )
 
     def allows(self, kind: RequestKind, caller: ActorId, level: SourceDecl) -> bool:
-        if kind == "remeasure":
+        if kind in ("remeasure", "compose"):
             return (
                 len(self.integrator_runs) < self.params.quota_integrator_total
                 and self.count_since(self.integrator_runs, HOUR_SECONDS)
@@ -64,7 +65,7 @@ class QuotaTracker:
     def run_lists(
         self, kind: RequestKind, caller: ActorId, level_id: str
     ) -> list[list[float]]:
-        if kind == "remeasure":
+        if kind in ("remeasure", "compose"):
             return [self.integrator_runs]
         elif level_id != self.top_level_id:
             return [

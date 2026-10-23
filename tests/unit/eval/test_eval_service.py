@@ -12,7 +12,7 @@ from tests.fixtures.eval_harness import WORKER, make_eval_harness, source_declar
 from vlah.adapters.memory.model import MemoryModel
 from vlah.adapters.memory.signal_source import FakeSlowSource
 from vlah.adapters.memory.store import MemoryVectorIndex
-from vlah.arms.config import PRESETS
+from vlah.arms.config import PRESETS, ArmName
 from vlah.core.eval.api import RemeasureRequest
 from vlah.core.eval.jobs import GateOutcome
 from vlah.core.indexer.api import Hit
@@ -28,6 +28,7 @@ from vlah.ports.signal_source import CandidateRef, Dataset
 pytestmark = pytest.mark.eval
 
 OTHER = ActorId("worker-08")
+COMPOSE = ActorId("worker-00")
 CHEAP = source_declaration("cheap", 0.1, "2m")
 EXPENSIVE = source_declaration("expensive", 10.0, "6h")
 
@@ -276,6 +277,65 @@ def test_remeasure_runs_once_at_the_top_level_for_the_integrator(
     ]
     assert [job.job_id.split("-")[0] for job in integrator_jobs] == ["expensive"]
     assert not any(event.type == "result_ready" for event in events)
+
+
+@pytest.mark.parametrize("arm", ["B1", "S1", "S2"])
+def test_a_compose_request_runs_the_same_in_every_arm(
+    tmp_path: Path, arm: ArmName
+) -> None:
+    """The compose slot's request went through the arm's dedup and confirmation, so
+    the same compose candidate ran in B1 and got dedup_hit in S1 and S2 (#56 R5, D74).
+    """
+    harness = make_eval_harness(
+        tmp_path, arm=PRESETS[arm], declarations=(CHEAP, EXPENSIVE)
+    )
+    directory = harness.candidate(2.0)
+    original = harness.service.request(harness.request(directory), WORKER)
+    harness.run(seconds=8 * 3600)
+    harness.indexer.candidate_hits = (
+        Hit(item_id="c-old", kind="candidate", similarity=1.0, summary="same"),
+    )
+    harness.indexer.dead_end_hits = (
+        Hit(item_id="c-dead", kind="claim", similarity=1.0, summary="tried"),
+    )
+    composed = harness.service.request(
+        harness.request(directory, kind="compose"), COMPOSE
+    )
+    assert composed.status == "queued", "no dedup and no confirmation for compose"
+    events = harness.run(seconds=8 * 3600)
+    (ready,) = [event.data for event in events if isinstance(event.data, ResultReady)]
+    assert (ready.submitter, ready.claim_id, ready.level) == (
+        COMPOSE,
+        composed.claim_id,
+        "expensive",
+    ), "a compose result is a result_ready for the compose slot, not a remeasure"
+    quota = harness.service.runner.quota
+    assert len(quota.integrator_runs) == 2, "both levels on the Integrator's quota"
+    assert COMPOSE not in quota.cheap_runs_by_worker
+    assert len(quota.runs_by_level["cheap"]) == 1, "only the worker's run"
+    repeat = harness.service.request(harness.request(directory), OTHER)
+    assert (repeat.status == "dedup_hit") == PRESETS[arm].hash_dedup
+    assert repeat.claim_id == (
+        original.claim_id if PRESETS[arm].hash_dedup else repeat.claim_id
+    ), "a worker's duplicate points at the worker's claim, never the compose claim"
+
+
+def test_a_restart_restores_compose_runs_to_the_integrator_quota(
+    tmp_path: Path,
+) -> None:
+    """Replayed as worker runs, a compose candidate's runs would charge the worker
+    quota after a restart and become a dedup original (D13, D74)."""
+    harness = make_eval_harness(tmp_path, declarations=(CHEAP, EXPENSIVE))
+    harness.service.request(
+        harness.request(harness.candidate(2.0), kind="compose"), COMPOSE
+    )
+    harness.run(seconds=8 * 3600)
+    restarted = make_eval_harness(
+        tmp_path, declarations=(CHEAP, EXPENSIVE), blackboard=harness.blackboard
+    )
+    assert len(restarted.service.runner.quota.integrator_runs) == 2
+    assert COMPOSE not in restarted.service.runner.quota.cheap_runs_by_worker
+    assert restarted.service.claims_by_hash == {}
 
 
 def test_post_result_gates_refute(tmp_path: Path) -> None:

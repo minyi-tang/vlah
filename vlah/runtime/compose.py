@@ -29,8 +29,8 @@ def compose_arm(arm: ArmConfig) -> ArmConfig:
     """The arm configuration the compose slot's tools run under: the run's arm with
     every switch the tools read fixed, so only the arm's name differs (D74).
 
-    The eval service keeps its own copy of the arm, so needs_confirmation and
-    hash_dedup still follow the run's arm there.
+    The eval service keeps its own copy of the arm; it learns that a request is
+    compose work from the request itself, which the compose tool server marks.
     """
     return arm.model_copy(
         update={
