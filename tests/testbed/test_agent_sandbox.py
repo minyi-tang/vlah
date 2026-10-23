@@ -110,16 +110,22 @@ def stub_service(data_dir: Path) -> str:
 
 
 @pytest.mark.parametrize(
-    "platform,has_sandbox_exec,refuses",
-    [("linux", True, True), ("darwin", False, True), ("darwin", True, False)],
-    ids=["not-macos", "no-sandbox-exec", "macos-sandboxed"],
+    "platform,has_sandbox_exec,arm,refuses",
+    [
+        ("linux", True, "isolated", True),
+        ("darwin", False, "isolated", True),
+        ("darwin", True, "isolated", False),
+        ("linux", True, "herd", False),
+    ],
+    ids=["not-macos", "no-sandbox-exec", "macos-sandboxed", "herd-exempt"],
 )
 def test_run_checks_the_sandbox_before_anything_starts(
-    tmp_path, monkeypatch, platform, has_sandbox_exec, refuses
+    tmp_path, monkeypatch, platform, has_sandbox_exec, arm, refuses
 ):
     """Bug: on Linux, or on macOS without sandbox-exec, tb run started the agents with no sandbox and
     full read access to hidden material, without a word (#86). On macOS with sandbox-exec the run
-    must still go on without the flag.
+    must still go on without the flag, and so must the herd arm anywhere: its runtime confines its
+    own workers, so the testbed neither refuses nor records an unsafe_no_sandbox event for it.
     """
     real_which = shutil.which
 
@@ -143,7 +149,7 @@ def test_run_checks_the_sandbox_before_anything_starts(
             [
                 "run",
                 "--arm",
-                "isolated",
+                arm,
                 "--problem",
                 "stub",
                 "--agent-cmd",

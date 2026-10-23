@@ -144,7 +144,8 @@ def agent_tmp(ws: Path) -> Path:
     """Short per-agent temp dir (Unix socket paths, used by multiprocessing, must stay under 104 bytes)."""
     import hashlib
 
-    return Path("/private/tmp") / (
+    # /tmp resolves to /private/tmp on macOS, which the sandbox rules name; it is /tmp on Linux
+    return Path(_real("/tmp")) / (
         "tb-" + hashlib.sha1(_real(ws).encode()).hexdigest()[:10]
     )
 
