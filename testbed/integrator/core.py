@@ -26,6 +26,8 @@ from typing import Callable, Protocol
 from testbed.integrator.merge import Conflict, copy_tree, distance, three_way
 from testbed.problem_api import content_hash, mean, se
 
+AUDIT_GAP_TOLERANCE = 1e-9  # float slack when a gap is compared with its threshold
+
 
 @dataclass(frozen=True)
 class IntegratorConfig:
@@ -142,13 +144,21 @@ class Version:
 
 def paired(candidate_per_seed, baseline_per_seed) -> dict:
     """Per-seed paired difference: {mean, se, n_items, n_reps} as in the herd's Paired."""
-    d = [x - y for x, y in zip(candidate_per_seed, baseline_per_seed)]
-    return {"mean": mean(d) if d else 0.0, "se": se(d), "n_items": len(d), "n_reps": 0}
+    differences = [
+        candidate - baseline
+        for candidate, baseline in zip(candidate_per_seed, baseline_per_seed)
+    ]
+    return {
+        "mean": mean(differences) if differences else 0.0,
+        "se": se(differences),
+        "n_items": len(differences),
+        "n_reps": 0,
+    }
 
 
 def target_index(target: str | None) -> int | None:
-    m = re.fullmatch(r"baseline@(\d+)", str(target or "baseline@0"))
-    return int(m.group(1)) if m else None
+    match = re.fullmatch(r"baseline@(\d+)", str(target or "baseline@0"))
+    return int(match.group(1)) if match else None
 
 
 class IntegratorCore:
@@ -162,24 +172,24 @@ class IntegratorCore:
         measurer: Measurer,
         on_advance: Callable[[Version], None] | None = None,
     ):
-        """calibration: baseline_slow and baseline_audit Aggs (per_seed, score, ci) and audit_sigma {dev, audit}."""
-        self.cfg = config
-        self.wd = Path(workdir)
-        (self.wd / "baseline").mkdir(parents=True, exist_ok=True)
+        """calibration: baseline_slow and baseline_audit aggregates (per_seed, score, ci) and audit_sigma {dev, audit}."""
+        self.config = config
+        self.workdir = Path(workdir)
+        (self.workdir / "baseline").mkdir(parents=True, exist_ok=True)
         self.clock = clock
         self.measurer = measurer
         self.on_advance = on_advance
-        self.sigma = calibration.get("audit_sigma") or {"dev": 0.0, "audit": 0.0}
-        v0dir = self.wd / "baseline" / "0"
-        copy_tree(baseline_dir, v0dir)
-        base = calibration["baseline_slow"]
+        self.audit_sigma = calibration.get("audit_sigma") or {"dev": 0.0, "audit": 0.0}
+        version0_dir = self.workdir / "baseline" / "0"
+        copy_tree(baseline_dir, version0_dir)
+        baseline_slow = calibration["baseline_slow"]
         self.versions = [
             Version(
                 0,
-                str(v0dir),
-                base["per_seed"],
-                base["score"],
-                base.get("ci"),
+                str(version0_dir),
+                baseline_slow["per_seed"],
+                baseline_slow["score"],
+                baseline_slow.get("ci"),
                 audit_per_seed=(calibration.get("baseline_audit") or {}).get(
                     "per_seed"
                 ),
@@ -189,18 +199,18 @@ class IntegratorCore:
         ]
         self.write_version(self.versions[0])
         self.queue: deque = deque()
-        self.out: list[dict] = []
+        self.pending_decisions: list[dict] = []
         self.task: dict | None = None
         self.wait_until = 0.0
         self.quota_exhausted = False
         self.merges_since_audit = 0
-        self.last_audit = 0
-        self.audit_used = 0
+        self.last_audited_k = 0
+        self.audits_used = 0
         self.closed = False
         self.frozen: Version | None = None
-        self.compose_ids = 0
+        self.compose_task_count = 0
         self.quarantined: set[str] = set()  # content hashes removed by an audit
-        self.files_by_hash: dict[str, str] = {}
+        self.content_hash_by_hash: dict[str, str] = {}
         self.stats = {
             "remeasures": 0,
             "audits": 0,
@@ -209,7 +219,6 @@ class IntegratorCore:
             "failed": 0,
         }
 
-    # ------------------------------------------------------------------ basics
     @property
     def k(self) -> int:
         return len(self.versions) - 1
@@ -217,15 +226,15 @@ class IntegratorCore:
     def current(self) -> Version:
         return self.versions[-1]
 
-    def emit(self, type_: str, data: dict):
-        self.out.append(dict(data, type=type_))
+    def emit(self, event_type: str, data: dict):
+        self.pending_decisions.append(dict(data, type=event_type))
 
-    def write_version(self, v: Version):
-        (self.wd / "baseline" / f"{v.k}.json").write_text(
-            json.dumps(v.record(), indent=1, default=str)
+    def write_version(self, version: Version):
+        (self.workdir / "baseline" / f"{version.k}.json").write_text(
+            json.dumps(version.record(), indent=1, default=str)
         )
-        (self.wd / "baseline" / f"{v.k}.testbed.json").write_text(
-            json.dumps(asdict(v), indent=1, default=str)
+        (self.workdir / "baseline" / f"{version.k}.testbed.json").write_text(
+            json.dumps(asdict(version), indent=1, default=str)
         )
 
     def add(self, candidate: VerifiedCandidate):
@@ -240,13 +249,13 @@ class IntegratorCore:
         if self.closed:
             return None
         if (
-            self.merges_since_audit >= self.cfg.audit_every
+            self.merges_since_audit >= self.config.audit_every
             and self.audits_left(periodic=True) > 0
         ):
             return "now"
         if not self.queue:
             return None
-        if any(target_index(c.target) == self.k for c in self.queue):
+        if any(target_index(candidate.target) == self.k for candidate in self.queue):
             return "now"
         if self.quota_exhausted:
             return None
@@ -255,28 +264,28 @@ class IntegratorCore:
     def step(self) -> list[dict]:
         """Advance by at most one action; return the decisions made (as event-shaped dicts)."""
         if self.task is not None:
-            m = self.measurer.result(self.task["ticket"])
-            if m is not None:
+            measurement = self.measurer.result(self.task["ticket"])
+            if measurement is not None:
                 task, self.task = self.task, None
-                getattr(self, "on_" + task["kind"])(task, m)
+                getattr(self, "on_" + task["kind"])(task, measurement)
         elif not self.closed:
             if (
-                self.merges_since_audit >= self.cfg.audit_every
+                self.merges_since_audit >= self.config.audit_every
                 and self.audits_left(periodic=True) > 0
             ):
                 self.start_audit()
             else:
                 self.process_next()
-        out, self.out = self.out, []
-        return out
+        decisions, self.pending_decisions = self.pending_decisions, []
+        return decisions
 
     def audits_left(self, periodic: bool) -> int:
-        left = self.cfg.audit_max - self.audit_used
-        return left - self.cfg.audit_reserve if periodic else left
+        left = self.config.audit_max - self.audits_used
+        return left - self.config.audit_reserve if periodic else left
 
     def submit(
         self,
-        d: Path,
+        candidate_dir: Path,
         baseline: int,
         dataset: str,
         note: str,
@@ -285,7 +294,7 @@ class IntegratorCore:
         predicted: float | None = None,
     ) -> str:
         return self.measurer.submit(
-            d,
+            candidate_dir,
             baseline,
             dataset,
             note,
@@ -298,77 +307,85 @@ class IntegratorCore:
             ),
         )
 
-    # ------------------------------------------------------------------ one candidate
     def process_next(self):
         blocked = self.clock() < self.wait_until or self.quota_exhausted
-        for i, c in enumerate(self.queue):
-            if blocked and target_index(c.target) != self.k:
+        for index, candidate in enumerate(self.queue):
+            if blocked and target_index(candidate.target) != self.k:
                 continue
-            del self.queue[i]
-            self.integrate(c)
+            del self.queue[index]
+            self.integrate(candidate)
             return
 
-    def integrate(self, c: VerifiedCandidate):
-        t = target_index(c.target)
-        if t is None or t > self.k:
-            self.fail(c, "invalid_target")
+    def integrate(self, candidate: VerifiedCandidate):
+        target_k = target_index(candidate.target)
+        if target_k is None or target_k > self.k:
+            self.fail(candidate, "invalid_target")
             return
-        src = Path(c.files)
-        self.files_by_hash[c.hash] = content_hash(src)
-        if self.files_by_hash[c.hash] in self.quarantined:
-            self.fail(c, "quarantined")
+        payload_dir = Path(candidate.files)
+        self.content_hash_by_hash[candidate.hash] = content_hash(payload_dir)
+        if self.content_hash_by_hash[candidate.hash] in self.quarantined:
+            self.fail(candidate, "quarantined")
             return
-        claimed = t
-        t = self.effective_base(src, t)
-        if t != claimed:
+        claimed_k = target_k
+        target_k = self.effective_base(payload_dir, target_k)
+        if target_k != claimed_k:
             self.emit(
                 "stale_target",
                 {
-                    "candidate": c.hash,
-                    "claimed": claimed,
-                    "effective": t,
-                    "actor": c.actor,
+                    "candidate": candidate.hash,
+                    "claimed": claimed_k,
+                    "effective": target_k,
+                    "actor": candidate.actor,
                 },
             )
-        out = self.wd / "rebased" / f"{c.hash[:16]}@{self.k}"
+        rebased_dir = self.workdir / "rebased" / f"{candidate.hash[:16]}@{self.k}"
         try:
-            changed = three_way(
-                Path(self.versions[t].dir), Path(self.versions[self.k].dir), src, out
+            changed_files = three_way(
+                Path(self.versions[target_k].dir),
+                Path(self.versions[self.k].dir),
+                payload_dir,
+                rebased_dir,
             )
-        except Conflict as e:
-            self.compose(c, t, src, str(e))
+        except Conflict as conflict:
+            self.compose(candidate, target_k, payload_dir, str(conflict))
             return
-        earlier = paired(c.per_seed, self.versions[t].per_seed)
-        if t == self.k:
+        earlier_paired = paired(candidate.per_seed, self.versions[target_k].per_seed)
+        if target_k == self.k:
             self.decide(
-                c,
-                out,
-                changed,
-                earlier,
-                Measurement(c.ticket, c.hash, c.per_seed, c.score, True),
+                candidate,
+                rebased_dir,
+                changed_files,
+                earlier_paired,
+                Measurement(
+                    candidate.ticket,
+                    candidate.hash,
+                    candidate.per_seed,
+                    candidate.score,
+                    True,
+                ),
             )
             return
-        if not changed:
+        if not changed_files:
             self.fail(
-                c,
+                candidate,
                 "below_1se",
-                paired={"mean": 0.0, "se": 0.0, "n_items": 0, "n_reps": 0},
+                paired_gain={"mean": 0.0, "se": 0.0, "n_items": 0, "n_reps": 0},
                 note="no change after rebase",
             )
             return
         try:
             ticket = self.submit(
-                out,
+                rebased_dir,
                 self.k,
                 "dev",
-                f"remeasure {c.hash[:12]} on baseline@{self.k}",
-                parents=[c.hash],
-                predicted=c.score,  # its own score; earlier is relative to v_t, not v_k
+                f"remeasure {candidate.hash[:12]} on baseline@{self.k}",
+                parents=[candidate.hash],
+                predicted=candidate.score,  # its own score; earlier is relative to v_t, not v_k
             )
-        except QuotaExhausted as q:
-            self.queue.appendleft(c)
-            if q.next_slot_at:
-                self.wait_until = q.next_slot_at
+        except QuotaExhausted as exhausted:
+            self.queue.appendleft(candidate)
+            if exhausted.next_slot_at:
+                self.wait_until = exhausted.next_slot_at
             else:
                 self.quota_exhausted = True
             return
@@ -376,335 +393,388 @@ class IntegratorCore:
         self.task = {
             "kind": "remeasure",
             "ticket": ticket,
-            "cand": c,
-            "out": str(out),
-            "changed": changed,
-            "earlier": earlier,
+            "candidate": candidate,
+            "rebased_dir": str(rebased_dir),
+            "changed_files": changed_files,
+            "earlier_paired": earlier_paired,
             "base_k": self.k,
         }
 
-    def effective_base(self, src: Path, t: int) -> int:
+    def effective_base(self, payload_dir: Path, claimed_k: int) -> int:
         """The version a candidate was really built on: the one nearest to it by content, whatever its label
         says (agents keep editing work/ after a merge, and copy old directories). Ties go to the claimed
         version, then to the older one: an older base can only cause a conflict (a compose task), while a
         newer base the candidate lacks would silently drop that version's changes."""
-        distances = [distance(src, Path(v.dir)) for v in self.versions]
+        distances = [
+            distance(payload_dir, Path(version.dir)) for version in self.versions
+        ]
         nearest = min(distances)
-        tied = [j for j, d in enumerate(distances) if d == nearest]
-        return t if t in tied else tied[0]
+        tied_versions = [
+            index
+            for index, version_distance in enumerate(distances)
+            if version_distance == nearest
+        ]
+        return claimed_k if claimed_k in tied_versions else tied_versions[0]
 
-    def on_remeasure(self, task, m: Measurement):
-        c = task["cand"]
+    def on_remeasure(self, task, measurement: Measurement):
+        candidate = task["candidate"]
         if (
             task["base_k"] != self.k
         ):  # the baseline moved under us (revert): try again later
-            self.queue.appendleft(c)
+            self.queue.appendleft(candidate)
             return
-        m.constraint_ok = m.constraint_ok and m.score is not None
+        measurement.constraint_ok = (
+            measurement.constraint_ok and measurement.score is not None
+        )
         self.decide(
-            c, Path(task["out"]), task["changed"], task["earlier"], m, remeasured=True
+            candidate,
+            Path(task["rebased_dir"]),
+            task["changed_files"],
+            task["earlier_paired"],
+            measurement,
+            remeasured=True,
         )
 
     def decide(
         self,
-        c: VerifiedCandidate,
-        out: Path,
-        changed,
-        earlier,
-        m: Measurement,
+        candidate: VerifiedCandidate,
+        rebased_dir: Path,
+        changed_files,
+        earlier_paired,
+        measurement: Measurement,
         remeasured=False,
     ):
-        base = self.versions[self.k]
-        pr = paired(m.per_seed, base.per_seed) if m.score is not None else None
-        if pr is not None and remeasured:
-            pr["n_reps"] = 1
-            thr = self.cfg.interaction_k * math.sqrt(earlier["se"] ** 2 + pr["se"] ** 2)
-            if earlier["mean"] - pr["mean"] > thr:
+        current_version = self.versions[self.k]
+        paired_gain = (
+            paired(measurement.per_seed, current_version.per_seed)
+            if measurement.score is not None
+            else None
+        )
+        if paired_gain is not None and remeasured:
+            paired_gain["n_reps"] = 1
+            interaction_threshold = self.config.interaction_k * math.sqrt(
+                earlier_paired["se"] ** 2 + paired_gain["se"] ** 2
+            )
+            if earlier_paired["mean"] - paired_gain["mean"] > interaction_threshold:
                 self.emit(
                     "interaction_found",
                     {
-                        "candidate": c.hash,
+                        "candidate": candidate.hash,
                         "baseline": self.k,
-                        "earlier": earlier,
-                        "remeasured": pr,
-                        "threshold": thr,
-                        "overlaps_with": list(base.candidates),
+                        "earlier": earlier_paired,
+                        "remeasured": paired_gain,
+                        "threshold": interaction_threshold,
+                        "overlaps_with": list(current_version.candidates),
                     },
                 )
-        if not m.constraint_ok or pr is None:
-            self.fail(c, "constraint", paired=pr)
+        if not measurement.constraint_ok or paired_gain is None:
+            self.fail(candidate, "constraint", paired_gain=paired_gain)
             return
-        if not (pr["mean"] > self.cfg.accept_se * pr["se"]):
-            self.fail(c, "below_1se", paired=pr)
+        if not (paired_gain["mean"] > self.config.accept_se * paired_gain["se"]):
+            self.fail(candidate, "below_1se", paired_gain=paired_gain)
             return
-        k1 = self.k + 1
-        vdir = self.wd / "baseline" / str(k1)
-        copy_tree(out, vdir)
-        v = Version(
-            k1,
-            str(vdir),
-            m.per_seed,
-            m.score,
-            ticket=m.ticket,
-            hash=m.hash,
-            candidates=base.candidates + [c.hash],
+        next_k = self.k + 1
+        version_dir = self.workdir / "baseline" / str(next_k)
+        copy_tree(rebased_dir, version_dir)
+        version = Version(
+            next_k,
+            str(version_dir),
+            measurement.per_seed,
+            measurement.score,
+            ticket=measurement.ticket,
+            hash=measurement.hash,
+            candidates=current_version.candidates + [candidate.hash],
             parent=self.k,
-            added=c.hash,
-            files_changed=changed,
-            paired=pr,
+            added=candidate.hash,
+            files_changed=changed_files,
+            paired=paired_gain,
             created_ts=self.clock(),
-            note=f"merge {c.hash[:12]} ({c.actor})",
+            note=f"merge {candidate.hash[:12]} ({candidate.actor})",
         )
-        self.versions.append(v)
-        self.write_version(v)
+        self.versions.append(version)
+        self.write_version(version)
         self.merges_since_audit += 1
         self.stats["merged"] += 1
         self.emit(
             "baseline_advanced",
             {
-                "baseline": k1,
-                "parent_baseline": k1 - 1,
-                "candidate": c.hash,
-                "files_changed": changed,
-                "paired": pr,
+                "baseline": next_k,
+                "parent_baseline": next_k - 1,
+                "candidate": candidate.hash,
+                "files_changed": changed_files,
+                "paired": paired_gain,
                 "guard_pending": False,
-                "ticket": m.ticket,
-                "actor": c.actor,
+                "ticket": measurement.ticket,
+                "actor": candidate.actor,
             },
         )
         if self.on_advance:
-            self.on_advance(v)
+            self.on_advance(version)
 
-    def fail(self, c: VerifiedCandidate, reason: str, paired=None, note=""):
+    def fail(
+        self, candidate: VerifiedCandidate, reason: str, paired_gain=None, note=""
+    ):
         self.stats["failed"] += 1
         self.emit(
             "integration_failed",
             {
-                "candidate": c.hash,
+                "candidate": candidate.hash,
                 "baseline": self.k,
-                "paired": paired,
+                "paired": paired_gain,
                 "reason": reason,
                 "note": note,
-                "actor": c.actor,
+                "actor": candidate.actor,
             },
         )
 
-    def compose(self, c: VerifiedCandidate, t: int, src: Path, why: str):
+    def compose(
+        self, candidate: VerifiedCandidate, base_k: int, payload_dir: Path, why: str
+    ):
         """A rebase conflict: emit a compose task (the caller runs the compose agent)."""
-        self.compose_ids += 1
+        self.compose_task_count += 1
         self.stats["compose_tasks"] += 1
         self.emit(
             "compose_task",
             {
-                "task_id": f"compose-{self.compose_ids}",
-                "candidates": [c.hash] + list(self.versions[self.k].candidates),
+                "task_id": f"compose-{self.compose_task_count}",
+                "candidates": [candidate.hash] + list(self.versions[self.k].candidates),
                 "baseline": self.k,
                 "target": f"baseline@{self.k}",
                 "why": why,
-                "base_dir": self.versions[t].dir,
+                "base_dir": self.versions[base_k].dir,
                 "ours_dir": self.versions[self.k].dir,
-                "theirs_dir": str(src),
-                "predicted": c.score,  # its own measured score: a fair guess for the merged version
+                "theirs_dir": str(payload_dir),
+                "predicted": candidate.score,  # its own measured score: a fair guess for the merged version
             },
         )
-        self.fail(c, "conflict", note=why)
+        self.fail(candidate, "conflict", note=why)
 
-    # ------------------------------------------------------------------ audit (D72)
     def start_audit(self, final=False):
-        j, k = self.last_audit, self.k
-        if k == j:
+        from_k, to_k = self.last_audited_k, self.k
+        if to_k == from_k:
             self.merges_since_audit = 0
             return
-        for idx in (j, k):
-            if self.versions[idx].audit_per_seed is None:
+        for version_k in (from_k, to_k):
+            if self.versions[version_k].audit_per_seed is None:
                 self.measure_audit(
-                    idx, {"kind": "audit", "segment": [j, k], "final": final}
+                    version_k,
+                    {"kind": "audit", "segment": [from_k, to_k], "final": final},
                 )
                 return
-        self.finish_audit(j, k, final)
+        self.finish_audit(from_k, to_k, final)
 
-    def measure_audit(self, idx: int, then: dict) -> bool:
-        v = self.versions[idx]
+    def measure_audit(self, version_k: int, next_task: dict) -> bool:
+        version = self.versions[version_k]
         try:
             ticket = self.submit(
-                Path(v.dir), idx, "audit", f"audit measurement of baseline@{idx}"
+                Path(version.dir),
+                version_k,
+                "audit",
+                f"audit measurement of baseline@{version_k}",
             )
         except QuotaExhausted:
-            self.audit_used = self.cfg.audit_max
+            self.audits_used = self.config.audit_max
             return False
-        self.audit_used += 1
+        self.audits_used += 1
         self.stats["audits"] += 1
-        self.task = dict(then, ticket=ticket, idx=idx)
+        self.task = dict(next_task, ticket=ticket, version_k=version_k)
         return True
 
-    def on_audit(self, task, m: Measurement):
-        self.versions[task["idx"]].audit_per_seed = m.per_seed
-        self.write_version(self.versions[task["idx"]])
-        j, k = task["segment"]
+    def on_audit(self, task, measurement: Measurement):
+        self.versions[task["version_k"]].audit_per_seed = measurement.per_seed
+        self.write_version(self.versions[task["version_k"]])
+        from_k, to_k = task["segment"]
         if (
-            self.versions[j].audit_per_seed is None
-            or self.versions[k].audit_per_seed is None
+            self.versions[from_k].audit_per_seed is None
+            or self.versions[to_k].audit_per_seed is None
         ):
             self.start_audit(final=task.get("final", False))
             return
-        self.finish_audit(j, k, task.get("final", False))
+        self.finish_audit(from_k, to_k, task.get("final", False))
 
     def threshold(self) -> float:
-        return self.cfg.audit_k * math.sqrt(
-            self.sigma.get("dev", 0.0) ** 2 + self.sigma.get("audit", 0.0) ** 2
+        return self.config.audit_k * math.sqrt(
+            self.audit_sigma.get("dev", 0.0) ** 2
+            + self.audit_sigma.get("audit", 0.0) ** 2
         )
 
-    def discrepancy(self, a: int, b: int):
-        va, vb = self.versions[a], self.versions[b]
-        dev = paired(vb.per_seed, va.per_seed)
-        aud = paired(vb.audit_per_seed, va.audit_per_seed)
-        return dev, aud, abs(dev["mean"] - aud["mean"])
+    def discrepancy(self, from_k: int, to_k: int):
+        from_version, to_version = self.versions[from_k], self.versions[to_k]
+        dev_paired = paired(to_version.per_seed, from_version.per_seed)
+        audit_paired = paired(to_version.audit_per_seed, from_version.audit_per_seed)
+        return dev_paired, audit_paired, abs(dev_paired["mean"] - audit_paired["mean"])
 
-    def finish_audit(self, j: int, k: int, final: bool):
-        dev, aud, gap = self.discrepancy(j, k)
-        thr = self.threshold()
-        flagged = gap > thr + 1e-9
+    def finish_audit(self, from_k: int, to_k: int, final: bool):
+        dev_paired, audit_paired, gap = self.discrepancy(from_k, to_k)
+        audit_threshold = self.threshold()
+        flagged = gap > audit_threshold + AUDIT_GAP_TOLERANCE
         self.emit(
             "audit_checked",
             {
-                "segment": [j, k],
-                "daily": dev,
-                "audit": aud,
-                "threshold": thr,
+                "segment": [from_k, to_k],
+                "daily": dev_paired,
+                "audit": audit_paired,
+                "threshold": audit_threshold,
                 "flagged": flagged,
                 "final": final,
             },
         )
         self.merges_since_audit = 0
-        self.last_audit = k
+        self.last_audited_k = to_k
         if flagged:
-            self.bisect(j, k, final)
+            self.bisect(from_k, to_k, final)
 
-    def bisect(self, lo: int, hi: int, final: bool):
-        while hi - lo > 1:
-            mid = (lo + hi) // 2
-            if self.versions[mid].audit_per_seed is None:
+    def bisect(self, low_k: int, high_k: int, final: bool):
+        while high_k - low_k > 1:
+            mid_k = (low_k + high_k) // 2
+            if self.versions[mid_k].audit_per_seed is None:
                 if self.audits_left(periodic=False) <= 0 or not self.measure_audit(
-                    mid, {"kind": "bisect", "lo": lo, "hi": hi, "final": final}
+                    mid_k,
+                    {
+                        "kind": "bisect",
+                        "low_k": low_k,
+                        "high_k": high_k,
+                        "final": final,
+                    },
                 ):
                     break  # cannot narrow further: drop the whole remaining segment
                 return
-            if self.discrepancy(lo, mid)[2] > self.threshold() + 1e-9:
-                hi = mid
+            if (
+                self.discrepancy(low_k, mid_k)[2]
+                > self.threshold() + AUDIT_GAP_TOLERANCE
+            ):
+                high_k = mid_k
             else:
-                lo = mid
-        self.revert(lo, hi, "audit")
+                low_k = mid_k
+        self.revert(low_k, high_k, "audit")
 
-    def on_bisect(self, task, m: Measurement):
-        self.versions[task["idx"]].audit_per_seed = m.per_seed
-        self.bisect(task["lo"], task["hi"], task["final"])
+    def on_bisect(self, task, measurement: Measurement):
+        self.versions[task["version_k"]].audit_per_seed = measurement.per_seed
+        self.bisect(task["low_k"], task["high_k"], task["final"])
 
-    # ------------------------------------------------------------------ primitives for guard batches
     @staticmethod
     def find_culprit(
-        lo: int, hi: int, segment_is_bad: Callable[[int, int], bool]
+        low_k: int, high_k: int, segment_is_bad: Callable[[int, int], bool]
     ) -> int:
-        """Binary search for the first merge in (lo, hi] that makes segment_is_bad(lo, x) true.
-        segment_is_bad(lo, hi) must be true. Returns the culprit version index."""
-        while hi - lo > 1:
-            mid = (lo + hi) // 2
-            if segment_is_bad(lo, mid):
-                hi = mid
+        """Binary search for the first merge in (low_k, high_k] that makes segment_is_bad(low_k, x) true.
+        segment_is_bad(low_k, high_k) must be true. Returns the culprit version index.
+        """
+        while high_k - low_k > 1:
+            mid_k = (low_k + high_k) // 2
+            if segment_is_bad(low_k, mid_k):
+                high_k = mid_k
             else:
-                lo = mid
-        return hi
+                low_k = mid_k
+        return high_k
 
-    def revert(self, lo: int, hi: int, reason: str) -> Version:
-        """Remove the merges that produced versions lo+1..hi and replay the later ones on top of lo.
+    def revert(self, low_k: int, high_k: int, reason: str) -> Version:
+        """Remove the merges that produced versions low_k+1..high_k and replay the later ones on top of low_k.
         Writes a new version (records are append-only) and quarantines the removed candidates.
         """
-        top = self.k
+        top_k = self.k
         removed = [
             self.versions[i].added or self.versions[i].candidates[-1]
-            for i in range(lo + 1, hi + 1)
+            for i in range(low_k + 1, high_k + 1)
         ]
-        cur = self.wd / "revert-tmp"
-        copy_tree(Path(self.versions[lo].dir), cur)
-        for i in range(hi + 1, top + 1):
-            nxt = self.wd / "revert-tmp2"
+        current_dir = self.workdir / "revert-tmp"
+        copy_tree(Path(self.versions[low_k].dir), current_dir)
+        for i in range(high_k + 1, top_k + 1):
+            next_dir = self.workdir / "revert-tmp2"
             try:
                 three_way(
-                    Path(self.versions[i - 1].dir), cur, Path(self.versions[i].dir), nxt
+                    Path(self.versions[i - 1].dir),
+                    current_dir,
+                    Path(self.versions[i].dir),
+                    next_dir,
                 )
             except Conflict:
                 removed.append(
                     self.versions[i].added or self.versions[i].candidates[-1]
                 )
                 continue
-            shutil.rmtree(cur)
-            nxt.rename(cur)
-        k1 = top + 1
-        vdir = self.wd / "baseline" / str(k1)
-        copy_tree(cur, vdir)
-        shutil.rmtree(cur, ignore_errors=True)
-        same = next(
+            shutil.rmtree(current_dir)
+            next_dir.rename(current_dir)
+        next_k = top_k + 1
+        version_dir = self.workdir / "baseline" / str(next_k)
+        copy_tree(current_dir, version_dir)
+        shutil.rmtree(current_dir, ignore_errors=True)
+        same_content_version = next(
             (
-                v
-                for v in reversed(self.versions)
-                if content_hash(Path(v.dir)) == content_hash(vdir)
+                version
+                for version in reversed(self.versions)
+                if content_hash(Path(version.dir)) == content_hash(version_dir)
             ),
             None,
         )
-        v = Version(
-            k1,
-            str(vdir),
-            same.per_seed if same else [],
-            same.score if same else None,
-            ticket=same.ticket if same else None,
-            hash=same.hash if same else None,
-            candidates=[x for x in self.versions[top].candidates if x not in removed],
-            parent=top,
+        version = Version(
+            next_k,
+            str(version_dir),
+            same_content_version.per_seed if same_content_version else [],
+            same_content_version.score if same_content_version else None,
+            ticket=same_content_version.ticket if same_content_version else None,
+            hash=same_content_version.hash if same_content_version else None,
+            candidates=[
+                kept_hash
+                for kept_hash in self.versions[top_k].candidates
+                if kept_hash not in removed
+            ],
+            parent=top_k,
             removed=removed,
-            audit_per_seed=same.audit_per_seed if same else None,
+            audit_per_seed=(
+                same_content_version.audit_per_seed if same_content_version else None
+            ),
             created_ts=self.clock(),
-            note=f"revert of {[h[:12] for h in removed]} ({reason})",
+            note=f"revert of {[removed_hash[:12] for removed_hash in removed]} ({reason})",
         )
-        self.versions.append(v)
-        self.write_version(v)
+        self.versions.append(version)
+        self.write_version(version)
         self.emit(
             "baseline_reverted",
             {
-                "from_baseline": top,
-                "new_baseline": k1,
+                "from_baseline": top_k,
+                "new_baseline": next_k,
                 "removed": removed,
                 "reason": reason,
             },
         )
-        for h in removed:
-            self.emit("quarantined", {"candidate": h, "reason": reason})
-            if h in self.files_by_hash:
-                self.quarantined.add(self.files_by_hash[h])
-        self.last_audit = k1
+        for removed_hash in removed:
+            self.emit("quarantined", {"candidate": removed_hash, "reason": reason})
+            if removed_hash in self.content_hash_by_hash:
+                self.quarantined.add(self.content_hash_by_hash[removed_hash])
+        self.last_audited_k = next_k
         self.merges_since_audit = 0
         if (
-            same is None
+            same_content_version is None
         ):  # new content: measure it on dev once (outside the worker quota)
             ticket = self.submit(
-                vdir,
-                k1,
+                version_dir,
+                next_k,
                 "dev",
-                f"measure reverted baseline@{k1}",
+                f"measure reverted baseline@{next_k}",
                 exempt=True,
-                predicted=self.versions[lo].score or 0.0,
+                predicted=self.versions[low_k].score or 0.0,
             )
-            self.task = {"kind": "revert_measure", "ticket": ticket, "k": k1}
+            self.task = {
+                "kind": "revert_measure",
+                "ticket": ticket,
+                "version_k": next_k,
+            }
         elif self.on_advance:
-            self.on_advance(v)
-        return v
+            self.on_advance(version)
+        return version
 
-    def on_revert_measure(self, task, m: Measurement):
-        v = self.versions[task["k"]]
-        v.per_seed, v.score, v.ticket, v.hash = m.per_seed, m.score, m.ticket, m.hash
-        self.write_version(v)
+    def on_revert_measure(self, task, measurement: Measurement):
+        version = self.versions[task["version_k"]]
+        version.per_seed, version.score, version.ticket, version.hash = (
+            measurement.per_seed,
+            measurement.score,
+            measurement.ticket,
+            measurement.hash,
+        )
+        self.write_version(version)
         if self.on_advance:
-            self.on_advance(v)
+            self.on_advance(version)
 
-    # ------------------------------------------------------------------ closeout (D79)
     def closeout(
         self, wait: Callable[[], None] | None = None, max_steps: int = 10_000
     ) -> tuple[Version, list[dict]]:
@@ -716,40 +786,48 @@ class IntegratorCore:
                 break
             decisions += self.step()
             if self.task is not None:
-                (wait or (lambda: time.sleep(self.cfg.poll_s)))()
-        for c in list(self.queue):
-            self.fail(c, "run_ended")
+                (wait or (lambda: time.sleep(self.config.poll_s)))()
+        for candidate in list(self.queue):
+            self.fail(candidate, "run_ended")
         self.queue.clear()
         decisions += self.step()
-        if self.last_audit != self.k and self.audits_left(periodic=False) > 0:
+        if self.last_audited_k != self.k and self.audits_left(periodic=False) > 0:
             self.start_audit(final=True)
             for _ in range(max_steps):
                 decisions += self.step()
                 if self.task is None:
                     break
-                (wait or (lambda: time.sleep(self.cfg.poll_s)))()
-        v = self.versions[-1]
-        if v.ticket is None:
-            v.ticket = self.submit(
-                Path(v.dir), v.k, "dev", f"deliverable baseline@{v.k}", exempt=True
+                (wait or (lambda: time.sleep(self.config.poll_s)))()
+        version = self.versions[-1]
+        if version.ticket is None:
+            version.ticket = self.submit(
+                Path(version.dir),
+                version.k,
+                "dev",
+                f"deliverable baseline@{version.k}",
+                exempt=True,
             )
             for _ in range(max_steps):
-                m = self.measurer.result(v.ticket)
-                if m is not None:
-                    v.hash, v.per_seed, v.score = m.hash, m.per_seed, m.score
+                measurement = self.measurer.result(version.ticket)
+                if measurement is not None:
+                    version.hash, version.per_seed, version.score = (
+                        measurement.hash,
+                        measurement.per_seed,
+                        measurement.score,
+                    )
                     break
-                (wait or (lambda: time.sleep(self.cfg.poll_s)))()
-            self.write_version(v)
-        self.frozen = v
+                (wait or (lambda: time.sleep(self.config.poll_s)))()
+            self.write_version(version)
+        self.frozen = version
         self.emit(
             "integrator_frozen",
             {
-                "baseline": v.k,
-                "ticket": v.ticket,
-                "hash": v.hash,
-                "candidates": v.candidates,
+                "baseline": version.k,
+                "ticket": version.ticket,
+                "hash": version.hash,
+                "candidates": version.candidates,
                 "stats": self.stats,
             },
         )
         decisions += self.step()
-        return v, decisions
+        return version, decisions
