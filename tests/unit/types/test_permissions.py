@@ -54,3 +54,12 @@ def test_unknown_actor_ids_are_rejected(actor: str) -> None:
 )
 def test_write_rules(actor: str, path: str, is_allowed: bool) -> None:
     assert may_create(ActorId(actor), path) is is_allowed
+
+
+def test_the_human_seeds_the_opportunity_map_and_the_integrator_updates_it() -> None:
+    """D76: a human writes the first map when setting up the problem."""
+    assert may_create(ActorId("human"), "map/gap.md")
+    assert may_create(ActorId("integrator"), "map/gap.md")
+    assert may_create(ActorId("pi"), "map/gap.md")
+    assert not may_create(ActorId("worker-01"), "map/gap.md")
+    assert not may_create(ActorId("human"), "baseline/1.json")

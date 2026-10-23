@@ -45,9 +45,10 @@ WRITE_RULES: tuple[PathRule, ...] = (
     make_path_rule(r"digests/[^/]+\.md", frozenset({"librarian"})),
     make_path_rule(r"decisions/[^/]+\.md", frozenset({"planner"})),
     make_path_rule(r"allocation/[^/]+\.json", frozenset({"planner", "indexer"})),
-    make_path_rule(
-        r"(baseline/\d+\.json|report/.+|map/gap\.md)", frozenset({"integrator"})
-    ),
+    make_path_rule(r"(baseline/\d+\.json|report/.+)", frozenset({"integrator"})),
+    # The human seeds the opportunity map when setting up the problem (D76); the
+    # Integrator writes it when no one did.
+    make_path_rule(r"map/gap\.md", frozenset({"integrator", "human", "pi"})),
     make_path_rule(r"map/measurements/[^/]+/\d+/.+", frozenset({"integrator"})),
     make_path_rule(r"map/measurements/[^/]+/[^/]+", frozenset({"worker", "human"})),
     make_path_rule(
