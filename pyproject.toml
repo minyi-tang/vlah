@@ -41,9 +41,8 @@ build-backend = "hatchling.build"
 packages = ["vlah"]
 
 # The testbed (testbed/, problems/, tests/testbed/) is built by separate agents; see issue #10.
-# When testbed/pyproject.toml exists, the testbed PR adds it as a workspace member:
-#   [tool.uv.workspace]
-#   members = ["testbed"]
+[tool.uv.workspace]
+members = ["testbed"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
