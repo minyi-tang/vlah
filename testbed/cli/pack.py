@@ -43,11 +43,10 @@ def pack_problem(name: str, out: Path) -> Path:
     for s in prob.public_seeds:
         r = prob.evaluate(prob.baseline_dir(), "fast", s)
         fast[str(s)] = r["score"]
-        ex = {k: v for k, v in r["extra"].items() if k not in ("waits",)}
+        # Per-site and per-class waits only: the mechanism counters stay with the operator (A17).
         detail[str(s)] = {
             "per_item": r["per_item"],
-            "by_class": ex.get("by_class"),
-            "mechanisms": ex.get("mechanisms"),
+            "by_class": r["extra"].get("by_class"),
         }
     (out / "baseline_scores.json").write_text(
         json.dumps({"fast": fast, "fast_detail": detail}, indent=1)

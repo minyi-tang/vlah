@@ -6,6 +6,7 @@ import time
 from typing import Any
 
 import pytest
+import yaml
 
 from testbed.cli.pack import leaked, pack_problem
 from testbed.problem_api import load_problem
@@ -36,8 +37,14 @@ def write_policy(tmp_path, code, name="cand"):
 
 
 def short_problem(hours=2):
+    """The public tier with a short trace, for tests that only need a few scheduling passes."""
     q = type(P)(P.root)
-    q.common = dict(q.common, horizon_s=hours * 3600, drain_cap_s=3600)
+    q.public_common = dict(
+        q.public_common,
+        horizon_s=hours * 3600,
+        fast_horizon_s=hours * 3600,
+        drain_cap_s=3600,
+    )
     return q
 
 
@@ -119,21 +126,21 @@ def order(queue, state):
 """,
     )
     q = short_problem()
-    r = q.assemble_sites([q.site_result(str(d), 1, i) for i in (0, 4)])
+    r = q.assemble_sites([q.site_result(str(d), 1, i, tier="fast") for i in (0, 4)])
     assert r["score"] is None and r["extra"]["timed_out"] is True
 
 
 def test_invalid_answers_count_as_timeouts(tmp_path):
     d = write_policy(tmp_path, "def order(queue, state):\n    return []\n")
     q = short_problem()
-    r = q.assemble_sites([q.site_result(str(d), 1, 4)])
+    r = q.assemble_sites([q.site_result(str(d), 1, 4, tier="fast")])
     assert r["score"] is None and r["extra"]["timeout_ratio"] > 0.01
 
 
 def test_crashing_import_voids(tmp_path):
     d = write_policy(tmp_path, "raise RuntimeError('boom')\n")
     q = short_problem()
-    r = q.assemble_sites([q.site_result(str(d), 1, 4)])
+    r = q.assemble_sites([q.site_result(str(d), 1, 4, tier="fast")])
     assert r["score"] is None and "boom" in r["extra"]["reason"]
 
 
@@ -176,3 +183,66 @@ def order(queue, state):
     assert "net=open" not in msg
     if sys.platform == "darwin":
         assert "read=open" not in msg
+
+
+# ------------------------------------------------------------------ two tiers of site profiles (A16-A18)
+
+
+def test_fast_tier_uses_the_public_profiles_and_slow_tier_the_judges():
+    common, sites = P.profiles("fast")
+    assert common is P.public_common and sites is P.public_sites
+    assert P.horizon("fast") == P.public_common["fast_horizon_s"]
+    if P.hidden is None:
+        with pytest.raises(PermissionError):
+            P.profiles("slow")
+    else:
+        common, sites = P.profiles("slow")
+        assert common is P.judge_common and sites is P.judge_sites
+        assert P.sites is P.judge_sites  # probes and precheck see the judge's sites
+
+
+def test_judge_machine_without_judge_sites_refuses_to_load(tmp_path, monkeypatch):
+    private = tmp_path / "private" / "sched"
+    private.mkdir(parents=True)
+    (private / "problem.yaml").write_text("seeds: {dev: [7]}\n")  # seeds but no sites/
+    monkeypatch.setenv("TB_PRIVATE", str(tmp_path / "private"))
+    with pytest.raises(FileNotFoundError, match="site profiles are missing"):
+        type(P)(P.root)
+
+
+def test_policy_sees_only_the_plant_of_a_site(tmp_path):
+    d = write_policy(
+        tmp_path,
+        "def order(queue, state):\n"
+        "    raise RuntimeError('profile=' + ','.join(sorted(state.site_profile)))\n",
+    )
+    q = short_problem(hours=1)
+    r = q.site_result(str(d), 1, 1, tier="fast")  # site 2, which has a mechanism
+    seen = next(e for e in r["errors"] if "profile=" in e).split("profile=")[1]
+    assert seen.split(",")[0:4] == ["cores_per_machine", "id", "machines", "racks"]
+    assert "mechanisms" not in seen and "arrival" not in seen
+
+
+@pytest.mark.timeout(300)
+def test_worker_copy_reports_no_mechanism_counters(tmp_path):
+    out = pack_problem("sched", tmp_path / "packed")
+    scores = json.loads((out / "baseline_scores.json").read_text())
+    assert all("mechanisms" not in d for d in scores["fast_detail"].values())
+    packed = load_problem(out)
+    r = packed.evaluate(packed.baseline_dir(), "fast", 1)
+    assert "mechanisms" not in r["extra"] and "by_class" in r["extra"]
+    # The site summaries describe symptoms, not the mechanisms or their numbers.
+    joined = " ".join(
+        yaml.safe_load(f.read_text())["summary"]
+        for f in sorted((out / "sites").glob("site*.yaml"))
+    ).lower()
+    for giveaway in (
+        "2x",
+        "12 minutes",
+        "20 minutes",
+        "60%",
+        "overload",
+        "rack",
+        "2.3x",
+    ):
+        assert giveaway not in joined, giveaway

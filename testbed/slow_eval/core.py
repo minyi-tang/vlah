@@ -86,15 +86,18 @@ class ApiError(Exception):
         self.body = body
 
 
-def _problem_fingerprint(root: Path) -> str:
+def _problem_fingerprint(root: Path, judge_sites: Path | None = None) -> str:
+    """Hash of the problem's code and settings, the judge's hidden site profiles included."""
     h = hashlib.sha256()
-    for p in sorted(Path(root).rglob("*")):
-        if (
-            p.is_file()
-            and "__pycache__" not in p.parts
-            and p.suffix in (".py", ".yaml", ".yml", ".json")
-        ):
-            h.update(str(p.relative_to(root)).encode() + p.read_bytes())
+    roots = [Path(root)] + ([judge_sites] if judge_sites is not None else [])
+    for base in roots:
+        for p in sorted(base.rglob("*")):
+            if (
+                p.is_file()
+                and "__pycache__" not in p.parts
+                and p.suffix in (".py", ".yaml", ".yml", ".json")
+            ):
+                h.update(str(p.relative_to(base)).encode() + p.read_bytes())
     return h.hexdigest()[:16]
 
 
@@ -143,8 +146,13 @@ class SlowEval:
 
     def problem(self, name):
         if name not in self._problems:
-            self._problems[name] = load_problem(name)
-            self._fps[name] = _problem_fingerprint(resolve_problem_dir(name))
+            prob = load_problem(name)
+            self._problems[name] = prob
+            hidden = getattr(prob, "hidden", None)
+            self._fps[name] = _problem_fingerprint(
+                resolve_problem_dir(name),
+                hidden / "sites" if hidden is not None else None,
+            )
         return self._problems[name]
 
     def run_row(self, run_id):

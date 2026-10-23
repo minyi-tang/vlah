@@ -1,14 +1,13 @@
 id: 4
 summary: >-
-  Many small single-core jobs from 60 users. A job whose user has not run on that machine in the last
-  20 minutes is charged 12 minutes of environment preparation as waiting time; the job itself starts at
-  once and holds its cores only for its run time.
+  A crowd of users each running many tiny jobs. People say their first job after a pause is slow to
+  get going, even when the site is quiet.
 machines: 4
 cores_per_machine: 8
 racks: 1
-arrival: {kind: poisson, utilization: 0.55}
-duration: {kind: uniform, min_s: 60, max_s: 180}
+arrival: {kind: poisson, utilization: 0.52}
+duration: {kind: uniform, min_s: 75, max_s: 200}
 cores: {1: 1.0}
-users: {n: 60}
+users: {n: 55}
 mechanisms:
   startup: {overhead_s: 720, window_s: 1200, counts_as_wait: true}

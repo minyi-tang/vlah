@@ -2,7 +2,13 @@
 
 Public part: evaluate (fast tier on public seeds 1-5), aggregate, constraint rule.
 Hidden part (slow-eval machine only, never committed; issue #10): problem.yaml (hidden seeds, knobs),
-reference/ and probes/, under private/testbed/sched/ or $TB_PRIVATE/sched/ (see testbed.problem_api).
+reference/, probes/ and sites/ (the judge's site profiles), under private/testbed/sched/ or
+$TB_PRIVATE/sched/ (see testbed.problem_api).
+
+Two tiers of site profiles (testbed/DECISIONS.md A16): the public tier in `sites/` next to this
+file drives the fast tier, the packed worker copy and CI; the judge tier in the hidden `sites/`
+drives the slow tier, final_check, precheck and calibration. The public tier is a drifted sample
+of the same cluster, so a local run is a guide to the judge, not a copy of it.
 """
 
 from __future__ import annotations
@@ -47,6 +53,15 @@ DUR_BUCKETS = [
 ]
 
 
+def load_profiles(sites_dir: Path) -> tuple[dict, list[dict]]:
+    """common.yaml and site1..6.yaml from one directory, as (common, sites)."""
+    common = yaml.safe_load((sites_dir / "common.yaml").read_text())
+    sites = [
+        yaml.safe_load((sites_dir / f"site{k}.yaml").read_text()) for k in range(1, 7)
+    ]
+    return common, sites
+
+
 def _summ(xs):
     xs = sorted(xs)
     return {
@@ -61,12 +76,7 @@ class SchedProblem:
 
     def __init__(self, root: Path):
         self.root = Path(root)
-        self.common = yaml.safe_load((self.root / "sites" / "common.yaml").read_text())
-        self.sites = []
-        for k in range(1, 7):
-            self.sites.append(
-                yaml.safe_load((self.root / "sites" / f"site{k}.yaml").read_text())
-            )
+        self.public_common, self.public_sites = load_profiles(self.root / "sites")
         # Only the canonical problem (the slow-eval side) looks for hidden material; a packed worker copy never does.
         canonical = self.root.resolve() == (PROBLEMS_ROOT / "sched").resolve()
         self.hidden = hidden_root("sched") if canonical else None
@@ -78,6 +88,21 @@ class SchedProblem:
                 )
             except OSError:  # present but unreadable (e.g. inside an agent's sandbox)
                 self.hidden = None
+        self.judge_common: dict | None = None
+        self.judge_sites: list[dict] | None = None
+        if self.hidden is not None:
+            judge_dir = self.hidden / "sites"
+            if not judge_dir.is_dir():
+                # Never fall back to the public tier: the judge would silently score the wrong cluster.
+                raise FileNotFoundError(
+                    "the judge's site profiles are missing: expected common.yaml and "
+                    f"site1..6.yaml in {judge_dir} (testbed/README.md, 'Hidden material')"
+                )
+            self.judge_common, self.judge_sites = load_profiles(judge_dir)
+        # On the judge machine `common` and `sites` are the judge's (probes and precheck use them);
+        # anywhere else they are the public tier.
+        self.common = self.judge_common or self.public_common
+        self.sites = self.judge_sites or self.public_sites
         self.ingredients = list(self.cfg.get("ingredients", []))
         self.public_seeds = list(PUBLIC_SEEDS)
         self.scale = float(self.common.get("scale", 1.0))
@@ -124,12 +149,23 @@ class SchedProblem:
         return None
 
     # ------------------------------------------------------------------ evaluation
+    def profiles(self, tier: str) -> tuple[dict, list[dict]]:
+        """(common, sites) for a tier: the public tier for "fast", the judge's for "slow"."""
+        if tier == "fast":
+            return self.public_common, self.public_sites
+        if self.judge_common is None or self.judge_sites is None:
+            raise PermissionError(
+                "the slow tier needs the judge's site profiles, which are not available here"
+            )
+        return self.judge_common, self.judge_sites
+
     def horizon(self, tier: str) -> float:
         """Slow tier (and final_check): horizon_s. Fast tier: the shorter fast_horizon_s."""
+        common, _ = self.profiles(tier)
         return (
-            self.common.get("fast_horizon_s", self.common["horizon_s"])
+            common.get("fast_horizon_s", common["horizon_s"])
             if tier == "fast"
-            else self.common["horizon_s"]
+            else common["horizon_s"]
         )
 
     def site_result(
@@ -140,8 +176,9 @@ class SchedProblem:
         timeout: bool = True,
         tier: str = "slow",
     ) -> dict:
-        prof = self.sites[site_idx]
-        common = dict(self.common, horizon_s=self.horizon(tier))
+        common, sites = self.profiles(tier)
+        prof = sites[site_idx]
+        common = dict(common, horizon_s=self.horizon(tier))
         jobs = workload.generate(prof, common, seed, scale=self.scale)
         out = engine.run_site(
             prof, common, jobs, Path(candidate_dir), timeout=timeout, scale=self.scale
@@ -198,7 +235,10 @@ class SchedProblem:
         per_item, means = [], []
         extra["waits"] = {}
         extra["by_class"] = {}
-        extra["mechanisms"] = {}
+        # Mechanism counters (cold starts, off-rack placements, overloaded seconds) are a tuning
+        # aid for the operator; a worker copy never reports them (A17).
+        if self.hidden is not None:
+            extra["mechanisms"] = {}
         errs = []
         for r in sorted(site_results, key=lambda r: r["site"]):
             ws = sorted(r["waits"])
@@ -210,7 +250,8 @@ class SchedProblem:
             )
             extra["waits"][f"site{r['site']}"] = r["waits"]
             extra["by_class"][f"site{r['site']}"] = r["by_class"]
-            extra["mechanisms"][f"site{r['site']}"] = r["stats"]
+            if "mechanisms" in extra:
+                extra["mechanisms"][f"site{r['site']}"] = r["stats"]
             errs.extend(r.get("errors") or [])
         if errs:
             extra["errors"] = errs[:5]

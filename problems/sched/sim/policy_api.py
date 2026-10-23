@@ -111,6 +111,11 @@ class Running:
 
 
 class State:
+    """What a hook sees at one moment. ``site_profile`` is the site's plant only: ``id``,
+    ``machines``, ``cores_per_machine`` and ``racks``. The workload and how machines behave
+    under it are not described anywhere a policy can read; measure them with ``tb fast``.
+    """
+
     __slots__ = (
         "now",
         "site",
