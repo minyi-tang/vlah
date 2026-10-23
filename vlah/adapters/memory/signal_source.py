@@ -3,6 +3,11 @@
 A test controls a candidate's score by putting fake_score.json in its payload:
 {"per_seed": [...], "audit_per_seed": [...], "constraint_ok": true}. Without it the
 candidate scores zero on every seed.
+
+Like the testbed's slow tier (TB section 11.3), the fake answers a repeat of a
+candidate from its cache: the same actor submitting the same hash to the same
+dataset gets a new job id whose result is the first job's, marked is_cached, visible
+when the first one is.
 """
 
 import statistics
@@ -44,6 +49,7 @@ class FakeSlowSource:
         self.clock = clock
         self.source_declaration = declaration
         self.jobs: dict[str, FakeJob] = {}
+        self.first_job_id_by_key: dict[tuple[ActorId, str, Dataset], str] = {}
 
     @property
     def declaration(self) -> SourceDecl:
@@ -76,15 +82,25 @@ class FakeSlowSource:
         dataset: Dataset,
     ) -> str:
         job_id = f"{self.source_declaration.id}-{len(self.jobs) + 1:05d}"
+        cache_key = (actor, candidate.candidate_hash, dataset)
+        first_job_id = self.first_job_id_by_key.setdefault(cache_key, job_id)
+        if first_job_id == job_id:
+            visible_at_seconds = (
+                self.clock.now_seconds() + self.source_declaration.latency_seconds
+            )
+            result = self.score_for(candidate, dataset)
+        else:
+            first_job = self.jobs[first_job_id]
+            visible_at_seconds = first_job.visible_at_seconds
+            result = first_job.result.model_copy(update={"is_cached": True})
         self.jobs[job_id] = FakeJob(
             job_id=job_id,
             candidate_hash=candidate.candidate_hash,
             actor=actor,
             baseline=baseline,
             dataset=dataset,
-            visible_at_seconds=self.clock.now_seconds()
-            + self.source_declaration.latency_seconds,
-            result=self.score_for(candidate, dataset),
+            visible_at_seconds=visible_at_seconds,
+            result=result,
         )
         return job_id
 

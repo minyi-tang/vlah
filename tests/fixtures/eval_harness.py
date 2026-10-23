@@ -12,8 +12,8 @@ from tests.fixtures.herd import make_store_blackboard
 from vlah.adapters.memory.signal_source import FAKE_SCORE_FILE_NAME, FakeSlowSource
 from vlah.arms.config import PRESETS, ArmConfig
 from vlah.core.blackboard.blackboard import StoreBlackboard
-from vlah.core.eval.api import EvalRequest
-from vlah.core.eval.jobs import GateOutcome
+from vlah.core.eval.api import EvalRequest, EvalRequestKind
+from vlah.core.eval.jobs import BaselineScores, GateOutcome
 from vlah.core.eval.service import LadderEvalService
 from vlah.core.indexer.api import Hit
 from vlah.core.types.candidates import CandidateManifest
@@ -29,14 +29,14 @@ SEED_COUNT = 5
 
 
 def source_declaration(
-    source_id: str, cost: float, latency: str, n_for_ci: int = 1
+    source_id: str, cost: float, latency: str, n_for_ci: int = 1, per_day: int = 48
 ) -> SourceDecl:
     return SourceDecl.model_validate(
         {
             "id": source_id,
             "mode": "pull",
             "latency": latency,
-            "budget": SourceBudget(per_day=48, allocated_by="human"),
+            "budget": SourceBudget(per_day=per_day, allocated_by="human"),
             "cost_machine_hours": cost,
             "trust": 0.9,
             "readable_by": ["critic"],
@@ -113,7 +113,9 @@ class EvalHarness:
         )
         return directory
 
-    def request(self, directory: Path, **fields: str | None) -> EvalRequest:
+    def request(
+        self, directory: Path, **fields: str | EvalRequestKind | None
+    ) -> EvalRequest:
         return EvalRequest.model_validate(
             {
                 "candidate_directory": directory,
@@ -148,9 +150,16 @@ def make_eval_harness(
     arm: ArmConfig = PRESETS["S2"],
     declarations: tuple[SourceDecl, ...] = (source_declaration("slow", 1.0, "10m"),),
     gates: tuple[GateSpec, ...] = (),
+    blackboard: StoreBlackboard | None = None,
+    baseline_scores: BaselineScores = zero_baseline,
+    params: Params | None = None,
 ) -> EvalHarness:
+    """A fresh eval client; over an existing blackboard, it is one restarted."""
     clock = FakeClock()
-    blackboard = make_store_blackboard(clock, name="eval")
+    if blackboard is None:
+        blackboard = make_store_blackboard(clock, name="eval")
+    else:
+        pass
     sources = tuple(
         FakeSlowSource(clock=clock, declaration=declaration)
         for declaration in declarations
@@ -165,9 +174,9 @@ def make_eval_harness(
         budget=budget,
         gates=gates,
         gate_runner=scripted_gates,
-        baseline_scores=zero_baseline,
+        baseline_scores=baseline_scores,
         arm=arm,
-        params=Params(),
+        params=params if params is not None else Params(),
         clock=clock,
         random=Random(0),
     )

@@ -91,6 +91,15 @@ class Indexer(Protocol):
         """Replay from sequence 0; the result must equal the incremental state."""
         ...
 
+    def head_sequence(self) -> int:
+        """The last sequence number folded into the index, or 0 before the first.
+
+        A cursor for diff_since starts here, not at the blackboard's head: a merge
+        the blackboard has numbered but not yet delivered would otherwise fall into
+        the gap and never appear in a diff.
+        """
+        ...
+
     def claim_state(self, claim_id: str) -> ClaimState: ...
 
     def approach_state(self, approach_id: str) -> ApproachState: ...

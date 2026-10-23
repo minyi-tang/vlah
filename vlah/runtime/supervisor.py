@@ -11,17 +11,19 @@ tick does whatever is due at the injected clock's time, so tests call it directl
 
 Stopping is idempotent: the first request sets the workers' stop signal and kills
 their sessions; finish then joins the workers and runs the Integrator's closeout
-exactly once.
+exactly once. A stop rule writes its own stopped event (D52); the time limit and a
+stop() call write stopped(reason="time") and stopped(reason="human") here, as the
+actor ci.
 """
 
 import logging
 import threading
 from dataclasses import dataclass, field
-from typing import Protocol
+from typing import Literal, Protocol
 
 from vlah.core.types.baseline import BaselineRecord
-from vlah.core.types.events import Event
-from vlah.core.types.ids import ActorId
+from vlah.core.types.events import Event, event_to_json
+from vlah.core.types.ids import ActorId, format_event_local_id
 from vlah.core.worker.loop import InterruptInbox, WorkerDeps
 from vlah.ports.executor import Handle
 from vlah.runtime.assembly import RunComponents, RunContext
@@ -29,6 +31,12 @@ from vlah.runtime.assembly import RunComponents, RunContext
 logger = logging.getLogger(__name__)
 
 JOIN_TIMEOUT_SECONDS = 60.0
+STOP_ACTOR = ActorId("ci")
+# The stop rules number ci events from the key-value store; a number they took
+# is skipped.
+STOP_EVENT_ATTEMPTS = 5
+
+StoppedReason = Literal["human", "time"]
 
 
 class WorkerRunner(Protocol):
@@ -123,9 +131,9 @@ class Supervisor:
             logger.exception("the stop rules failed; the time limit still applies")
             stop_event = None
         if stop_event is not None and stop_event.type == "stopped":
-            self.request_stop(f"stop rule: {stop_event.data}")
+            self.request_stop(f"stop rule: {stop_event.data}", None)
         elif now_seconds >= self.deadline_seconds:
-            self.request_stop("the run's time limit")
+            self.request_stop("the run's time limit", "time")
         else:
             pass
         return [stop_event] if stop_event is not None else []
@@ -171,8 +179,12 @@ class Supervisor:
         self.events.extend(events)
         return tuple(events)
 
-    def request_stop(self, reason: str) -> None:
-        """Ask every worker to stop now; only the first request counts."""
+    def request_stop(self, reason: str, stopped_reason: StoppedReason | None) -> None:
+        """Ask every worker to stop now; only the first request counts.
+
+        stopped_reason is written as a stopped event; None when a stop rule
+        already wrote its own.
+        """
         with self.stop_state.lock:
             if self.stop_state.reason is not None:
                 return
@@ -180,7 +192,47 @@ class Supervisor:
                 self.stop_state.reason = reason
                 logger.info(f"run {self.context.run_id} stopping: {reason}")
                 self.stop_signal.set()
+        if stopped_reason is not None:
+            self.write_stopped(stopped_reason)
+        else:
+            pass
         self.kill_leased_sessions()
+
+    def write_stopped(self, reason: StoppedReason) -> None:
+        """stopped(reason) as the actor ci, numbered after the ci events on the blackboard."""
+        blackboard = self.components.blackboard
+        first_number = len(blackboard.list_paths(f"events/{STOP_ACTOR}/", None)) + 1
+        for number in range(first_number, first_number + STOP_EVENT_ATTEMPTS):
+            local_id = format_event_local_id(STOP_ACTOR, number)
+            event = Event.model_validate(
+                {
+                    "local_id": local_id,
+                    "ts": self.context.clock.now_seconds(),
+                    "actor": STOP_ACTOR,
+                    "role": "ci",
+                    "type": "stopped",
+                    "reason": self.stop_state.reason,
+                    "data": {"reason": reason},
+                }
+            )
+            receipt = blackboard.write(
+                STOP_ACTOR,
+                {f"events/{local_id}.json": event_to_json(event).encode("utf-8")},
+                f"stopped: {reason}",
+            )
+            if receipt.status != "rejected":
+                self.events.append(event)
+                return
+            elif all(
+                violation.rule == "file_exists" for violation in receipt.violations
+            ):
+                continue
+            else:
+                logger.error(
+                    f"the blackboard rejected the stop event: {receipt.violations}"
+                )
+                return
+        logger.error(f"no free ci event number after {STOP_EVENT_ATTEMPTS} attempts")
 
     def kill_leased_sessions(self) -> None:
         for lease in self.components.leases.active():
@@ -198,7 +250,7 @@ class Supervisor:
         A session that started after the first kill is killed here, once the
         workers can no longer start any.
         """
-        self.request_stop(self.stop_state.reason or "finish")
+        self.request_stop(self.stop_state.reason or "finish", "human")
         for slot in self.slots:
             if slot.thread is not None:
                 slot.thread.join(JOIN_TIMEOUT_SECONDS)

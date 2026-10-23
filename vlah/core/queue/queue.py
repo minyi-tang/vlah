@@ -87,7 +87,7 @@ class KeyValueTaskQueue:
         self, *, store: KeyValueStore, pool: Literal["arm", "external"] = "arm"
     ) -> None:
         self.store = store
-        self.pool = pool
+        self.pool: Literal["arm", "external"] = pool
         self.queue_key = queue_key(pool)
 
     def load_task(self, task_id: str) -> Task | None:
@@ -239,7 +239,11 @@ class KeyValueTaskQueue:
         return tuple(added)
 
     def on_result_ready(self, event: Event) -> Task:
-        """One follow-up per result_ready, keyed by the event's sequence number."""
+        """One follow-up per result_ready, keyed by the event's sequence number.
+
+        The follow-up is in this queue's pool, so a compose result (D74) stays in
+        the external queue and no arm worker can claim it.
+        """
         if event.type != "result_ready" or not isinstance(event.data, ResultReady):
             raise ValueError(f"not a result_ready event: {event.type}")
         elif event.seq is None:
@@ -269,6 +273,7 @@ class KeyValueTaskQueue:
                     priority=0,
                     for_agent=result.submitter,
                     created_by="queue",
+                    pool=self.pool,
                 )
                 if self.store.compare_and_set(
                     follow_up_key, None, task.id.encode(), None

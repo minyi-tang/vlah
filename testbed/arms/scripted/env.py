@@ -19,6 +19,8 @@ from testbed.slow_eval.app import create_app
 from testbed.slow_eval.core import ManualClock, SlowEval
 
 PUSH_ARMS = {"single", "herd"}  # 11.8.1: the one difference between arms
+MAX_ADVANCE_STEPS = 100_000
+MIN_CLOCK_STEP_SECONDS = 0.001
 
 
 class ScriptedEnv:
@@ -33,142 +35,158 @@ class ScriptedEnv:
         composer=None,
         config: IntegratorConfig | None = None,
     ):
-        self.wd = Path(workdir or tempfile.mkdtemp(prefix="tb-scripted-"))
+        self.workdir = Path(workdir or tempfile.mkdtemp(prefix="tb-scripted-"))
         self.clock = ManualClock()
-        self.core = SlowEval(self.wd / "slow", clock=self.clock, inline=True)
+        self.core = SlowEval(self.workdir / "slow", clock=self.clock, inline=True)
         self.http = TestClient(
-            create_app(self.wd / "slow", core=self.core, publisher=False)
+            create_app(self.workdir / "slow", core=self.core, publisher=False)
         )
         self.run_id, self.arm, self.problem_name = run_id, arm, problem
-        ov = dict(overrides or {})
+        knob_overrides = dict(overrides or {})
         if arm == "isolated":
-            ov.setdefault("per_actor_share", True)
+            knob_overrides.setdefault("per_actor_share", True)
         self.runner = SlowClient(
             None, run_id, "runner", http=self.http, key=self.core.system_key
         )
-        self.runner.create_run(arm, problem, n, ov)
-        self.t0 = self.clock.now()
+        self.runner.create_run(arm, problem, n, knob_overrides)
+        self.started_at = self.clock.now()
         self.problem = load_problem(problem)
         self.knobs = self.core.knobs(run_id)
         self.latest = None
-        self.integ = Integrator(
+        self.integrator = Integrator(
             self.runner,
-            self.wd / "integrator",
+            self.workdir / "integrator",
             self.problem.baseline_dir(),
             self.clock.now,
             config=config or IntegratorConfig(),
             composer=composer,
-            on_advance=self._on_advance if arm in PUSH_ARMS else None,
+            on_advance=self.on_advance if arm in PUSH_ARMS else None,
         )
-        self.latest = self.integ.versions[0]
-        self._n = 0
+        self.latest = self.integrator.versions[0]
+        self.candidate_count = 0
 
-    # ---------------------------------------------------------------- time
     def now(self):
-        return self.clock.now() - self.t0
+        """Seconds since the run started."""
+        return self.clock.now() - self.started_at
 
-    def advance_to(self, t_rel: float):
-        target = self.t0 + t_rel
-        delay = max(1.0, float(self.knobs.get("visible_delay_s", 1)))
-        for _ in range(100_000):
-            self.integ.step()
+    def advance_to(self, run_seconds: float):
+        target_at = self.started_at + run_seconds
+        visible_delay_seconds = max(1.0, float(self.knobs.get("visible_delay_s", 1)))
+        for _ in range(MAX_ADVANCE_STEPS):
+            self.integrator.step()
             now = self.clock.now()
-            if now >= target:
+            if now >= target_at:
                 break
-            due = self.integ.due(now)
+            due = self.integrator.due(now)
             if due == "now":
-                nxt = now + 0.001
+                next_at = now + MIN_CLOCK_STEP_SECONDS
             elif due == "wait":
-                nxt = now + delay
+                next_at = now + visible_delay_seconds
             elif isinstance(due, (int, float)):
-                nxt = due
+                next_at = due
             else:
-                nxt = target
-            pending = self.core.db.execute(
+                next_at = target_at
+            next_visible_at = self.core.db.execute(
                 "SELECT MIN(visible_at) FROM tickets WHERE run_id=? AND published=0 AND dup_of IS NULL",
                 (self.run_id,),
             ).fetchone()[0]
-            if pending is not None and pending > now:
-                nxt = min(nxt, pending)
-            self.clock.t = min(max(nxt, now + 0.001), target)
-        self.integ.step()
+            if next_visible_at is not None and next_visible_at > now:
+                next_at = min(next_at, next_visible_at)
+            self.clock.t = min(max(next_at, now + MIN_CLOCK_STEP_SECONDS), target_at)
+        self.integrator.step()
 
-    def sleep(self, dt):
-        self.advance_to(self.now() + dt)
+    def sleep(self, seconds):
+        self.advance_to(self.now() + seconds)
 
-    # ---------------------------------------------------------------- agents' tools
-    def _on_advance(self, v):
-        self.latest = v
+    def on_advance(self, version):
+        self.latest = version
 
     def client(self, actor):
         return SlowClient(None, self.run_id, actor, http=self.http)
 
     def base_for(self, actor):
         """What the agent sees as its baseline: pushed versions for single/herd, baseline@0 otherwise."""
-        v = self.latest if self.arm in PUSH_ARMS else self.integ.versions[0]
-        return v.k, Path(v.dir)
+        version = self.latest if self.arm in PUSH_ARMS else self.integrator.versions[0]
+        return version.k, Path(version.dir)
 
-    def make(self, add=(), base_dir=None, **params) -> Path:
-        self._n += 1
-        d = self.wd / "work" / f"c{self._n}"
-        copy_tree(base_dir or self.problem.baseline_dir(), d)
-        p = d / "params.yaml"
-        prm = yaml.safe_load(p.read_text()) if p.exists() else {}
-        prm = prm or {}
-        ings = dict(prm.get("ingredients") or {})
-        for a in add:
-            ings[a] = True
-        prm["ingredients"] = ings
-        prm.update(params)
-        p.write_text(yaml.safe_dump(prm, sort_keys=True))
-        return d
+    def make(self, ingredients=(), base_dir=None, **params) -> Path:
+        self.candidate_count += 1
+        candidate_dir = self.workdir / "work" / f"c{self.candidate_count}"
+        copy_tree(base_dir or self.problem.baseline_dir(), candidate_dir)
+        params_path = candidate_dir / "params.yaml"
+        params_yaml = (
+            yaml.safe_load(params_path.read_text()) if params_path.exists() else {}
+        )
+        params_yaml = params_yaml or {}
+        ingredient_flags = dict(params_yaml.get("ingredients") or {})
+        for ingredient in ingredients:
+            ingredient_flags[ingredient] = True
+        params_yaml["ingredients"] = ingredient_flags
+        params_yaml.update(params)
+        params_path.write_text(yaml.safe_dump(params_yaml, sort_keys=True))
+        return candidate_dir
 
-    def fast_run(self, actor, d: Path, target: str, seed=1) -> dict:
-        res = self.problem.evaluate(d, "fast", seed)
-        base = self.problem.evaluate(self.problem.baseline_dir(), "fast", seed)["score"]
-        h = candidate_hash(d, target)
+    def fast_run(self, actor, candidate_dir: Path, target: str, seed=1) -> dict:
+        result = self.problem.evaluate(candidate_dir, "fast", seed)
+        baseline_score = self.problem.evaluate(
+            self.problem.baseline_dir(), "fast", seed
+        )["score"]
+        submitted_hash = candidate_hash(candidate_dir, target)
         self.client(actor).post_events(
             [
                 {
                     "type": "fast_run",
                     "data": {
-                        "hash": h,
+                        "hash": submitted_hash,
                         "seed": seed,
-                        "score": res["score"],
-                        "baseline_score": base,
+                        "score": result["score"],
+                        "baseline_score": baseline_score,
                     },
                 }
             ]
         )
-        return {"hash": h, "score": res["score"], "baseline_score": base}
+        return {
+            "hash": submitted_hash,
+            "score": result["score"],
+            "baseline_score": baseline_score,
+        }
 
-    def submit(self, actor, d: Path, predicted: float, target: str, **kw):
+    def submit(
+        self,
+        actor,
+        candidate_dir: Path,
+        predicted: float,
+        target: str,
+        **manifest_fields,
+    ):
         return self.client(actor).submit_dir(
-            d, predicted=predicted, target=target, **kw
+            candidate_dir, predicted=predicted, target=target, **manifest_fields
         )
 
-    def herd_event(self, actor, type_, data):
-        self.client(actor).post_events([{"type": type_, "data": data}])
+    def herd_event(self, actor, event_type, data):
+        self.client(actor).post_events([{"type": event_type, "data": data}])
 
-    def true_score(self, d: Path) -> float:
+    def true_score(self, candidate_dir: Path) -> float:
         return self.problem.aggregate(
             self.problem.evaluate_many(
-                d, self.problem.seeds("dev")[: self.knobs["slow_seeds"]]
+                candidate_dir, self.problem.seeds("dev")[: self.knobs["slow_seeds"]]
             )
         )["score"]
 
-    # ---------------------------------------------------------------- end of run (11.8)
     def finish(self, actor_finals=()):
-        delay = max(1.0, float(self.knobs.get("visible_delay_s", 1)))
+        """End of run (11.8): actor finals, the integrator's closeout, the runner's final and final_check."""
+        visible_delay_seconds = max(1.0, float(self.knobs.get("visible_delay_s", 1)))
         for actor, ticket in actor_finals:
             self.client(actor).final(ticket=ticket)
-        v = self.integ.finalize(wait=lambda: self.clock.advance(delay))
-        self.runner.final(ticket=v.ticket)
-        self.runner.final_check(v.ticket)
+        version = self.integrator.finalize(
+            wait=lambda: self.clock.advance(visible_delay_seconds)
+        )
+        self.runner.final(ticket=version.ticket)
+        self.runner.final_check(version.ticket)
         return self.events()
 
     def events(self):
-        return read_events(self.core.data / "runs" / self.run_id / "events.jsonl")
+        return read_events(self.events_path())
 
     def events_path(self) -> Path:
         return self.core.data / "runs" / self.run_id / "events.jsonl"

@@ -7,7 +7,10 @@ Rules applied on replay:
 - a status change must pass the D9 table (check_transition); a worker confirming a
   dead end must not be its author;
 - D34 priority: a role cannot overturn a status set by a strictly higher-priority
-  role; a human can overturn anything;
+  role; a human can overturn anything. A reinstated event, and a human lift out
+  of refuted or quarantined, hand the claim back to the roles that normally advance
+  it, so the higher role's own undo does not freeze the ladder;
+- a role reinstates only what an equal or lower role refuted;
 - refutation sources are counted before the transition check, so a second source
   that confirms an existing refutation is not dropped as "unchanged";
 - a refutation cascades only when it comes from a human or the Critic or has two
@@ -27,7 +30,7 @@ import yaml
 
 from vlah.core.indexer.api import ClaimState, StatusChange
 from vlah.core.types.claims import Claim
-from vlah.core.types.events import Event
+from vlah.core.types.events import Event, ResultReady
 from vlah.core.types.ids import WRITE_PRIORITY, ActorId, Role
 from vlah.core.types.states import (
     INITIAL_STATUS,
@@ -39,6 +42,8 @@ from vlah.core.types.states import (
 logger = logging.getLogger(__name__)
 
 AUTHORITATIVE_REFUTERS: frozenset[Role] = frozenset({"human", "critic"})
+# Statuses a higher role imposes; leaving one is a lift that reopens the ladder.
+LIFTED_STATUSES: frozenset[str] = frozenset({"refuted", "quarantined"})
 SECOND_SOURCE_COUNT = 2
 CANDIDATE_POINTER = re.compile(r"candidates/(?P<hash>[0-9a-f]+)/")
 LINEAGE_FILE = re.compile(r"candidates/(?P<hash>[0-9a-f]+)/lineage\.json")
@@ -104,6 +109,7 @@ def cited_claims_of(claim: Claim) -> tuple[str, ...]:
 
 @dataclass(kw_only=True)
 class ReplayState:
+    top_level: str | None = None
     claims: dict[str, ClaimRecord] = field(default_factory=dict[str, ClaimRecord])
     approaches: dict[str, ApproachRecord] = field(
         default_factory=dict[str, ApproachRecord]
@@ -115,6 +121,8 @@ class ReplayState:
         default_factory=dict[str, list[str]]
     )
     applied_sequences: set[int] = field(default_factory=set[int])
+    # Candidates judged at the top level, for the dead-end re-walk metric.
+    top_level_measured: set[str] = field(default_factory=set[str])
     head: int = 0
 
     # Files
@@ -175,6 +183,11 @@ class ReplayState:
                 self.apply_reinstated(event, sequence)
             elif event.type == "approach_status":
                 self.apply_approach_status(event, sequence)
+            elif (
+                isinstance(event.data, ResultReady)
+                and event.data.level == self.top_level
+            ):
+                self.top_level_measured.add(event.data.candidate)
             else:
                 pass
 
@@ -229,9 +242,15 @@ class ReplayState:
     def change_status(
         self, record: ClaimRecord, event: Event, sequence: int, new_status: str
     ) -> None:
+        is_lift = event.role == "human" and record.status in LIFTED_STATUSES
         if new_status == "refuted":
             record.status_before_refutation = record.status
             record.refuters[event.actor] = event.role
+        elif record.status == "refuted":
+            # Leaving refuted by any route drops its sources, or a later single
+            # refutation would count as the second one.
+            record.refuters.clear()
+            record.status_before_refutation = None
         else:
             pass
         record.history.append(
@@ -243,7 +262,7 @@ class ReplayState:
             )
         )
         record.status = new_status
-        record.set_by_role = event.role
+        record.set_by_role = None if is_lift else event.role
         record.last_change = sequence
 
     def apply_reinstated(self, event: Event, sequence: int) -> None:
@@ -253,6 +272,14 @@ class ReplayState:
             logger.info(f"ignored {event.local_id}: nothing refuted to reinstate")
         elif event.role not in AUTHORITATIVE_REFUTERS:
             logger.info(f"ignored {event.local_id}: {event.role} may not reinstate")
+        elif any(
+            self.outranked(refuter_role, event.role)
+            for refuter_role in record.refuters.values()
+        ):
+            logger.info(
+                f"ignored {event.local_id}: a role above {event.role} refuted "
+                f"{record.claim.id} (D34)"
+            )
         else:
             restored = (
                 record.status_before_refutation or INITIAL_STATUS[record.claim.type]
@@ -266,8 +293,9 @@ class ReplayState:
                 )
             )
             record.status = restored
-            record.set_by_role = event.role
+            record.set_by_role = None
             record.refuters.clear()
+            record.status_before_refutation = None
             record.last_change = sequence
 
     def apply_approach_status(self, event: Event, sequence: int) -> None:
@@ -361,11 +389,11 @@ class ReplayState:
             )
 
     def citations_of(self, claim_id: str) -> tuple[str, ...]:
-        """Distinct claims that build on claim_id."""
+        """Distinct claims that build on claim_id, by id: the same on a rebuild."""
         return tuple(
             other_id
-            for other_id, record in self.claims.items()
-            if claim_id in cited_claims_of(record.claim)
+            for other_id in sorted(self.claims)
+            if claim_id in cited_claims_of(self.claims[other_id].claim)
         )
 
     def fingerprint(self) -> str:
@@ -375,6 +403,7 @@ class ReplayState:
                 "claims": {
                     claim_id: {
                         "stamp": record.stamp,
+                        "last_change": record.last_change,
                         "status": record.status,
                         "set_by": record.set_by_role,
                         "history": [
@@ -398,6 +427,7 @@ class ReplayState:
                 "parents": {
                     key: list(value) for key, value in sorted(self.parents.items())
                 },
+                "top_level_measured": sorted(self.top_level_measured),
             },
             sort_keys=True,
         )

@@ -1,7 +1,9 @@
 """A run assembled from fakes and in-memory stores, for the runtime's tests.
 
-The router and the indexer are the real ones over memory stores. Components that do
-not exist yet (Integrator, budget, stop rules, metrics) are fakes here.
+The router, the indexer, the budget meter, the stop rules and the metrics are the
+real ones over memory stores. The eval client and the Integrator are fakes unless
+use_real_eval and use_real_integrator ask for the real ones: the ladder over a fake
+slow judge, and the Integrator over the shared merger with an empty baseline@0.
 """
 
 import json
@@ -10,38 +12,88 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from random import Random
 
-from tests.fixtures.fakes import FakeLeases, FakeRouter, RecordingBudget
-from tests.fixtures.herd import TOY_APPROACH, TOY_SOURCE, make_store_blackboard
-from tests.fixtures.tools import RecordingRecorder, ScriptedEval
-from tests.fixtures.worker import (
-    FakeToolServer,
-    MemorySessionFiles,
-    RecordingTaskQueue,
-    TranscriptHarness,
+import yaml
+
+from tests.fixtures.fakes import FakeLeases, FakeRouter
+from tests.fixtures.herd import (
+    TOY_APPROACH,
+    TOY_SEED_COUNT,
+    TOY_SOURCE,
+    make_store_blackboard,
+    passing_gate,
+    zero_baseline_scores,
 )
+from tests.fixtures.tools import RecordingRecorder, ScriptedEval
+from tests.fixtures.worker import FakeToolServer, RecordingTaskQueue, TranscriptHarness
 from vlah.adapters.memory.executor import MemoryExecutor, ScriptedHarness
 from vlah.adapters.memory.model import MemoryModel
+from vlah.adapters.memory.signal_source import FAKE_SCORE_FILE_NAME, FakeSlowSource
 from vlah.adapters.memory.store import MemoryKeyValueStore, MemoryVectorIndex
 from vlah.arms.config import ArmConfig
 from vlah.core.blackboard.api import MergedCommit, PublicProblemFiles
+from vlah.core.budget.meter import KeyValueBudgetMeter
+from vlah.core.eval.api import EvalService
+from vlah.core.eval.service import LadderEvalService
 from vlah.core.indexer.indexer import StoreIndexer
-from vlah.core.metrics.api import StandingMetrics
+from vlah.core.integrator.api import IntegratorService
+from vlah.core.integrator.core_adapter import CoreCalibration
+from vlah.core.integrator.service import HerdIntegrator
+from vlah.core.metrics.standing import HerdMetrics
 from vlah.core.problem.api import AdapterChoice, HerdConfig, Problem
 from vlah.core.queue.api import Leases
 from vlah.core.router.api import Router
 from vlah.core.router.router import KeyValueRouter
+from vlah.core.stop.rules import BudgetStopRules, EscalationPolicy
 from vlah.core.types.baseline import BaselineRecord
+from vlah.core.types.candidates import CandidateManifest
 from vlah.core.types.clock import FakeClock
 from vlah.core.types.events import Event
 from vlah.core.types.ids import ActorId
 from vlah.core.types.interrupts import Interrupt
 from vlah.core.types.params import EgressPolicy, Limits, Params
+from vlah.core.types.sources import SourceDecl
 from vlah.core.worker.loop import WorkerDeps
 from vlah.runtime.assembly import RunComponents, RunContext
+from vlah.runtime.compose import compose_arm
 from vlah.runtime.herd import top_level_source
 from vlah.tools.herd_tools import HerdTools
 
 BASELINE_ZERO = BaselineRecord(k=0, parent=None, candidates=(), created_ts=0.0)
+# The toy judge's noise, for the Integrator's spot checks; the toy scores are exact.
+TOY_SIGMA = 0.5
+
+
+def toy_candidate(directory: Path, author: ActorId, score: float) -> Path:
+    """A candidate the fake judge scores on every seed, as the toy worker writes one."""
+    directory.mkdir(parents=True)
+    (directory / "policy.py").write_text(f"SCORE = {score}\n", encoding="utf-8")
+    (directory / FAKE_SCORE_FILE_NAME).write_text(
+        json.dumps({"per_seed": [score] * TOY_SEED_COUNT}), encoding="utf-8"
+    )
+    manifest = CandidateManifest(
+        kind="artifact",
+        target="baseline@0",
+        approach=TOY_APPROACH,
+        author=author,
+        created_at=0.0,
+    )
+    (directory / "manifest.yaml").write_text(
+        yaml.safe_dump(manifest.model_dump(mode="json")), encoding="utf-8"
+    )
+    return directory
+
+
+@dataclass(kw_only=True)
+class JudgeWaiter:
+    """The Integrator's closeout waiter in tests: let the fake judge answer, then tick."""
+
+    clock: FakeClock
+    eval_service: EvalService
+    sources: tuple[SourceDecl, ...]
+
+    def __call__(self) -> None:
+        self.clock.advance(max(source.latency_seconds for source in self.sources) + 1.0)
+        self.eval_service.tick()
 
 
 def toy_problem(root: Path, worker_count: int = 2) -> Problem:
@@ -112,6 +164,7 @@ class FakeIntegrator:
     verified: list[str] = field(default_factory=list[str])
     closeout_count: int = 0
     closeout_fails: bool = False
+    baseline: BaselineRecord = BASELINE_ZERO
 
     def on_verified(self, result_claim_id: str) -> None:
         self.verified.append(result_claim_id)
@@ -120,7 +173,7 @@ class FakeIntegrator:
         return ()
 
     def current(self) -> BaselineRecord:
-        return BASELINE_ZERO
+        return self.baseline
 
     def closeout(self) -> BaselineRecord:
         self.closeout_count += 1
@@ -131,52 +184,18 @@ class FakeIntegrator:
 
 
 @dataclass(kw_only=True)
-class ScriptedStopRules:
-    stop_at_seconds: float | None = None
-    has_fired: bool = False
-
-    def evaluate(self, now_seconds: float) -> Event | None:
-        if (
-            self.stop_at_seconds is not None
-            and now_seconds >= self.stop_at_seconds
-            and not self.has_fired
-        ):
-            self.has_fired = True
-            return Event.model_validate(
-                {
-                    "local_id": "human/00001",
-                    "ts": now_seconds,
-                    "actor": "human",
-                    "role": "human",
-                    "type": "stopped",
-                    "data": {"reason": "budget"},
-                }
-            )
-        else:
-            return None
-
-
-class ZeroMetrics:
-    def standing(self) -> StandingMetrics:
-        return StandingMetrics(
-            holdout_score=None,
-            dead_end_rewalk_count=0,
-            insight_reuse_counts={},
-            prediction_error_by_agent={},
-            prediction_error_by_approach={},
-        )
-
-
-@dataclass(kw_only=True)
 class MemoryAssembly:
     """Builds every component from fakes and in-memory stores; remembers what it built.
 
-    The router is the real one over a memory key-value store; use_real_router False
+    The router, the budget meter, the stop rules and the metrics are the real ones over
+    memory key-value stores; use_real_router False
     swaps in SwitchedRouter, whose overdue and failures a test can script.
     """
 
     clock: FakeClock
     use_real_router: bool = True
+    use_real_eval: bool = False
+    use_real_integrator: bool = False
     root: Path
     contexts: list[RunContext] = field(default_factory=list[RunContext])
     built: list[RunComponents] = field(default_factory=list[RunComponents])
@@ -194,12 +213,11 @@ class MemoryAssembly:
             clock=self.clock,
             top_level=top_level_source(context.problem.sources),
         )
+        run_store = MemoryKeyValueStore(clock=self.clock, namespace=context.run_id)
         router: Router
         if self.use_real_router:
             router = KeyValueRouter(
-                store=MemoryKeyValueStore(
-                    clock=self.clock, namespace=f"{context.run_id}-router"
-                ),
+                store=run_store,
                 leases=leases,
                 indexer=indexer,
                 arm=context.arm,
@@ -214,38 +232,112 @@ class MemoryAssembly:
             heartbeat_interval_seconds=context.params.heartbeat_interval_seconds,
             sandbox_root=context.run_root / "sandboxes",
         )
-        tools = HerdTools(
-            blackboard=blackboard,
-            objects=None,
-            indexer=indexer,
-            eval_service=ScriptedEval(),
-            leases=leases,
-            router=router,
-            recorder=RecordingRecorder(),
-            arm=context.arm,
-            params=context.params,
-            clock=self.clock,
-            run_id=context.run_id,
+        meter = KeyValueBudgetMeter(store=run_store, limits=context.problem.limits)
+        top_level = top_level_source(context.problem.sources)
+        eval_service: EvalService
+        if self.use_real_eval:
+            eval_service = LadderEvalService(
+                blackboard=blackboard,
+                sources=tuple(
+                    FakeSlowSource(clock=self.clock, declaration=source)
+                    for source in context.problem.sources
+                ),
+                indexer=indexer,
+                budget=meter,
+                gates=context.problem.gates,
+                gate_runner=passing_gate,
+                baseline_scores=zero_baseline_scores,
+                arm=context.arm,
+                params=context.params,
+                clock=self.clock,
+                random=context.random,
+            )
+        else:
+            eval_service = ScriptedEval()
+        tools, compose_tools = (
+            HerdTools(
+                blackboard=blackboard,
+                objects=None,
+                indexer=indexer,
+                eval_service=eval_service,
+                leases=leases,
+                router=router,
+                recorder=RecordingRecorder(),
+                arm=arm,
+                params=context.params,
+                clock=self.clock,
+                run_id=context.run_id,
+                is_compose=is_compose,
+            )
+            for arm, is_compose in (
+                (context.arm, False),
+                (compose_arm(context.arm), True),
+            )
         )
+        task_queue = RecordingTaskQueue()
+        compose_queue = RecordingTaskQueue()
+        integrator: IntegratorService
+        if self.use_real_integrator and top_level is not None:
+            baseline_directory = context.run_root / "baseline0"
+            baseline_directory.mkdir(parents=True, exist_ok=True)
+            integrator = HerdIntegrator(
+                blackboard=blackboard,
+                eval_service=eval_service,
+                task_queue=task_queue,
+                compose_queue=compose_queue,
+                gates=context.problem.gates,
+                gate_runner=passing_gate,
+                arm=context.arm,
+                params=context.params,
+                clock=self.clock,
+                top_level=top_level,
+                work_directory=context.run_root / "integrator",
+                baseline_directory=baseline_directory,
+                calibration=CoreCalibration(
+                    per_seed=(0.0,) * TOY_SEED_COUNT,
+                    score=0.0,
+                    audit_per_seed=(0.0,) * TOY_SEED_COUNT,
+                    sigma_dev=TOY_SIGMA,
+                    sigma_audit=TOY_SIGMA,
+                ),
+                waiter=JudgeWaiter(
+                    clock=self.clock,
+                    eval_service=eval_service,
+                    sources=context.problem.sources,
+                ),
+            )
+        else:
+            integrator = FakeIntegrator(params=context.params)
         components = RunComponents(
             blackboard=blackboard,
             indexer=indexer,
-            task_queue=RecordingTaskQueue(),
-            compose_queue=RecordingTaskQueue(),
+            task_queue=task_queue,
+            compose_queue=compose_queue,
             leases=leases,
-            eval_service=ScriptedEval(),
+            eval_service=eval_service,
             router=router,
-            integrator=FakeIntegrator(params=context.params),
-            budget=RecordingBudget(),
-            stop_rules=ScriptedStopRules(),
-            metrics=ZeroMetrics(),
-            executor=executor,
-            sessions=MemorySessionFiles(executor=executor, root=context.run_root),
-            harness=TranscriptHarness(
-                scripted=ScriptedHarness(default_program="none"), root=context.run_root
+            integrator=integrator,
+            budget=meter,
+            stop_rules=BudgetStopRules(
+                store=run_store,
+                blackboard=blackboard,
+                meter=meter,
+                integrator=integrator,
+                limits=context.problem.limits,
+                target=context.problem.target,
+                policy=EscalationPolicy(),
             ),
-            tool_server=FakeToolServer(),
-            registry=tools,
+            metrics=HerdMetrics(
+                blackboard=blackboard,
+                indexer=indexer,
+                budget=meter,
+                router=router if isinstance(router, KeyValueRouter) else None,
+                top_level=top_level_source(context.problem.sources),
+            ),
+            executor=executor,
+            harness=TranscriptHarness(scripted=ScriptedHarness(default_program="none")),
+            tool_server=FakeToolServer(tools=tools),
+            compose_tool_server=FakeToolServer(tools=compose_tools),
             target_repository="memory://target",
             target_ref="main",
         )

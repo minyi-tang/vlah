@@ -10,6 +10,10 @@ A request goes through these steps:
 6. write the result claim;
 7. queue at the cheapest level.
 
+A compose request is the Integrator's work (D74), so it skips steps 2 and 3 in
+every arm and spends the Integrator's quota, like a remeasure; its result claim
+is tagged compose so that a restart and the dedup table know it.
+
 tick then walks each request up the ladder (ladder.py). Each measured level gets a
 claim_status event: "verified:<level>" means validly measured, not improved, and
 a gate or constraint failure means "refuted". One result_ready (or, for the
@@ -37,8 +41,10 @@ from vlah.core.eval.api import (
     SimilarItem,
 )
 from vlah.core.eval.history import (
+    COMPOSE_TAG,
     REMEASURE_TAG,
     measured_claims_by_hash,
+    replay_recorded_runs,
     stored_level_score,
 )
 from vlah.core.eval.jobs import (
@@ -50,7 +56,7 @@ from vlah.core.eval.jobs import (
     load_manifest,
 )
 from vlah.core.eval.ladder import LadderRunner, mean_or_none
-from vlah.core.eval.quota import QuotaTracker
+from vlah.core.eval.quota import QuotaTracker, RequestKind
 from vlah.core.eval.records import EvalRecords
 from vlah.core.eval.validation import CheckedRequest, check_candidate, request_error
 from vlah.core.indexer.api import Indexer
@@ -63,6 +69,11 @@ from vlah.core.types.params import GateSpec, Params
 from vlah.ports.signal_source import SignalSource
 
 INTEGRATOR = ActorId("integrator")
+CLAIM_TAGS_BY_KIND: dict[RequestKind, tuple[str, ...]] = {
+    "worker": (),
+    "remeasure": (REMEASURE_TAG,),
+    "compose": (COMPOSE_TAG,),
+}
 SIMILAR_LIMIT = 5
 CONFIRM_TOKEN_TTL_SECONDS = 3600.0
 
@@ -100,13 +111,13 @@ class LadderEvalService:
             )
         self.blackboard = blackboard
         self.records = EvalRecords(blackboard=blackboard, clock=clock)
+        quota = QuotaTracker(
+            clock=clock, params=params, top_level_id=self.ladder[-1].declaration.id
+        )
+        replay_recorded_runs(blackboard, quota)
         self.runner = LadderRunner(
             records=self.records,
-            quota=QuotaTracker(
-                clock=clock,
-                params=params,
-                top_level_id=self.ladder[-1].declaration.id,
-            ),
+            quota=quota,
             budget=budget,
             gates=gates,
             gate_runner=gate_runner,
@@ -181,7 +192,10 @@ class LadderEvalService:
                     request.candidate_directory, checked.baseline
                 )
                 with self.hash_lock(hash_value):
-                    return self.dedup_or_queue(request, caller, checked, hash_value)
+                    if request.kind == "compose":
+                        return self.queue_request(request, caller, checked, hash_value)
+                    else:
+                        return self.dedup_or_queue(request, caller, checked, hash_value)
 
     def dedup_or_queue(
         self,
@@ -303,7 +317,7 @@ class LadderEvalService:
         else:
             job = self.create_job(
                 NewJob(
-                    kind="worker",
+                    kind=request.kind,
                     caller=caller,
                     candidate_directory=request.candidate_directory,
                     manifest=checked.manifest,
@@ -329,7 +343,7 @@ class LadderEvalService:
             new_job.manifest.approach,
             EvidenceRef(candidate=f"candidates/{new_job.hash_value}/result.json"),
             new_job.rationale,
-            tags=(REMEASURE_TAG,) if new_job.kind == "remeasure" else (),
+            tags=CLAIM_TAGS_BY_KIND[new_job.kind],
         )
         self.records.write_lineage(new_job.hash_value, new_job.parents)
         job = EvalJob(
@@ -345,6 +359,7 @@ class LadderEvalService:
             claim_id=claim_id,
             predictions=new_job.predictions,
             levels=new_job.levels,
+            dataset=new_job.dataset,
         )
         with self.lock:
             self.jobs.append(job)
@@ -397,6 +412,7 @@ class LadderEvalService:
                 levels=(self.ladder[-1],),
                 parent_candidate=request.parent_candidate,
                 rationale=f"Integrator remeasure of {request.parent_candidate} on {request.baseline}.",
+                dataset=request.dataset,
             )
         )
         return job.request_id

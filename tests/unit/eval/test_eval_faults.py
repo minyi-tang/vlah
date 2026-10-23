@@ -13,6 +13,7 @@ from tests.fixtures.eval_harness import (
     WORKER,
     EvalHarness,
     make_eval_harness,
+    source_declaration,
     zero_baseline,
 )
 from vlah.adapters.memory.signal_source import FakeSlowSource
@@ -268,6 +269,34 @@ def test_dedup_survives_a_restart_but_unfinished_work_is_released(
     assert (duplicate.status, duplicate.claim_id) == ("dedup_hit", finished.claim_id)
     resubmitted = restarted.request(harness.request(pending_directory), WORKER)
     assert resubmitted.status == "queued"
+
+
+def test_a_restarted_service_keeps_to_its_daily_quota(tmp_path: Path) -> None:
+    """The quota is rebuilt from the blackboard, so a restart does not reset it (#42, S7)."""
+    declaration = source_declaration("slow", 1.0, "10m", per_day=2)
+    harness = make_eval_harness(tmp_path, declarations=(declaration,))
+    harness.service.request(harness.request(harness.candidate(1.0)), WORKER)
+    harness.service.request(harness.request(harness.candidate(2.0)), WORKER)
+    harness.run(seconds=3600)
+    restarted = LadderEvalService(
+        blackboard=harness.blackboard,
+        sources=harness.sources,
+        indexer=harness.indexer,
+        budget=harness.budget,
+        gates=(),
+        gate_runner=harness.gates,
+        baseline_scores=zero_baseline,
+        arm=PRESETS["S2"],
+        params=Params(),
+        clock=harness.clock,
+        random=Random(0),
+    )
+    harness.service = restarted
+    restarted.request(harness.request(harness.candidate(3.0)), WORKER)
+    harness.run(seconds=3600)
+    assert len(harness.sources[0].jobs) == 2, "two runs today already"
+    harness.run(seconds=86400)
+    assert len(harness.sources[0].jobs) == 3, "the next day has quota again"
 
 
 def test_a_remeasure_never_becomes_the_dedup_original(tmp_path: Path) -> None:

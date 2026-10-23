@@ -3,6 +3,8 @@
 The indexer writes one claim_status event, proposed to corroborated, as the actor
 indexer. It never writes it twice: it checks the replayed status first, and a
 duplicate that slips through after a restart is rejected on replay as "unchanged".
+A write the blackboard rejects is reported so the indexer tries again at its next
+merge.
 """
 
 import json
@@ -39,7 +41,8 @@ def corroborating_results(
 
 def write_corroboration(
     blackboard: Blackboard, clock: Clock, insight_id: str, evidence: tuple[str, ...]
-) -> None:
+) -> bool:
+    """Write the event; False when the blackboard rejected it."""
     number = len(blackboard.list_paths(f"events/{INDEXER}/", None)) + 1
     local_id = format_event_local_id(INDEXER, number)
     event = {
@@ -61,5 +64,6 @@ def write_corroboration(
     )
     if receipt.status == "rejected":
         logger.error(f"could not corroborate {insight_id}: {receipt.violations}")
+        return False
     else:
-        pass
+        return True

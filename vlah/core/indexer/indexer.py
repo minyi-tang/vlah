@@ -7,9 +7,11 @@ each file at the first number whose snapshot shows it, so the two always agree
 number; it reaches other agents' diffs then (see DECISIONS, "Claims and sequence
 numbers").
 
-Search and similarity go through the VectorIndex and Model.embed ports. Embedding
-runs outside the lock; one lock guards the state, because apply runs on the writing
-thread and queries come from tool-server threads.
+Search and similarity go through the VectorIndex and Model.embed ports. Two locks,
+never nested: one guards the replayed state, because apply runs on the writing
+thread and queries come from tool-server threads; the other serializes the vector
+index, so a search never reads it while an upsert changes it. Model.embed runs
+under neither, so a slow embedding blocks no diff_since.
 """
 
 import logging
@@ -40,16 +42,14 @@ from vlah.core.indexer.vectors import (
     Catalog,
     ToEmbed,
     claim_item,
-    embed,
 )
-from vlah.core.indexer.vectors import query as query_vectors
 from vlah.core.types.claims import Claim, parse_claim
 from vlah.core.types.clock import Clock
-from vlah.core.types.events import Event, ResultReady, event_from_json
+from vlah.core.types.events import Event, event_from_json
 from vlah.core.types.ids import ActorId
 from vlah.core.types.params import Params
 from vlah.ports.model import Model
-from vlah.ports.store import VectorIndex
+from vlah.ports.store import VectorHit, VectorIndex
 
 logger = logging.getLogger(__name__)
 
@@ -79,11 +79,15 @@ class StoreIndexer:
         self.params = params
         self.clock = clock
         self.top_level = top_level
-        self.state = ReplayState()
+        self.state = ReplayState(top_level=top_level)
         self.catalog = Catalog()
-        self.top_level_measured: set[str] = set()
         self.corroboration_requested: set[str] = set()
+        # Dead ends whose status changed since embed last ran.
+        self.changed_dead_ends: set[str] = set()
         self.lock = threading.RLock()
+        self.vector_lock = threading.Lock()
+        # Every item id upserted so far, so a rebuild can empty the index.
+        self.indexed_item_ids: set[str] = set()
 
     # Folding in merges
 
@@ -108,7 +112,7 @@ class StoreIndexer:
                 to_embed = self.fold(
                     merged_commit.claims, contents, events, first_sequence
                 )
-        self.embed(to_embed)
+        self.embed(to_embed, replace_everything=False)
         self.request_corroborations()
 
     def fold(
@@ -134,76 +138,93 @@ class StoreIndexer:
         for event in events:
             before = self.claim_status_of(event.target)
             state.apply_event(event)
-            self.note_measurement(event)
-            to_embed.extend(self.dead_end_items(event.target, before))
+            record = state.claims.get(event.target or "")
+            if (
+                record is not None
+                and record.claim.type == "dead_end"
+                and record.status != before
+            ):
+                self.changed_dead_ends.add(record.claim.id)
+            else:
+                pass
         return to_embed
 
     def claim_status_of(self, claim_id: str | None) -> str | None:
         record = self.state.claims.get(claim_id or "")
         return record.status if record is not None else None
 
-    def note_measurement(self, event: Event) -> None:
-        """Candidates judged at the top level count for the dead-end re-walk metric."""
-        if isinstance(event.data, ResultReady) and event.data.level == self.top_level:
-            self.top_level_measured.add(event.data.candidate)
-        else:
-            pass
-
     # Embedding
 
-    def dead_end_items(self, claim_id: str | None, before: str | None) -> list[ToEmbed]:
-        """A dead end newly confirmed joins the presearch index (D26)."""
-        record = self.state.claims.get(claim_id or "")
-        if (
-            record is None
-            or record.claim.type != "dead_end"
-            or record.status != "confirmed"
-            or before == "confirmed"
-        ):
-            return []
-        else:
-            return [
-                self.catalog.dead_end_item(
-                    record.claim, candidate_hashes_of(record.claim)
-                )
-            ]
-
-    def embed(self, items: list[ToEmbed]) -> None:
-        """Embed outside the lock: the model may be slow."""
+    def embed(self, items: list[ToEmbed], replace_everything: bool) -> None:
+        """Embed under no lock, then change the vector index under its own lock."""
         with self.lock:
             everything = [*items, *self.catalog.take_changed_candidates()]
-        embed(self.model, self.vectors, everything)
+            deletes: list[str] = []
+            # Only a confirmed dead end is presearched (D26). Its latest status
+            # decides, so one that was confirmed and then reinstated is dropped.
+            for claim_id in sorted(self.changed_dead_ends):
+                record = self.state.claims[claim_id]
+                if record.status == "confirmed":
+                    everything.append(
+                        self.catalog.dead_end_item(
+                            record.claim, candidate_hashes_of(record.claim)
+                        )
+                    )
+                else:
+                    deletes.append(f"{DEAD_END_PREFIX}{claim_id}")
+            self.changed_dead_ends.clear()
+        if everything:
+            embedded = self.model.embed(tuple(item.text for item in everything))
+        else:
+            embedded = ()
+        with self.vector_lock:
+            if replace_everything:
+                deletes = sorted(self.indexed_item_ids)
+            else:
+                pass
+            for item_id in deletes:
+                self.vectors.delete(item_id)
+                self.indexed_item_ids.discard(item_id)
+            for item, vector in zip(everything, embedded, strict=True):
+                self.vectors.upsert(item.item_id, vector, item.metadata)
+                self.indexed_item_ids.add(item.item_id)
 
     # Corroboration (D9): an insight cited by two results verified at the top level
 
     def request_corroborations(self) -> None:
+        """Write the corroborations due, by insight id; a rejected one is due again."""
         with self.lock:
             due = [
-                record.claim.id
-                for record in self.state.claims.values()
-                if record.claim.type == "insight"
+                claim_id
+                for claim_id in sorted(self.state.claims)
+                if (record := self.state.claims[claim_id]).claim.type == "insight"
                 and record.status == "proposed"
-                and record.claim.id not in self.corroboration_requested
-                and corroborating_results(self.state, record.claim.id, self.top_level)
+                and claim_id not in self.corroboration_requested
+                and corroborating_results(self.state, claim_id, self.top_level)
                 >= CORROBORATING_RESULTS
             ]
             self.corroboration_requested.update(due)
             evidence = {insight: self.state.citations_of(insight) for insight in due}
         for insight_id in due:
-            write_corroboration(
+            is_written = write_corroboration(
                 self.blackboard, self.clock, insight_id, evidence[insight_id]
             )
+            if is_written:
+                pass
+            else:
+                with self.lock:
+                    self.corroboration_requested.discard(insight_id)
 
     # Rebuild
 
     def rebuild(self) -> None:
         """Replay from sequence 0 using only the repository."""
-        replayed = ReplayState()
+        replayed = ReplayState(top_level=self.top_level)
         to_embed: list[ToEmbed] = []
         with self.lock:
             self.state = replayed
             self.catalog = Catalog()
-            self.top_level_measured = set()
+            self.changed_dead_ends.clear()
             seen: set[str] = set()
             head = self.blackboard.head_sequence()
             for sequence in range(1, head + 1):
@@ -221,7 +242,7 @@ class StoreIndexer:
                 for claim_id, record in replayed.claims.items()
                 if record.status != "proposed" and record.claim.type == "insight"
             }
-        self.embed(to_embed)
+        self.embed(to_embed, replace_everything=True)
         self.request_corroborations()
 
     def replay_files(
@@ -265,6 +286,10 @@ class StoreIndexer:
 
     # Queries
 
+    def head_sequence(self) -> int:
+        with self.lock:
+            return self.state.head
+
     def claim_state(self, claim_id: str) -> ClaimState:
         with self.lock:
             return self.state.claim_state(claim_id)
@@ -283,10 +308,17 @@ class StoreIndexer:
                     history=tuple(record.history),
                 )
 
+    def vector_hits(
+        self, text: str, limit: int, where: dict[str, str] | None
+    ) -> tuple[VectorHit, ...]:
+        (vector,) = self.model.embed((text,))
+        with self.vector_lock:
+            return self.vectors.query(vector, limit, where)
+
     def query(
         self, text: str, limit: int, where: dict[str, str] | None
     ) -> tuple[Hit, ...]:
-        hits = query_vectors(self.model, self.vectors, text, limit, where)
+        hits = self.vector_hits(text, limit, where)
         with self.lock:
             return tuple(
                 self.hit_of(hit.item_id, hit.similarity, hit.metadata) for hit in hits
@@ -322,7 +354,7 @@ class StoreIndexer:
             return self.query(query, limit, {"kind": "claim", "author": viewer})
         else:
             # A confirmed dead end is indexed twice, as a claim and for presearch.
-            hits = query_vectors(self.model, self.vectors, query, limit * 2, None)
+            hits = self.vector_hits(query, limit * 2, None)
             kept = [hit for hit in hits if hit.metadata.get("kind") != "dead_end"]
             with self.lock:
                 return tuple(
@@ -374,18 +406,15 @@ class StoreIndexer:
 
     def metrics(self) -> IndexerMetrics:
         with self.lock:
-            measured = sorted(self.top_level_measured)
+            measured = sorted(self.state.top_level_measured)
             texts = {
                 candidate: self.catalog.candidate_text(candidate)
                 for candidate in measured
             }
-            insights = [
-                record.claim.id
-                for record in self.state.claims.values()
-                if record.claim.type == "insight"
-            ]
             reuse = {
-                insight: len(self.state.citations_of(insight)) for insight in insights
+                claim_id: len(self.state.citations_of(claim_id))
+                for claim_id in sorted(self.state.claims)
+                if self.state.claims[claim_id].claim.type == "insight"
             }
         threshold = self.params.similarity_threshold
         rewalks = sum(

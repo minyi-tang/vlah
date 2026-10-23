@@ -3,11 +3,13 @@
 A compose task asks for one candidate that combines two verified candidates. It is
 run by a fresh agent that belongs to no arm's worker pool and carries no arm's
 context: its start pack is the task, spec.md and the two candidates' files, the
-same in every arm. Its output goes only to the Integrator.
+same in every arm, and its tools are built with compose_arm, whose sharing
+switches are fixed whatever the arm. Its output goes only to the Integrator.
 """
 
 from dataclasses import dataclass
 
+from vlah.arms.config import ArmConfig
 from vlah.core.blackboard.api import Blackboard
 from vlah.core.types.ids import ActorId
 from vlah.core.types.tasks import Task
@@ -21,6 +23,24 @@ from vlah.core.worker.start_pack import (
 from vlah.ports.executor import StartPack
 
 COMPOSE_AGENT = ActorId("worker-00")
+
+
+def compose_arm(arm: ArmConfig) -> ArmConfig:
+    """The arm configuration the compose slot's tools run under: the run's arm with
+    every switch the tools read fixed, so only the arm's name differs (D74).
+
+    The eval service keeps its own copy of the arm; it learns that a request is
+    compose work from the request itself, which the compose tool server marks.
+    """
+    return arm.model_copy(
+        update={
+            "repo_read_scope": "spec_approaches_own",
+            "search": "off",
+            "diff_since": "off",
+            "failure_refresh": False,
+            "map": "initial_only",
+        }
+    )
 
 
 def candidate_section(blackboard: Blackboard, candidate_hash: str) -> Section:

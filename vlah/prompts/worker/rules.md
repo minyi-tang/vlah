@@ -8,6 +8,9 @@ The herd's code enforces these rules; they are here so nothing surprises you.
   call again with it if you still want the run.
 - Never try to read eval definitions, hidden data, or anything under private/.
   You cannot, and the attempt is recorded.
+- Work only from your own clone and what the tools return. Never try to reach
+  another agent's sandbox, clone or files; another worker's claims come to you
+  through the tools, or not at all in arms that do not share.
 - The blackboard is append-only. Create new files under claims/$agent/; never
   edit or delete a file.
 - If a tool call is blocked with an interrupt from the herd, act on it before

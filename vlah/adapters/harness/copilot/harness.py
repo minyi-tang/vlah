@@ -19,30 +19,46 @@ Copilot compacts the conversation itself at 80% of the window and the CLI cannot
 turn that off; the hook asks the agent to wrap up at context_restart_fraction (70%)
 first. Once a compaction has happened, usage() reports the window as full: the
 context is lossy, so the hook keeps the agent on its wrap-up tools and the loop
-replaces the session from the D77 pack. The model comes from configuration, but an
-administrator-managed setting can override it; the transcript records the model
-actually used.
+replaces the session from the D77 pack. The model is the user's configuration: the
+configured one, or any the account chooses when several are allowed; the transcript
+records the model each call ran on, and usage() logs it once per session.
+
+The AgentSpec's egress policy (D75) lists the herd's tool server and hook
+endpoints, the hosts in allowed_urls, and the hosts Copilot itself needs. The
+default for those, COPILOT_API_HOSTS, was observed by running Copilot CLI 1.0.102
+behind a logging proxy: with a private COPILOT_HOME it contacted api.github.com
+(sign-in), api.<tier>.githubcopilot.com (the model API, an alias of
+api.githubcopilot.com) and telemetry.<tier>.githubcopilot.com, and with the user's
+home also exp.<tier>.githubcopilot.com, where <tier> is the account's plan
+(individual, business or enterprise). One run also opened a direct connection to
+an address in the model API's load balancer range, bypassing HTTPS_PROXY, so the
+sandbox should enforce the policy below the proxy.
 """
 
 import json
+import logging
 import shlex
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
+from urllib.parse import urlsplit
 
 from vlah.adapters.harness.copilot.transcript import (
     latest_context,
+    models,
     rate_limit_events,
     tool_calls,
 )
 from vlah.adapters.harness.interrupt_hook import HERD_SERVER_NAME, WRAP_UP_TOOL_NAMES
 from vlah.core.types.ids import ActorId
-from vlah.core.types.params import Params
+from vlah.core.types.params import EgressPolicy, HostRule, Params
 from vlah.core.types.tasks import Task
 from vlah.ports.errors import NotSupportedError
 from vlah.ports.executor import AgentSpec, Handle, StartPack
 from vlah.ports.harness import ContextUsage, HookConfig, ToolEndpoint, Workspace
 from vlah.prompts.worker import render_worker_prompt
+
+logger = logging.getLogger(__name__)
 
 HOME_DIRECTORY = ".vlah/copilot"
 SETTINGS_PATH = f"{HOME_DIRECTORY}/settings.json"
@@ -53,6 +69,9 @@ HOOK_TIMEOUT_SECONDS = 10
 # Copilot names an MCP tool <server>-<tool>.
 WRAP_UP_TOOLS = tuple(f"{HERD_SERVER_NAME}-{name}" for name in WRAP_UP_TOOL_NAMES)
 COPILOT_ENVIRONMENT = {"COPILOT_AUTO_UPDATE": "false", "NO_COLOR": "1"}
+# Observed with Copilot CLI 1.0.102 (see the module docstring); the wildcard covers
+# the api, telemetry and exp hosts of every plan tier.
+COPILOT_API_HOSTS = ("api.github.com", "*.githubcopilot.com")
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -67,8 +86,45 @@ class CopilotConfig:
     python_executable: str = field(default_factory=lambda: sys.executable)
     # Hosts the agent's shell may reach, such as the testbed's slow tier for tb fast.
     allowed_urls: tuple[str, ...] = ()
+    # Hosts Copilot itself reaches to sign in and call the model, port 443.
+    copilot_api_hosts: tuple[str, ...] = COPILOT_API_HOSTS
+    # Models a session may run on besides `model`; empty means whatever the account
+    # chooses is fine. The model is the user's configuration, never a herd limit.
+    allowed_models: tuple[str, ...] = ()
     # Passed through to every worker.
     environment: dict[str, str] = field(default_factory=dict[str, str])
+
+
+def host_and_port(url: str) -> tuple[str, int]:
+    """The destination of a URL, or of a bare domain as --allow-url accepts it."""
+    parts = urlsplit(url if "://" in url else f"https://{url}")
+    if parts.hostname is None:
+        raise ValueError(f"{url!r} names no host")
+    elif parts.port is not None:
+        return parts.hostname, parts.port
+    else:
+        return parts.hostname, 80 if parts.scheme == "http" else 443
+
+
+def egress_policy(
+    config: CopilotConfig, tool_endpoint: ToolEndpoint, hook_config: HookConfig
+) -> EgressPolicy:
+    """Everything the worker sandbox may reach (D75): the herd's tools, the hosts
+    in allowed_urls, and Copilot's own hosts, in that order, without repeats."""
+    rules: list[HostRule] = []
+    for url in (
+        tool_endpoint.url,
+        hook_config.interrupt_check_url,
+        hook_config.interrupt_ack_url,
+    ):
+        host, port = host_and_port(url)
+        rules.append(HostRule(host=host, ports=(port,), purpose="tools"))
+    for url in config.allowed_urls:
+        host, port = host_and_port(url)
+        rules.append(HostRule(host=host, ports=(port,), purpose="testbed"))
+    for host in config.copilot_api_hosts:
+        rules.append(HostRule(host=host, purpose="model_api"))
+    return EgressPolicy(allow=tuple(dict.fromkeys(rules)))
 
 
 def mcp_config(tool_endpoint: ToolEndpoint) -> str:
@@ -94,6 +150,7 @@ class CopilotHarness:
     def __init__(self, *, config: CopilotConfig, params: Params) -> None:
         self.config = config
         self.params = params
+        self.model_mismatches_logged: set[Path] = set()
 
     @property
     def supports_tool_hooks(self) -> bool:
@@ -168,9 +225,35 @@ class CopilotHarness:
             target_repository=workspace.target_repository,
             target_ref=workspace.target_ref,
             blackboard_clone_url=workspace.blackboard_clone_url,
+            egress=egress_policy(self.config, tool_endpoint, hook_config),
         )
 
+    def models_used(self, transcript_path: Path) -> tuple[str, ...]:
+        """The models the session's calls ran on so far, logged once per session.
+
+        Which model runs is the user's configuration: `model`, plus `allowed_models`
+        when the account may choose among several. A warning is raised only when
+        the configuration names an allowed set and a call ran outside it.
+        """
+        models_run = models(transcript_path)
+        if models_run and transcript_path not in self.model_mismatches_logged:
+            self.model_mismatches_logged.add(transcript_path)
+            logger.info(f"{transcript_path}: Copilot ran {', '.join(models_run)}")
+            allowed = {self.config.model, *self.config.allowed_models}
+            unexpected = tuple(model for model in models_run if model not in allowed)
+            if self.config.allowed_models and unexpected:
+                logger.warning(
+                    f"{transcript_path}: Copilot ran {', '.join(unexpected)}, outside "
+                    f"the configured models {', '.join(sorted(allowed))}"
+                )
+            else:
+                pass
+        else:
+            pass
+        return models_run
+
     def usage(self, transcript_path: Path) -> ContextUsage:
+        self.models_used(transcript_path)
         reading = latest_context(transcript_path)
         window = reading.window_tokens or self.config.context_window_tokens
         if window is None and reading.used_tokens == 0:

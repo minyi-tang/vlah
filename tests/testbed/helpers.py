@@ -21,7 +21,11 @@ STUB_INGREDIENTS = [
 def stub_candidate(directory: Path, ingredients=(), **params) -> Path:
     directory = Path(directory)
     directory.mkdir(parents=True, exist_ok=True)
-    params_yaml = {"ingredients": {k: (k in ingredients) for k in STUB_INGREDIENTS}}
+    params_yaml = {
+        "ingredients": {
+            ingredient: (ingredient in ingredients) for ingredient in STUB_INGREDIENTS
+        }
+    }
     params_yaml.update(params)
     (directory / "params.yaml").write_text(yaml.safe_dump(params_yaml, sort_keys=True))
     return directory

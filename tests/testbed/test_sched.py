@@ -1,5 +1,6 @@
 """Spec 11.9 tests for problem A (the scheduling simulator), plus sandbox and packing checks."""
 
+import importlib
 import json
 import sys
 import time
@@ -10,10 +11,10 @@ import pytest
 from testbed.cli.pack import leaked, pack_problem
 from testbed.problem_api import load_problem
 
-P: Any = load_problem(
+PROBLEM: Any = load_problem(
     "sched"
 )  # SchedProblem; loaded by path, so typed as the generic Problem
-INGS = {
+INGREDIENTS = {
     "backfill",
     "admission",
     "locality",
@@ -23,28 +24,28 @@ INGS = {
     "fairshare",
 }
 needs_hidden = pytest.mark.skipif(
-    P.hidden is None, reason="hidden material (private/testbed/sched) is not here"
+    PROBLEM.hidden is None, reason="hidden material (private/testbed/sched) is not here"
 )
 
 
 def write_policy(tmp_path, code, name="cand"):
-    d = tmp_path / name
-    d.mkdir()
-    (d / "policy.py").write_text(code)
-    (d / "params.yaml").write_text("{}\n")
-    return d
+    candidate_dir = tmp_path / name
+    candidate_dir.mkdir()
+    (candidate_dir / "policy.py").write_text(code)
+    (candidate_dir / "params.yaml").write_text("{}\n")
+    return candidate_dir
 
 
 def short_problem(hours=2):
-    q = type(P)(P.root)
-    q.common = dict(q.common, horizon_s=hours * 3600, drain_cap_s=3600)
-    return q
+    problem = type(PROBLEM)(PROBLEM.root)
+    problem.common = dict(problem.common, horizon_s=hours * 3600, drain_cap_s=3600)
+    return problem
 
 
 @pytest.mark.timeout(300)
 def test_pack_excludes_hidden_material(tmp_path):
-    out = pack_problem("sched", tmp_path / "packed")
-    assert leaked(out) == []
+    packed_dir = pack_problem("sched", tmp_path / "packed")
+    assert leaked(packed_dir) == []
     for must in (
         "sim/engine.py",
         "sim/policy_api.py",
@@ -54,57 +55,61 @@ def test_pack_excludes_hidden_material(tmp_path):
         "baseline_scores.json",
         "problem.py",
     ):
-        assert (out / must).exists(), must
+        assert (packed_dir / must).exists(), must
     for gone in ("hidden", "reference", "probes", "problem.yaml", "pi_prompt.md"):
-        assert not (out / gone).exists(), gone
-    if P.hidden is not None:
-        secret = str(P.seeds("dev")[0])
-        for f in out.rglob("*"):
-            if f.is_file():
-                assert secret not in f.read_text(errors="ignore"), f
-    packed = load_problem(out)  # the worker copy works without hidden files...
+        assert not (packed_dir / gone).exists(), gone
+    if PROBLEM.hidden is not None:
+        secret = str(PROBLEM.seeds("dev")[0])
+        for packed_file in packed_dir.rglob("*"):
+            if packed_file.is_file():
+                assert secret not in packed_file.read_text(errors="ignore"), packed_file
+    packed = load_problem(packed_dir)  # the worker copy works without hidden files...
     assert packed.public_seeds == [1, 2, 3, 4, 5]
     with pytest.raises(PermissionError):
         packed.seeds("dev")  # ...but has no hidden seeds
-    if P.hidden is None:
+    if PROBLEM.hidden is None:
         with pytest.raises(PermissionError):
-            packed.probes(P.baseline_dir())
+            packed.probes(PROBLEM.baseline_dir())
 
 
 def test_fast_tier_only_public_seeds():
     with pytest.raises(PermissionError):
-        P.evaluate(P.baseline_dir(), "fast", 123456789)
+        PROBLEM.evaluate(PROBLEM.baseline_dir(), "fast", 123456789)
 
 
 @pytest.mark.timeout(300)
 def test_same_seed_is_byte_identical_without_timeouts(tmp_path):
-    d = write_policy(
+    candidate_dir = write_policy(
         tmp_path,
         "def order(queue, state):\n    return [j.id for j in sorted(queue, key=lambda j: (j.est_dur, j.id))]\n",
     )
-    a = P.evaluate_many(d, [3], "fast", timeout=False)[0]
-    b = P.evaluate_many(d, [3], "fast", timeout=False)[0]
-    assert json.dumps(a, sort_keys=True) == json.dumps(b, sort_keys=True)
+    first = PROBLEM.evaluate_many(candidate_dir, [3], "fast", timeout=False)[0]
+    second = PROBLEM.evaluate_many(candidate_dir, [3], "fast", timeout=False)[0]
+    assert json.dumps(first, sort_keys=True) == json.dumps(second, sort_keys=True)
 
 
 @pytest.mark.timeout(300)
 def test_one_seed_six_sites_under_60s():
-    t = time.time()
-    r = P.evaluate(P.baseline_dir(), "fast", 2)
-    assert r["score"] is not None and time.time() - t < 60
+    started_at = time.time()
+    result = PROBLEM.evaluate(PROBLEM.baseline_dir(), "fast", 2)
+    assert result["score"] is not None and time.time() - started_at < 60
 
 
 @needs_hidden
 @pytest.mark.timeout(300)
 def test_probes_reference_and_baseline():
-    ref = {k for k, v in P.probes(P.reference_dir()).items() if v}
-    assert ref == {"backfill", "admission", "locality", "packing", "est_order"}
-    assert not any(P.probes(P.baseline_dir()).values())
-    assert set(P.probes(P.baseline_dir())) == INGS
+    reference = {
+        ingredient
+        for ingredient, fired in PROBLEM.probes(PROBLEM.reference_dir()).items()
+        if fired
+    }
+    assert reference == {"backfill", "admission", "locality", "packing", "est_order"}
+    assert not any(PROBLEM.probes(PROBLEM.baseline_dir()).values())
+    assert set(PROBLEM.probes(PROBLEM.baseline_dir())) == INGREDIENTS
 
 
 def test_slow_hooks_over_one_percent_void_the_run(tmp_path):
-    d = write_policy(
+    candidate_dir = write_policy(
         tmp_path,
         """
 import time
@@ -118,28 +123,30 @@ def order(queue, state):
     return [j.id for j in sorted(queue, key=lambda j: (j.enqueue_t, j.id))]
 """,
     )
-    q = short_problem()
-    r = q.assemble_sites([q.site_result(str(d), 1, i) for i in (0, 4)])
-    assert r["score"] is None and r["extra"]["timed_out"] is True
+    problem = short_problem()
+    result = problem.assemble_sites(
+        [problem.site_result(str(candidate_dir), 1, i) for i in (0, 4)]
+    )
+    assert result["score"] is None and result["extra"]["timed_out"] is True
 
 
 def test_invalid_answers_count_as_timeouts(tmp_path):
-    d = write_policy(tmp_path, "def order(queue, state):\n    return []\n")
-    q = short_problem()
-    r = q.assemble_sites([q.site_result(str(d), 1, 4)])
-    assert r["score"] is None and r["extra"]["timeout_ratio"] > 0.01
+    candidate_dir = write_policy(tmp_path, "def order(queue, state):\n    return []\n")
+    problem = short_problem()
+    result = problem.assemble_sites([problem.site_result(str(candidate_dir), 1, 4)])
+    assert result["score"] is None and result["extra"]["timeout_ratio"] > 0.01
 
 
 def test_crashing_import_voids(tmp_path):
-    d = write_policy(tmp_path, "raise RuntimeError('boom')\n")
-    q = short_problem()
-    r = q.assemble_sites([q.site_result(str(d), 1, 4)])
-    assert r["score"] is None and "boom" in r["extra"]["reason"]
+    candidate_dir = write_policy(tmp_path, "raise RuntimeError('boom')\n")
+    problem = short_problem()
+    result = problem.assemble_sites([problem.site_result(str(candidate_dir), 1, 4)])
+    assert result["score"] is None and "boom" in result["extra"]["reason"]
 
 
 def test_policy_sandbox_blocks_network_and_hidden_files(tmp_path):
-    hidden = (P.hidden or P.root) / "problem.yaml"
-    d = write_policy(
+    hidden = (PROBLEM.hidden or PROBLEM.root) / "problem.yaml"
+    candidate_dir = write_policy(
         tmp_path,
         f"""
 import socket
@@ -155,12 +162,14 @@ def order(queue, state):
     raise RuntimeError(f"net={{NET}} read={{READ}}")
 """,
     )
-    import importlib
-
-    eng = importlib.import_module(type(P).__module__.rsplit(".", 1)[0] + ".sim.engine")
-    drv = eng.PolicyDriver(d, 5, P.sites[4], timeout=True, budget_s=0.05)
+    engine = importlib.import_module(
+        type(PROBLEM).__module__.rsplit(".", 1)[0] + ".sim.engine"
+    )
+    driver = engine.PolicyDriver(
+        candidate_dir, 5, PROBLEM.sites[4], timeout=True, budget_s=0.05
+    )
     try:
-        out = drv.request(
+        reply = driver.request(
             {
                 "op": "call",
                 "hook": "order",
@@ -171,8 +180,8 @@ def order(queue, state):
             }
         )
     finally:
-        drv.close()
-    msg = " ".join(out["errors"])
-    assert "net=open" not in msg
+        driver.close()
+    message = " ".join(reply["errors"])
+    assert "net=open" not in message
     if sys.platform == "darwin":
-        assert "read=open" not in msg
+        assert "read=open" not in message

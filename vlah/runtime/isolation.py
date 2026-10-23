@@ -3,8 +3,10 @@
 A rule cannot stop a worker with a shell from reading its clone, so isolation is
 physical: in S1 and B1 each worker clones its own read-only mirror, which holds only
 what that worker may see. S2 and B0 workers clone the run's blackboard.
-- S1: spec.md, approaches/, every candidate and the eval service's result events
-  and claims, and the worker's own prefix.
+- S1: spec.md, approaches/, every candidate and the eval service's result events,
+  and the worker's own prefix. The eval service's result claims stay out: a result
+  claim's body is the submitter's rationale, which S1 shares no more than B1 does.
+  The mirror holds exactly what the tool scope lets an S1 worker read.
 - B1: spec.md, approaches/, the worker's own prefix, and the candidates the worker
   submitted (with their results).
 
@@ -32,14 +34,12 @@ def is_own_path(agent: ActorId, path: str) -> bool:
     return len(segments) >= 3 and segments[0] in OWN_PREFIXES and segments[1] == agent
 
 
-def is_result_record(path: str) -> bool:
-    return path.startswith(f"events/{EVAL_SERVICE}/") or path.startswith(
-        f"claims/{EVAL_SERVICE}/"
-    )
+def is_result_event(path: str) -> bool:
+    return path.startswith(f"events/{EVAL_SERVICE}/")
 
 
 class ScoresView:
-    """S1: candidates and scores, but no other worker's claims."""
+    """S1: candidates and scores, but no other worker's claims or rationales."""
 
     def __init__(self, agent: ActorId) -> None:
         self.agent = agent
@@ -49,7 +49,7 @@ class ScoresView:
             is_problem_file(path)
             or is_own_path(self.agent, path)
             or path.startswith("candidates/")
-            or is_result_record(path)
+            or is_result_event(path)
         )
 
 

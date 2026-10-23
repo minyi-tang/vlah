@@ -272,7 +272,10 @@ def check_executor(
 def check_signal_source(
     source: SignalSource, candidate: CandidateRef, actor: ActorId, timer: CheckTimer
 ) -> None:
-    """Results stay hidden until the declared latency has passed, and always carry n."""
+    """Results stay hidden until the declared latency has passed, and always carry n.
+
+    A first submission is a run, never a cache hit; only a repeat may be one.
+    """
     job_id = source.submit(candidate, actor, "baseline@0", "dev")
     latency_seconds = source.declaration.latency_seconds
     if latency_seconds > 0:
@@ -283,6 +286,7 @@ def check_signal_source(
     result = source.poll(job_id)
     assert result is not None, "a result is visible after the declared latency"
     assert result.n >= 1
+    assert not result.is_cached, "a first submission is a run, not a cache hit"
 
 
 @dataclass(frozen=True, kw_only=True)

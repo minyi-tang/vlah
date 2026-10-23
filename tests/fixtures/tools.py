@@ -137,7 +137,9 @@ class ToolsHarness:
     clock: FakeClock
 
 
-def make_tools_harness(sandbox_root: Path, arm: ArmConfig) -> ToolsHarness:
+def make_tools_harness(
+    sandbox_root: Path, arm: ArmConfig, is_compose: bool = False
+) -> ToolsHarness:
     clock = FakeClock()
     blackboard = make_store_blackboard(clock, name="tools")
     objects = MemoryObjectStore()
@@ -157,6 +159,7 @@ def make_tools_harness(sandbox_root: Path, arm: ArmConfig) -> ToolsHarness:
         params=Params(),
         clock=clock,
         run_id="r-tools",
+        is_compose=is_compose,
     )
     return ToolsHarness(
         tools=tools,

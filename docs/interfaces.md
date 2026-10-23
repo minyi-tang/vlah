@@ -47,7 +47,7 @@ All contracts are frozen. They change only in a contract-only PR labelled `contr
 
 ## What the worker loop asks its adapters
 
-The loop in `vlah/core/worker/loop.py` runs on the ports alone. These methods exist for it (D61: a capability the loop needs is a port field, never a protocol of its own):
+These methods exist so that the loop in `vlah/core/worker/loop.py` can run on the ports alone (D61: a capability the loop needs is a port field, never a protocol of its own):
 
 | Method | Port | What it answers |
 |---|---|---|
@@ -127,8 +127,9 @@ Workers never see this file. It parses into `HerdConfig` in `vlah/core/problem/a
 | `rule` | the rule number from v2.2 section 8, reported on each interrupt |
 | `events` | event types that trigger it, or `claim` for a newly merged claim (not `on`, which YAML reads as true) |
 | `match` | one lease predicate from the fixed set in `vlah/core/router/rules.py`; a file naming another fails to load |
-| `kind` | `hard` blocks the agent's next tool call; `soft` waits for its next sync point |
-| `priority` | among pending hard interrupts, the lowest number is shown and the rest are counted |
+| `kind` | `hard` blocks the agent's next tool call; `soft` waits for its next sync point; `revoke` withdraws the pending interrupts of the rule named by `revokes` about the same target |
+| `priority` | among pending hard interrupts, the lowest number is shown first and the rest follow, one per acknowledgement |
+| `revokes` | for a `revoke` entry, the id of the rule whose interrupts it withdraws |
 | `enabled_by` | the `ArmConfig` flag that turns the rule on: `router_rule1`, `router_rules_2_5` or `router_rule6_baseline_push` |
 | `reason` | the text the agent sees; a template whose fields are listed in `rules.py` |
 
@@ -190,3 +191,5 @@ The layout and a test vector are posted on #10. `tests/contract/test_candidate_h
   - `[proposed]` items are gap-fills, recorded in `DECISIONS.md` when they are implemented.
 - **Time is epoch seconds** from an injected `Clock`. Randomness is a seeded `random.Random` passed in by the runtime.
 - **Names follow [coding_style.md](coding_style.md).** Wire-schema names from the spec stay as they are (`seq`, `ts`, `n_items`, `n_reps`, `from`).
+- **A compose request is the Integrator's work.** `EvalRequest.kind` is `worker` or `compose`. The compose slot's tool server sets `compose` on every request it forwards; an agent cannot set it. The eval client runs a compose request as it runs an Integrator remeasure with respect to sharing: no confirmation, no hash dedup, no dead-end presearch, in every arm, and charged to the Integrator's quota, never a worker's daily quota (D74). Validation, gates and the ladder are the same for both kinds.
+- **A judge may answer a repeat from its cache.** A `SignalSource` that did not run a resubmitted candidate returns its `ScoreResult` with `is_cached: true` (the testbed's `duplicate: true`, TB§11.3); a first submission is always a run. The eval client charges neither quota nor budget for a cache hit, and `n_reps` leaves it out (D73). The fake judge in `vlah/adapters/memory/signal_source.py` caches by actor, candidate hash and dataset.
