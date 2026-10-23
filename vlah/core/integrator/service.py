@@ -273,15 +273,21 @@ class HerdIntegrator:
         self.event_cursor = head
 
     def answer(self, ready: RemeasureReady) -> None:
-        result = self.result_of(ready.candidate)
-        level = result.at(ready.level) if result is not None else None
+        """The event's own per-seed scores; result.json is written once per hash,
+        so an event without them (written before #98) falls back to the record."""
+        if ready.per_seed:
+            per_seed = list(ready.per_seed)
+        else:
+            result = self.result_of(ready.candidate)
+            level = result.at(ready.level) if result is not None else None
+            per_seed = list(level.per_seed) if level is not None else []
         self.eval_measurer.answer(
             Measurement(
                 ready.request_id,
                 ready.candidate,
-                list(level.per_seed) if level is not None else [],
+                per_seed,
                 ready.score,
-                level is not None and level.is_verified,
+                ready.score is not None and ready.constraint_ok is not False,
             )
         )
 

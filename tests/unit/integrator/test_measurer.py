@@ -22,11 +22,7 @@ from vlah.arms.config import PRESETS
 from vlah.core.blackboard.api import MergedCommit
 from vlah.core.eval.api import EvalRequest
 from vlah.core.eval.service import LadderEvalService
-from vlah.core.integrator.core_adapter import (
-    CoreCalibration,
-    Measurement,
-    QuotaExhausted,
-)
+from vlah.core.integrator.core_adapter import CoreCalibration, Measurement
 from vlah.core.integrator.measurer import EvalMeasurer
 from vlah.core.integrator.service import HerdIntegrator
 from vlah.core.types.candidates import CandidateManifest
@@ -82,13 +78,14 @@ def test_a_baseline_measurement_has_no_parent_and_the_integrator_approach(
     assert request.approach == "integrator"
 
 
-def test_audit_measurements_count_as_quota_exhausted_until_the_contract_lands(
-    tmp_path: Path,
-) -> None:
-    measurer = EvalMeasurer(eval_service=RecordingEval(), clock=FakeClock())
-    with pytest.raises(QuotaExhausted) as raised:
-        measurer.submit(tmp_path, 1, "audit", "audit", [], False, 0.0)
-    assert raised.value.next_slot_at is None
+def test_an_audit_measurement_asks_for_the_audit_dataset(tmp_path: Path) -> None:
+    eval_service = RecordingEval()
+    measurer = EvalMeasurer(eval_service=eval_service, clock=FakeClock())
+    measurer.submit(tmp_path, 1, "audit", "audit measurement", [], False, 0.0)
+    measurer.submit(tmp_path, 1, "dev", "remeasure", [], False, 0.0)
+    assert [request.dataset for request in eval_service.requests] == ["audit", "dev"]
+    with pytest.raises(ValueError):
+        measurer.submit(tmp_path, 1, "judge", "never", [], False, 0.0)
 
 
 def write_candidate(directory: Path, author: ActorId, extra_file: str) -> Path:
