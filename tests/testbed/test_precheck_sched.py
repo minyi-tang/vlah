@@ -10,20 +10,22 @@ from testbed.problem_api import load_problem
 @pytest.mark.slow
 @pytest.mark.timeout(7200)
 def test_precheck_sched():
-    p: Any = load_problem("sched")
-    if p.hidden is None:
+    problem: Any = load_problem("sched")
+    if problem.hidden is None:
         pytest.skip("hidden material (private/testbed/sched) is not here")
-    mod = p.hidden_module("reference.precheck")
-    rep = mod.run(p, n_seeds=20, probes=True)
-    mod.print_report(rep)
-    assert rep["ok"], {
-        k: (c["value"], c["target"]) for k, c in rep["checks"].items() if not c["ok"]
+    precheck = problem.hidden_module("reference.precheck")
+    report = precheck.run(problem, n_seeds=20, probes=True)
+    precheck.print_report(report)
+    assert report["ok"], {
+        name: (check["value"], check["target"])
+        for name, check in report["checks"].items()
+        if not check["ok"]
     }
-    assert rep["probes"]["reference"] == [
+    assert report["probes"]["reference"] == [
         "admission",
         "backfill",
         "est_order",
         "locality",
         "packing",
     ]
-    assert rep["probes"]["baseline"] == []
+    assert report["probes"]["baseline"] == []
