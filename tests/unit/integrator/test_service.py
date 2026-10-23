@@ -12,7 +12,7 @@ from vlah.arms.config import PRESETS
 from vlah.core.integrator.core_adapter import config_from_params
 from vlah.core.integrator.opportunity_map import run_script
 from vlah.core.integrator.service import HerdIntegrator
-from vlah.core.types.events import BaselineAdvanced, MapUpdated
+from vlah.core.types.events import BaselineAdvanced, MapUpdated, RemeasureReady
 from vlah.core.types.params import Params
 
 pytestmark = pytest.mark.integrator
@@ -182,3 +182,43 @@ def test_the_core_config_is_the_same_in_every_arm(tmp_path: Path) -> None:
     assert all(isinstance(core, IntegratorCore) for core in cores)
     configs = [core.cfg for core in cores if isinstance(core, IntegratorCore)]
     assert configs[0] == configs[1] == configs[2] == config_from_params(Params())
+
+
+def test_a_remeasure_answer_uses_the_events_own_scores(tmp_path: Path) -> None:
+    """result.json is written once per hash, so a second measurement of the same
+    content and target (an audit of a reverted baseline) is read from the event."""
+    harness = make_integrator(tmp_path)
+    harness.integrator.answer(
+        RemeasureReady(
+            request_id="request-7",
+            candidate="ab" * 32,
+            parent_candidate="baseline@2",
+            claim_id="c-eval_service-00009",
+            baseline="baseline@2",
+            paired=None,
+            score=11.0,
+            level="slow",
+            constraint_ok=True,
+            per_seed=(11.0, 11.5, 10.5, 11.0, 11.0),
+            dataset="audit",
+        )
+    )
+    measurement = harness.integrator.eval_measurer.result("request-7")
+    assert measurement is not None
+    assert measurement.per_seed == [11.0, 11.5, 10.5, 11.0, 11.0]
+    assert measurement.constraint_ok is True
+    harness.integrator.answer(
+        RemeasureReady(
+            request_id="request-8",
+            candidate="cd" * 32,
+            parent_candidate="baseline@2",
+            claim_id="c-eval_service-00010",
+            baseline="baseline@2",
+            paired=None,
+            score=None,
+            level="slow",
+            constraint_ok=None,
+        )
+    )
+    void = harness.integrator.eval_measurer.result("request-8")
+    assert void is not None and void.constraint_ok is False and void.per_seed == []
