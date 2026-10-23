@@ -1,5 +1,6 @@
 """Physical isolation: what an S1 or a B1 worker's clone holds (D58, D67)."""
 
+import json
 from pathlib import Path
 
 import pytest
@@ -12,11 +13,14 @@ from vlah.core.types.claims import Claim, EvidenceRef, render_claim
 from vlah.core.types.clock import FakeClock
 from vlah.core.types.ids import ActorId
 from vlah.runtime.isolation import worker_view
+from vlah.tools.scope import may_read
 
 pytestmark = pytest.mark.runtime
 
 ME = ActorId("worker-01")
 OTHER = ActorId("worker-02")
+EVAL_SERVICE = ActorId("eval_service")
+RATIONALE = "worker-02 found that caching the frontier halves the misses"
 
 
 def claim_files(author: ActorId) -> dict[str, bytes]:
@@ -30,6 +34,34 @@ def claim_files(author: ActorId) -> dict[str, bytes]:
         body=f"{author}'s finding",
     )
     return {f"claims/{author}/{claim.id}.md": render_claim(claim).encode()}
+
+
+def result_records(candidate_hash: str) -> dict[str, bytes]:
+    """What the eval service writes for one measured candidate: the result claim,
+    whose body is the submitter's rationale, and a result event."""
+    claim = Claim(
+        id="c-eval_service-00001",
+        type="result",
+        status="proposed",
+        approach="a-01",
+        author=EVAL_SERVICE,
+        evidence=(EvidenceRef(candidate=f"candidates/{candidate_hash}/result.json"),),
+        body=RATIONALE,
+    )
+    event = {
+        "local_id": "eval_service/00001",
+        "ts": 0.0,
+        "actor": "eval_service",
+        "role": "eval_service",
+        "type": "claim_status",
+        "target": claim.id,
+        "from": "proposed",
+        "to": "verified:toy_slow",
+    }
+    return {
+        f"claims/{EVAL_SERVICE}/{claim.id}.md": render_claim(claim).encode(),
+        f"events/{EVAL_SERVICE}/00001.json": json.dumps(event).encode(),
+    }
 
 
 def manifest(author: ActorId) -> bytes:
@@ -73,3 +105,33 @@ def test_a_workers_clone_holds_only_what_its_arm_shares(
     assert sees_their_claims is (arm == "S2"), "only S2 shares claims"
     assert sees_their_candidates is (arm != "B1"), "S1 shares candidates and scores"
     assert (views[ME] is blackboard) is (arm == "S2"), "S2 clones the run's blackboard"
+
+
+@pytest.mark.parametrize("arm", ["S1", "B1"])
+def test_a_mirror_holds_exactly_what_the_tool_scope_lets_the_worker_read(
+    arm: ArmName,
+) -> None:
+    """S1 shares scores, not reasoning: the mirror carried every result claim, whose
+    body is the submitter's rationale, while the tool scope refused it (#56 R4)."""
+    blackboard = make_store_blackboard(FakeClock(), name="iso")
+    blackboard.write(ActorId("human"), {"spec.md": b"spec"}, "spec")
+    view = worker_view(blackboard, PRESETS[arm], "r-1", ME)
+    for agent in (ME, OTHER):
+        blackboard.write(agent, claim_files(agent), "claim")
+    blackboard.write(OTHER, {"candidates/02aa/manifest.yaml": manifest(OTHER)}, "c")
+    receipt = blackboard.write(EVAL_SERVICE, result_records("02aa"), "result")
+    assert receipt.status == "merged", receipt.violations
+    # events/_seq/ is the mirror's own numbering of the events it keeps.
+    mirrored = {
+        path
+        for path in view.list_paths("", None)
+        if not path.startswith("events/_seq/")
+    }
+    for path in blackboard.list_paths("", None):
+        if path.startswith("events/_seq/"):
+            continue
+        else:
+            readable = may_read(blackboard, PRESETS[arm], ME, path)
+            assert (path in mirrored) is readable, path
+    for path in mirrored:
+        assert RATIONALE.encode() not in view.read(path, None), path

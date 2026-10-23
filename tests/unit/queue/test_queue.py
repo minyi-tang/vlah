@@ -257,11 +257,8 @@ def test_a_task_still_leased_is_not_requeued(store_kind: str) -> None:
     assert queue.claim_task(WORKER_02) is not None
 
 
-def test_replaying_a_result_after_its_follow_up_completed(store_kind: str) -> None:
-    """A rebuild re-feeds every result_ready; it must not raise in the merge fan-out (S5)."""
-    store = make_store(store_kind, FakeClock())
-    queue = KeyValueTaskQueue(store=store)
-    event = Event(
+def result_ready_event(submitter: ActorId) -> Event:
+    return Event(
         seq=7,
         local_id="eval_service/00003",
         ts=1.0,
@@ -272,7 +269,7 @@ def test_replaying_a_result_after_its_follow_up_completed(store_kind: str) -> No
             candidate="9f3a",
             claim_id="c-eval_service-00001",
             approach="a-01",
-            submitter=WORKER_01,
+            submitter=submitter,
             submitter_checkpoint=None,
             baseline="baseline@0",
             paired=Paired(mean=1.8, se=0.6, n_items=5, n_reps=1),
@@ -281,12 +278,35 @@ def test_replaying_a_result_after_its_follow_up_completed(store_kind: str) -> No
             level="slow",
         ),
     )
+
+
+def test_replaying_a_result_after_its_follow_up_completed(store_kind: str) -> None:
+    """A rebuild re-feeds every result_ready; it must not raise in the merge fan-out (S5)."""
+    store = make_store(store_kind, FakeClock())
+    queue = KeyValueTaskQueue(store=store)
+    event = result_ready_event(WORKER_01)
     follow_up = queue.on_result_ready(event)
     claimed = queue.claim_task(WORKER_01)
     assert claimed is not None and claimed.id == follow_up.id
     queue.complete(claimed.id, WORKER_01)
     assert queue.on_result_ready(event).id == follow_up.id
     assert queue.claim_task(WORKER_01) is None, "the replay queues nothing"
+
+
+def test_an_external_queues_follow_up_stays_out_of_the_arm_pool(
+    store_kind: str,
+) -> None:
+    """The follow-up used to be built in the arm pool whichever queue made it, so the
+    external queue refused its own follow-up (#56 R2)."""
+    store = make_store(store_kind, FakeClock())
+    arm_queue = KeyValueTaskQueue(store=store)
+    external_queue = KeyValueTaskQueue(store=store, pool="external")
+    compose_agent = ActorId("worker-00")
+    follow_up = external_queue.on_result_ready(result_ready_event(compose_agent))
+    assert follow_up.pool == "external"
+    assert arm_queue.claim_task(WORKER_01) is None
+    claimed = external_queue.claim_task(compose_agent)
+    assert claimed is not None and claimed.id == follow_up.id
 
 
 def test_scan_takes_glob_characters_literally(store_kind: str) -> None:

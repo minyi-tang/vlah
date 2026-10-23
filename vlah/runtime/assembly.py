@@ -63,6 +63,9 @@ class RunComponents:
     executor: Executor
     harness: Harness
     tool_server: ToolServer
+    # The compose slot's tool server, over tools built with compose_arm(context.arm)
+    # so the compose agent gets the same tool behaviour in every arm (D74).
+    compose_tool_server: ToolServer
     target_repository: str
     target_ref: str
 
