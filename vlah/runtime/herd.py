@@ -215,7 +215,7 @@ class HerdRun:
 
     def stop(self) -> None:
         """Stop cleanly: kill the sessions, then close out the Integrator once."""
-        self.supervisor.request_stop("stop() was called")
+        self.supervisor.request_stop("stop() was called", "human")
         if self.thread.ident is None:
             # Never started: there is no supervisor thread to finish the run.
             try:
