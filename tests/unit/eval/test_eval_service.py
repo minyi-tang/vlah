@@ -9,14 +9,18 @@ from pathlib import Path
 import pytest
 
 from tests.fixtures.eval_harness import WORKER, make_eval_harness, source_declaration
+from vlah.adapters.memory.model import MemoryModel
 from vlah.adapters.memory.signal_source import FakeSlowSource
+from vlah.adapters.memory.store import MemoryVectorIndex
 from vlah.arms.config import PRESETS
 from vlah.core.eval.api import RemeasureRequest
 from vlah.core.eval.jobs import GateOutcome
 from vlah.core.indexer.api import Hit
+from vlah.core.indexer.indexer import StoreIndexer
+from vlah.core.types.candidates import payload_text
 from vlah.core.types.events import RemeasureReady, ResultReady
 from vlah.core.types.ids import ActorId
-from vlah.core.types.params import GateSpec
+from vlah.core.types.params import GateSpec, GateStage, Params
 from vlah.core.types.sources import ScoreResult, SourceDecl
 from vlah.ports.errors import JudgeBusyError
 from vlah.ports.signal_source import CandidateRef, Dataset
@@ -202,6 +206,38 @@ def test_constraint_failure_refutes_and_records_a_dead_end(tmp_path: Path) -> No
     assert any(
         b"gate:constraint" in harness.blackboard.read(path, None) for path in dead_ends
     )
+
+
+@pytest.mark.parametrize("stage", ["pre_submit", "post_result"])
+def test_a_gate_dead_end_is_confirmed_so_the_presearch_warns_about_it(
+    tmp_path: Path, stage: GateStage
+) -> None:
+    """D54 wants gate failures in the pre-submit search, which covers confirmed dead ends only (D26)."""
+    harness = make_eval_harness(
+        tmp_path, gates=(GateSpec(name="unit_tests", command="pytest", when=(stage,)),)
+    )
+    harness.gates.failing.add("unit_tests")
+    directory = harness.candidate(1.0)
+    harness.service.request(harness.request(directory), WORKER)
+    harness.run(seconds=3600)
+    indexer = StoreIndexer(
+        blackboard=harness.blackboard,
+        vectors=MemoryVectorIndex(),
+        model=MemoryModel(),
+        params=Params(),
+        clock=harness.clock,
+        top_level="slow",
+    )
+    indexer.rebuild()
+    (confirmation,) = [
+        event
+        for event in harness.events_on_blackboard()
+        if event.type == "claim_status" and event.to == "confirmed"
+    ]
+    assert confirmation.actor == "eval_service" and confirmation.target is not None
+    assert indexer.claim_state(confirmation.target).status == "confirmed"
+    hits = indexer.similar_dead_ends(payload_text(directory), 5, OTHER)
+    assert [hit.item_id for hit in hits] == [confirmation.target]
 
 
 def test_remeasure_runs_once_at_the_top_level_for_the_integrator(
