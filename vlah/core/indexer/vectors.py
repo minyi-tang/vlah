@@ -8,16 +8,14 @@ Indexed items, each with metadata the queries filter on:
 - every confirmed dead end: the payload it tested, or its own words when it cites
   no candidate (kind dead_end);
 - digests and the charter (kinds digest and charter).
-The catalog is touched only with the indexer's lock held; embed and query run the
-model and the vector index without it.
+The catalog is touched only with the indexer's state lock held; the indexer embeds
+these items and writes them to the vector index itself.
 """
 
 from dataclasses import dataclass, field
 
 from vlah.core.indexer.api import HitKind
 from vlah.core.types.claims import Claim
-from vlah.ports.model import Model
-from vlah.ports.store import VectorHit, VectorIndex
 
 CANDIDATE_PAYLOAD = "candidate/"
 CANDIDATE_ITEM_PREFIX = "candidate/"
@@ -123,23 +121,3 @@ class Catalog:
             )
             for candidate in changed
         ]
-
-
-def embed(model: Model, vectors: VectorIndex, items: list[ToEmbed]) -> None:
-    if not items:
-        return
-    else:
-        embedded = model.embed(tuple(item.text for item in items))
-        for item, vector in zip(items, embedded, strict=True):
-            vectors.upsert(item.item_id, vector, item.metadata)
-
-
-def query(
-    model: Model,
-    vectors: VectorIndex,
-    text: str,
-    limit: int,
-    where: dict[str, str] | None,
-) -> tuple[VectorHit, ...]:
-    (vector,) = model.embed((text,))
-    return vectors.query(vector, limit, where)
