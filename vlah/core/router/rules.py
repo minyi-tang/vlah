@@ -1,9 +1,10 @@
-"""The router's rules: a data file of {on, match, kind, ...} over a fixed set of predicates.
+"""The router's rules: a data file of {events, match, kind, ...} over a fixed set of predicates.
 
 A rule changes without a code change (v2.2 section 8): the rules file chooses which
-events a rule watches (`events`), which lease predicate it applies, hard or soft, its priority,
-its text and the arm flag that enables it. The predicates themselves are code,
-named below; a rules file that names another is rejected when it loads.
+events a rule watches (events), which lease predicate it applies, whether it raises a
+hard or soft interrupt or revokes another rule's, its priority, its text and the arm
+flag that enables it. The predicates themselves are code, named below; a rules file
+that names another is rejected when it loads.
 
 Reason templates may use: {agent}, {approach}, {target}, {to}, {actor},
 {event_reason}, {candidate}, {claim}, {baseline} and {files}.
@@ -12,10 +13,10 @@ Reason templates may use: {agent}, {approach}, {target}, {to}, {actor},
 from collections.abc import Mapping
 from dataclasses import dataclass
 from importlib.resources import files
-from typing import Literal, Protocol
+from typing import Literal, Protocol, Self
 
 import yaml
-from pydantic import Field, TypeAdapter
+from pydantic import Field, TypeAdapter, model_validator
 
 from vlah.arms.config import ArmConfig
 from vlah.core.indexer.api import Indexer
@@ -29,7 +30,7 @@ DEFAULT_RULES_FILE = "rules.default.yaml"
 CLAIM_TRIGGER = "claim"
 CLOSED_APPROACH_STATUSES = frozenset({"frozen", "dead_end"})
 ZERO_BUDGET = "0"
-AUTHORITATIVE_REFUTERS = frozenset({"human", "critic"})
+AUTHORITATIVE_ROLES = frozenset({"human", "critic"})
 ArmFlag = Literal["router_rule1", "router_rules_2_5", "router_rule6_baseline_push"]
 
 
@@ -39,10 +40,26 @@ class Rule(FrozenModel):
     # Not 'on': YAML reads that key as the boolean true.
     events: tuple[str, ...] = Field(min_length=1)
     match: str
-    kind: Literal["hard", "soft"]
-    priority: int
+    kind: Literal["hard", "soft", "revoke"]
+    # Hard interrupts: the lower number is shown first.
+    priority: int | None = None
+    # Revoke entries: the id of the rule whose pending interrupts they withdraw.
+    revokes: str | None = None
     enabled_by: ArmFlag | None = None
-    reason: str
+    reason: str = ""
+
+    @model_validator(mode="after")
+    def require_the_fields_of_its_kind(self) -> Self:
+        if self.kind == "revoke" and self.revokes is None:
+            raise ValueError(f"rule {self.id} revokes nothing")
+        elif self.kind != "revoke" and self.revokes is not None:
+            raise ValueError(f"rule {self.id} is not a revoke entry")
+        elif self.kind == "hard" and self.priority is None:
+            raise ValueError(f"rule {self.id} has no priority")
+        elif self.kind != "revoke" and not self.reason:
+            raise ValueError(f"rule {self.id} has no reason")
+        else:
+            return self
 
     def is_enabled(self, arm: ArmConfig) -> bool:
         return self.enabled_by is None or bool(getattr(arm, self.enabled_by))
@@ -97,10 +114,22 @@ def refutes_dependency_confirmed(
     event = trigger.event
     if event is None or event.to != "refuted" or event.target not in lease.depends_on:
         return False
-    elif event.role in AUTHORITATIVE_REFUTERS:
+    elif event.role in AUTHORITATIVE_ROLES:
         return True
     else:
         return indexer.claim_state(event.target).is_cascaded_refuted
+
+
+def reinstates_dependency(trigger: Trigger, lease: Lease, indexer: Indexer) -> bool:
+    """A dependency's refutation withdrawn: reinstated by a human or the Critic, or
+    a human moving the claim to any status but refuted (D34)."""
+    event = trigger.event
+    if event is None or event.target not in lease.depends_on:
+        return False
+    elif event.type == "reinstated":
+        return event.role in AUTHORITATIVE_ROLES
+    else:
+        return event.role == "human" and event.to != "refuted"
 
 
 def human_claim_on_approach(trigger: Trigger, lease: Lease, indexer: Indexer) -> bool:
@@ -138,6 +167,7 @@ PREDICATES: Mapping[str, Predicate] = {
     "targets_lease_claim": targets_lease_claim,
     "closes_lease_approach": closes_lease_approach,
     "refutes_dependency_confirmed": refutes_dependency_confirmed,
+    "reinstates_dependency": reinstates_dependency,
     "human_claim_on_approach": human_claim_on_approach,
     "touches_lease_files": touches_lease_files,
     "misses_lease_files": misses_lease_files,
@@ -185,17 +215,26 @@ def render_reason(rule: Rule, trigger: Trigger, lease: Lease) -> str:
 
 
 def parse_rules(text: str) -> tuple[Rule, ...]:
-    """Rules from a rules file; an unknown predicate or a repeated id is an error."""
+    """Rules from a rules file.
+
+    An unknown predicate, a repeated id or a revoke entry naming no rule in the
+    file is an error.
+    """
     data: object = yaml.safe_load(text)
     rules = TypeAdapter(tuple[Rule, ...]).validate_python(data)
     unknown = sorted({rule.match for rule in rules} - PREDICATES.keys())
     ids = [rule.id for rule in rules]
+    unknown_revoked = sorted(
+        {rule.revokes for rule in rules if rule.revokes is not None} - set(ids)
+    )
     if unknown:
         raise ValueError(
             f"unknown rule predicates {unknown}; known: {sorted(PREDICATES)}"
         )
     elif len(ids) != len(set(ids)):
         raise ValueError(f"rule ids repeat: {ids}")
+    elif unknown_revoked:
+        raise ValueError(f"revoked rules {unknown_revoked} are not in the file")
     else:
         return rules
 
