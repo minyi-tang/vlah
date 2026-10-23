@@ -10,11 +10,11 @@ import pytest
 
 from tests.fixtures.worker import (
     TASK,
-    TRANSCRIPT_VARIABLE,
     WORKER,
     WorkerHarness,
     assistant_line,
     make_worker_harness,
+    transcript_of,
 )
 from vlah.adapters.memory.executor import ScriptedSession
 from vlah.arms.config import PRESETS
@@ -32,7 +32,7 @@ def test_l0_18a_context_restart(tmp_path: Path) -> None:
         """First session: fill the context, then wrap up as the hook asks. Second: finish."""
         sessions.append(session)
         worker = holder[0]
-        transcript = Path(session.spec.env[TRANSCRIPT_VARIABLE])
+        transcript = transcript_of(session)
         if len(sessions) == 1:
             transcript.write_text(assistant_line(100_000, "Bash"))
             yield 60.0

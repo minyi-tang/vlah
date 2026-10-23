@@ -219,10 +219,8 @@ class LocalHerd:
             ),
             leases=components.leases,
             executor=components.executor,
-            sessions=components.sessions,
             harness=components.harness,
             tool_server=components.tool_server,
-            registry=components.registry,
             context=ContextSources(
                 blackboard=components.blackboard,
                 indexer=components.indexer,

@@ -10,12 +10,12 @@ import pytest
 
 from tests.fixtures.worker import (
     TASK,
-    TRANSCRIPT_VARIABLE,
     WORKER,
     RecordingTaskQueue,
     WorkerHarness,
     assistant_line,
     make_worker_harness,
+    transcript_of,
 )
 from vlah.adapters.memory.executor import ScriptedSession
 from vlah.arms.config import PRESETS
@@ -66,7 +66,7 @@ def test_a_session_with_a_claim_completes_its_task(tmp_path: Path) -> None:
     holder.append(worker)
     run_task(WORKER, TASK, worker.deps, cursor=0)
     assert worker.task_queue.completed == [TASK.id]
-    assert worker.registry.registered == [
+    assert worker.tool_server.registered == [
         (WORKER, tmp_path / "sandboxes" / WORKER / TASK.id, TASK.id)
     ], "eval_request paths resolve in this task's sandbox"
     assert worker.leases.acquired_handles == ["memory-00001"]
@@ -94,6 +94,32 @@ def test_an_overdue_interrupt_restarts_the_session_under_the_loop(
     assert worker.task_queue.completed == [TASK.id]
 
 
+def test_an_interrupt_written_before_the_task_started_is_dropped(
+    tmp_path: Path,
+) -> None:
+    """An overdue interrupt from the previous task must not restart this task's session."""
+    sessions: list[ScriptedSession] = []
+    holder: list[WorkerHarness] = []
+
+    def agent(session: ScriptedSession) -> Iterator[float]:
+        sessions.append(session)
+        if session.start_pack.interrupt is None:
+            yield 600.0
+        else:
+            holder[0].write_claim(WORKER, TASK, 1, "Acted on the fresh interrupt.")
+
+    worker = make_worker_harness(tmp_path, PRESETS["S2"], {"agent": agent}, "agent")
+    holder.append(worker)
+    worker.clock.advance(100.0)
+    stale = INTERRUPT.model_copy(update={"id": "i-stale", "written_ts": 50.0})
+    fresh = INTERRUPT.model_copy(update={"id": "i-fresh", "written_ts": 100.0})
+    worker.inbox.post(stale)
+    worker.inbox.post(fresh)
+    run_task(WORKER, TASK, worker.deps, cursor=0)
+    assert [session.start_pack.interrupt for session in sessions] == [None, fresh]
+    assert worker.task_queue.completed == [TASK.id]
+
+
 def test_an_agent_that_ignores_the_context_limit_is_stopped_and_restarted(
     tmp_path: Path,
 ) -> None:
@@ -103,9 +129,7 @@ def test_an_agent_that_ignores_the_context_limit_is_stopped_and_restarted(
     def agent(session: ScriptedSession) -> Iterator[float]:
         sessions.append(session)
         if len(sessions) == 1:
-            Path(session.spec.env[TRANSCRIPT_VARIABLE]).write_text(
-                assistant_line(190_000, "Bash")
-            )
+            transcript_of(session).write_text(assistant_line(190_000, "Bash"))
             yield 10_000.0
         else:
             holder[0].write_claim(WORKER, TASK, 1, "Picked up from the restart.")
@@ -143,15 +167,12 @@ def test_a_replaced_process_starts_the_wrap_up_clock_over(tmp_path: Path) -> Non
 
     def agent(session: ScriptedSession) -> Iterator[float]:
         sessions.append(session)
-        transcript = Path(session.spec.env[TRANSCRIPT_VARIABLE])
+        transcript = transcript_of(session)
         transcript.write_text(assistant_line(190_000, "Bash"))
         yield 60.0
         fresh = transcript.with_name("transcript-attempt-2.jsonl")
         fresh.write_text(assistant_line(20_000, "Read"))
-        process = holder[0].executor.processes["memory-00001"]
-        process.spec = process.spec.model_copy(
-            update={"env": {**process.spec.env, TRANSCRIPT_VARIABLE: str(fresh)}}
-        )
+        holder[0].executor.processes["memory-00001"].session.transcript_path = fresh
         yield 1_000.0
         holder[0].write_claim(WORKER, TASK, 1, "Finished in the fresh process.")
 
@@ -171,7 +192,7 @@ def test_a_drop_within_one_transcript_is_a_compaction_not_a_fresh_context(
 
     def agent(session: ScriptedSession) -> Iterator[float]:
         sessions.append(session)
-        transcript = Path(session.spec.env[TRANSCRIPT_VARIABLE])
+        transcript = transcript_of(session)
         if len(sessions) == 1:
             transcript.write_text(assistant_line(150_000, "Bash"))
             yield 60.0
@@ -199,7 +220,7 @@ def test_a_quick_wrap_up_still_gets_its_restart(tmp_path: Path) -> None:
 
     def agent(session: ScriptedSession) -> Iterator[float]:
         sessions.append(session)
-        transcript = Path(session.spec.env[TRANSCRIPT_VARIABLE])
+        transcript = transcript_of(session)
         if len(sessions) == 1:
             transcript.write_text(assistant_line(60_000, "Bash"))
             yield 10.0
@@ -251,7 +272,7 @@ def test_a_hook_shown_interrupt_rides_the_restart_pack_once(tmp_path: Path) -> N
 
     def agent(session: ScriptedSession) -> Iterator[float]:
         sessions.append(session)
-        transcript = Path(session.spec.env[TRANSCRIPT_VARIABLE])
+        transcript = transcript_of(session)
         if len(sessions) == 1:
             (sandbox / ".vlah").mkdir(parents=True, exist_ok=True)
             (sandbox / ".vlah" / "interrupts.jsonl").write_text(
@@ -304,9 +325,7 @@ def test_no_context_restart_once_the_run_is_stopping(tmp_path: Path) -> None:
 
     def agent(session: ScriptedSession) -> Iterator[float]:
         sessions.append(session)
-        Path(session.spec.env[TRANSCRIPT_VARIABLE]).write_text(
-            assistant_line(190_000, "bash")
-        )
+        transcript_of(session).write_text(assistant_line(190_000, "bash"))
         yield 60.0
         holder[0].write_claim(WORKER, TASK, 1, "Wrapped up as the run stopped.")
         holder[0].stop.set()
