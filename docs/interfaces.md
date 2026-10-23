@@ -47,7 +47,7 @@ All contracts are frozen. They change only in a contract-only PR labelled `contr
 
 ## What the worker loop asks its adapters
 
-The loop in `vlah/core/worker/loop.py` runs on the ports alone. These methods exist for it (D61: a capability the loop needs is a port field, never a protocol of its own):
+These methods exist so that the loop in `vlah/core/worker/loop.py` can run on the ports alone (D61: a capability the loop needs is a port field, never a protocol of its own):
 
 | Method | Port | What it answers |
 |---|---|---|
