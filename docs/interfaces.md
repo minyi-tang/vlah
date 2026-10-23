@@ -127,8 +127,9 @@ Workers never see this file. It parses into `HerdConfig` in `vlah/core/problem/a
 | `rule` | the rule number from v2.2 section 8, reported on each interrupt |
 | `events` | event types that trigger it, or `claim` for a newly merged claim (not `on`, which YAML reads as true) |
 | `match` | one lease predicate from the fixed set in `vlah/core/router/rules.py`; a file naming another fails to load |
-| `kind` | `hard` blocks the agent's next tool call; `soft` waits for its next sync point |
-| `priority` | among pending hard interrupts, the lowest number is shown and the rest are counted |
+| `kind` | `hard` blocks the agent's next tool call; `soft` waits for its next sync point; `revoke` withdraws the pending interrupts of the rule named by `revokes` about the same target |
+| `priority` | among pending hard interrupts, the lowest number is shown first and the rest follow, one per acknowledgement |
+| `revokes` | for a `revoke` entry, the id of the rule whose interrupts it withdraws |
 | `enabled_by` | the `ArmConfig` flag that turns the rule on: `router_rule1`, `router_rules_2_5` or `router_rule6_baseline_push` |
 | `reason` | the text the agent sees; a template whose fields are listed in `rules.py` |
 
