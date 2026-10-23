@@ -5,9 +5,9 @@ the parent); child -> parent is JSON so a malicious child cannot run code in the
 
 Isolation is best effort (anti-cheat is not this testbed's goal, see spec 0/2):
   * cwd is a fresh temp dir holding only the copied candidate and host script;
-  * the host blocks ``socket`` before importing the candidate;
-  * on macOS, ``sandbox-exec`` denies network and reads of hidden testbed paths
-    (set TB_SANDBOX=off to disable); on Linux, ``unshare -n`` is used when permitted.
+  * the host blocks socket before importing the candidate;
+  * on macOS, sandbox-exec denies network and reads of hidden testbed paths
+    (set TB_SANDBOX=off to disable); on Linux, unshare -n is used when permitted.
 """
 
 from __future__ import annotations
@@ -21,6 +21,7 @@ import struct
 import subprocess
 import sys
 import tempfile
+import time
 from pathlib import Path
 
 from testbed.problem_api import PROBLEMS_ROOT, STATE_DIR, private_dirs
@@ -34,9 +35,9 @@ class HostTimeout(RuntimeError):
     pass
 
 
-def _hidden_paths() -> list[Path]:
-    out = [STATE_DIR] + private_dirs()
-    for prob in PROBLEMS_ROOT.iterdir() if PROBLEMS_ROOT.exists() else []:
+def hidden_paths() -> list[Path]:
+    paths = [STATE_DIR] + private_dirs()
+    for problem_dir in PROBLEMS_ROOT.iterdir() if PROBLEMS_ROOT.exists() else []:
         for name in (
             "hidden",
             "reference",
@@ -45,11 +46,11 @@ def _hidden_paths() -> list[Path]:
             "problem.yaml",
             "tasks/holdout",
         ):
-            out.append(prob / name)
-    return out
+            paths.append(problem_dir / name)
+    return paths
 
 
-def _sandbox_prefix() -> list[str]:
+def sandbox_prefix() -> list[str]:
     mode = os.environ.get("TB_SANDBOX", "auto")
     if mode in (
         "off",
@@ -58,8 +59,8 @@ def _sandbox_prefix() -> list[str]:
         return []
     if sys.platform == "darwin" and shutil.which("sandbox-exec"):
         rules = ["(version 1)", "(allow default)", "(deny network*)"]
-        for p in _hidden_paths():
-            rules.append(f'(deny file-read* (subpath "{p}"))')
+        for hidden_path in hidden_paths():
+            rules.append(f'(deny file-read* (subpath "{hidden_path}"))')
         return ["sandbox-exec", "-p", " ".join(rules)]
     if (
         sys.platform.startswith("linux")
@@ -71,7 +72,7 @@ def _sandbox_prefix() -> list[str]:
 
 
 class HostProcess:
-    """One long-lived child. ``request`` sends one message and waits for one reply."""
+    """One long-lived child. request sends one message and waits for one reply."""
 
     def __init__(
         self,
@@ -79,84 +80,86 @@ class HostProcess:
         entry: str,
         extra_files: dict[str, Path] | None = None,
     ):
-        self.tmp = Path(tempfile.mkdtemp(prefix="tb-sbx-"))
-        for f in host_files:
-            shutil.copy2(f, self.tmp / f.name)
-        for name, src in (extra_files or {}).items():
-            dst = self.tmp / name
-            dst.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(src, dst)
-        env = {
+        self.workdir = Path(tempfile.mkdtemp(prefix="tb-sbx-"))
+        for host_file in host_files:
+            shutil.copy2(host_file, self.workdir / host_file.name)
+        for name, source in (extra_files or {}).items():
+            destination = self.workdir / name
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(source, destination)
+        child_env = {
             "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
             "PYTHONHASHSEED": "0",
             "PYTHONDONTWRITEBYTECODE": "1",
-            "HOME": str(self.tmp),
+            "HOME": str(self.workdir),
         }
-        argv = _sandbox_prefix() + [sys.executable, "-I", str(self.tmp / entry)]
-        self.proc = subprocess.Popen(
+        argv = sandbox_prefix() + [sys.executable, "-I", str(self.workdir / entry)]
+        self.child = subprocess.Popen(
             argv,
-            cwd=self.tmp,
-            env=env,
+            cwd=self.workdir,
+            env=child_env,
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL,
         )
-        self.dead = False
+        self.is_dead = False
 
-    def _read_exact(self, n: int, deadline_s: float) -> bytes:
-        buf = b""
-        fd = self.proc.stdout.fileno()
-        import time
-
-        end = time.monotonic() + deadline_s
-        while len(buf) < n:
-            remaining = end - time.monotonic()
-            if remaining <= 0:
+    def read_exact(self, byte_count: int, deadline_s: float) -> bytes:
+        received = b""
+        stdout_descriptor = self.child.stdout.fileno()
+        deadline_at = time.monotonic() + deadline_s
+        while len(received) < byte_count:
+            remaining_seconds = deadline_at - time.monotonic()
+            if remaining_seconds <= 0:
                 raise HostTimeout("child did not answer in time")
-            r, _, _ = select.select([fd], [], [], remaining)
-            if not r:
+            readable, _, _ = select.select(
+                [stdout_descriptor], [], [], remaining_seconds
+            )
+            if not readable:
                 continue
-            chunk = os.read(fd, n - len(buf))
+            chunk = os.read(stdout_descriptor, byte_count - len(received))
             if not chunk:
                 raise HostDied("child exited")
-            buf += chunk
-        return buf
+            received += chunk
+        return received
 
-    def request(self, obj, deadline_s: float = 30.0) -> dict:
-        if self.dead:
+    def request(self, message, deadline_s: float = 30.0) -> dict:
+        if self.is_dead:
             raise HostDied("child already dead")
-        data = pickle.dumps(obj, protocol=pickle.HIGHEST_PROTOCOL)
+        message_bytes = pickle.dumps(message, protocol=pickle.HIGHEST_PROTOCOL)
         try:
-            self.proc.stdin.write(struct.pack(">I", len(data)) + data)
-            self.proc.stdin.flush()
-            (n,) = struct.unpack(">I", self._read_exact(4, deadline_s))
-            payload = self._read_exact(n, deadline_s)
-        except (BrokenPipeError, HostDied, HostTimeout, OSError) as e:
+            self.child.stdin.write(
+                struct.pack(">I", len(message_bytes)) + message_bytes
+            )
+            self.child.stdin.flush()
+            (reply_length,) = struct.unpack(">I", self.read_exact(4, deadline_s))
+            reply_bytes = self.read_exact(reply_length, deadline_s)
+        except (BrokenPipeError, HostDied, HostTimeout, OSError) as error:
             self.kill()
-            if isinstance(e, HostTimeout):
+            if isinstance(error, HostTimeout):
                 raise
-            raise HostDied(str(e)) from e
-        return json.loads(payload.decode())
+            raise HostDied(str(error)) from error
+        return json.loads(reply_bytes.decode())
 
     def kill(self):
-        self.dead = True
+        self.is_dead = True
         try:
-            self.proc.kill()
-            self.proc.wait(timeout=5)
+            self.child.kill()
+            self.child.wait(timeout=5)
         except Exception:
             pass
 
     def close(self):
-        if not self.dead:
+        if not self.is_dead:
             try:
                 self.request({"op": "exit"}, deadline_s=2)
             except Exception:
                 pass
             self.kill()
-        shutil.rmtree(self.tmp, ignore_errors=True)
+        shutil.rmtree(self.workdir, ignore_errors=True)
 
     def __enter__(self):
         return self
 
-    def __exit__(self, *a):
+    def __exit__(self, exc_type, exc_value, traceback):
         self.close()

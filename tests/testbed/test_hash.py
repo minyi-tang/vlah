@@ -11,10 +11,10 @@ def test_issue_10_test_vector(tmp_path):
         "__pycache__/a.cpython-311.pyc": b"\x00compiled",
         "sub/c.pyc": b"\x00compiled",
     }
-    for rel, data in files.items():
-        p = tmp_path / rel
-        p.parent.mkdir(parents=True, exist_ok=True)
-        p.write_bytes(data)
+    for relative_path, content in files.items():
+        path = tmp_path / relative_path
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(content)
     assert (
         candidate_hash(tmp_path, "baseline@0")
         == "d4f39c30386a54508697b590e540898f913850422c6403723f66f232b98b1cb9"
@@ -26,17 +26,17 @@ def test_issue_10_test_vector(tmp_path):
 
 
 def test_sort_is_plain_string_order_and_dotfiles_count(tmp_path):
-    for rel in ("a.b", "a/b", "a-b"):
-        p = tmp_path / rel
-        p.parent.mkdir(parents=True, exist_ok=True)
-        p.write_text(rel)
-    h1 = candidate_hash(tmp_path)
+    for relative_path in ("a.b", "a/b", "a-b"):
+        path = tmp_path / relative_path
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(relative_path)
+    hash_before_dotfile = candidate_hash(tmp_path)
     (tmp_path / ".hidden").write_text("x")
-    assert candidate_hash(tmp_path) != h1
+    assert candidate_hash(tmp_path) != hash_before_dotfile
     (tmp_path / "sub").mkdir()
     (tmp_path / "sub" / "manifest.yaml").write_text(
         "kept"
     )  # only the top-level manifest is excluded
-    h2 = candidate_hash(tmp_path)
+    hash_with_nested_manifest = candidate_hash(tmp_path)
     (tmp_path / "manifest.yaml").write_text("ignored")
-    assert candidate_hash(tmp_path) == h2
+    assert candidate_hash(tmp_path) == hash_with_nested_manifest

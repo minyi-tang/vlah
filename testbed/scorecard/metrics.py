@@ -16,6 +16,15 @@ from testbed.recorder.log import sorted_events
 SYSTEM_ACTORS = {"runner", "integrator", "composer", "slow_eval"}
 TRAP = "trap_sjf"
 CONFLICT_PAIR = ("backfill", "fairshare")
+BREADTH_WINDOW_FRACTION = (
+    0.25  # 11.5: ingredients touched in the first quarter of the run
+)
+QUOTA_DISCIPLINE_TARGET = 0.8
+PREDICTION_IMPROVEMENT_RATIO = (
+    0.8  # second-half median error <= 0.8 x first-half median error
+)
+MIN_SCORED_SUBMITS_FOR_PREDICTION = 4
+DEFAULT_TILT_WINDOW_SECONDS = 7200
 
 TARGETS = {
     "sched": {"breadth": 5, "assembly": 3, "capture": 0.70},
@@ -29,164 +38,177 @@ class RunView:
 
     def __init__(self, events: list[dict]):
         self.events = sorted_events(events)
-        cals = [e for e in self.events if e["type"] == "calibration"]
-        if not cals:
+        calibrations = [
+            event for event in self.events if event["type"] == "calibration"
+        ]
+        if not calibrations:
             raise ValueError("run has no calibration event")
-        self.cal = cals[0]["data"]
-        self.t0 = cals[0]["ts"]
-        self.arm = cals[0].get("arm") or self.cal.get("arm")
-        self.problem = self.cal.get("problem", "sched")
-        self.knobs = self.cal.get("knobs", {})
-        self.base_score = self.cal["baseline_slow"]["score"]
-        self.ref_score = self.cal["reference_slow"]["score"]
-        self.of = lambda t: [e for e in self.events if e["type"] == t]
+        self.calibration = calibrations[0]["data"]
+        self.started_at = calibrations[0]["ts"]
+        self.arm = calibrations[0].get("arm") or self.calibration.get("arm")
+        self.problem = self.calibration.get("problem", "sched")
+        self.knobs = self.calibration.get("knobs", {})
+        self.baseline_score = self.calibration["baseline_slow"]["score"]
+        self.reference_score = self.calibration["reference_slow"]["score"]
         self.results = self.of("result")
         self.submits = self.of("submit")
         finals = self.of("final")
         self.final = finals[-1] if finals else None
-        end = (
+        ended_at = (
             self.final["ts"]
             if self.final
-            else (self.events[-1]["ts"] if self.events else self.t0)
+            else (self.events[-1]["ts"] if self.events else self.started_at)
         )
-        self.T = max(end - self.t0, 1e-9)
-        self.ings_by_hash: dict[str, frozenset] = {}
+        self.duration_seconds = max(ended_at - self.started_at, 1e-9)
+        self.ingredients_by_hash: dict[str, frozenset] = {}
         self.result_by_ticket: dict[str, dict] = {}
-        for r in self.results:
-            self.ings_by_hash.setdefault(
-                r["data"]["hash"], frozenset(r["data"].get("ingredients") or [])
+        for result in self.results:
+            self.ingredients_by_hash.setdefault(
+                result["data"]["hash"],
+                frozenset(result["data"].get("ingredients") or []),
             )
-            self.result_by_ticket[r["data"]["ticket"]] = r
+            self.result_by_ticket[result["data"]["ticket"]] = result
 
-    # ------------------------------------------------------------ filters
+    def of(self, event_type: str) -> list[dict]:
+        return [event for event in self.events if event["type"] == event_type]
+
     @staticmethod
-    def is_worker(e) -> bool:
-        return (e.get("actor") or "anon") not in SYSTEM_ACTORS
+    def is_worker(event) -> bool:
+        return (event.get("actor") or "anon") not in SYSTEM_ACTORS
 
     def worker_results(self):
         return [
-            r
-            for r in self.results
-            if self.is_worker(r) and r["data"].get("dataset", "dev") == "dev"
+            result
+            for result in self.results
+            if self.is_worker(result) and result["data"].get("dataset", "dev") == "dev"
         ]
 
     def worker_submits(self, include_duplicates=True):
         return [
-            s
-            for s in self.submits
-            if self.is_worker(s)
-            and s["data"].get("dataset", "dev") == "dev"
-            and (include_duplicates or not s["data"].get("duplicate"))
+            submit
+            for submit in self.submits
+            if self.is_worker(submit)
+            and submit["data"].get("dataset", "dev") == "dev"
+            and (include_duplicates or not submit["data"].get("duplicate"))
         ]
 
     def final_result(self):
         if not self.final:
             return None
-        r = self.result_by_ticket.get(self.final["data"].get("ticket"))
-        if r is None:
-            for x in reversed(self.results):
-                if x["data"]["hash"] == self.final["data"].get("hash"):
-                    return x
-        return r
+        result = self.result_by_ticket.get(self.final["data"].get("ticket"))
+        if result is None:
+            for candidate_result in reversed(self.results):
+                if candidate_result["data"]["hash"] == self.final["data"].get("hash"):
+                    return candidate_result
+        return result
 
     def is_herd(self):
         return self.arm == "herd"
 
 
-def _m(value, target, ok, **detail):
+def metric(value, target, ok, **detail):
     return {"value": value, "target": target, "ok": ok, "detail": detail}
 
 
-def _failed(r, base):
-    d = r["data"]
-    return (not d.get("constraint_ok")) or d.get("score") is None or d["score"] < base
+def is_failed(result, baseline_score):
+    data = result["data"]
+    return (
+        (not data.get("constraint_ok"))
+        or data.get("score") is None
+        or data["score"] < baseline_score
+    )
 
 
-# ---------------------------------------------------------------- the nine metrics
-
-
-def breadth(v: RunView):
-    tgt = TARGETS.get(v.problem, TARGETS["sched"])["breadth"]
-    cut = v.t0 + 0.25 * v.T
+def breadth(run: RunView):
+    target = TARGETS.get(run.problem, TARGETS["sched"])["breadth"]
+    cutoff_at = run.started_at + BREADTH_WINDOW_FRACTION * run.duration_seconds
     seen = set()
-    for r in v.worker_results():
-        if r["ts"] < cut:
-            seen |= set(r["data"].get("ingredients") or [])
-    return _m(
+    for result in run.worker_results():
+        if result["ts"] < cutoff_at:
+            seen |= set(result["data"].get("ingredients") or [])
+    return metric(
         len(seen),
-        f">= {tgt}",
-        len(seen) >= tgt,
+        f">= {target}",
+        len(seen) >= target,
         ingredients=sorted(seen),
-        cutoff_s=round(0.25 * v.T, 1),
+        cutoff_s=round(BREADTH_WINDOW_FRACTION * run.duration_seconds, 1),
     )
 
 
-def assembly(v: RunView):
-    tgt = TARGETS.get(v.problem, TARGETS["sched"])["assembly"]
-    fr = v.final_result()
-    if fr is None:
-        return _m(None, f">= {tgt}", False, reason="no final")
-    ings = sorted(set(fr["data"].get("ingredients") or []) - {TRAP})
-    return _m(
-        len(ings),
-        f">= {tgt}",
-        len(ings) >= tgt,
-        ingredients=ings,
-        final_ticket=fr["data"]["ticket"],
+def assembly(run: RunView):
+    target = TARGETS.get(run.problem, TARGETS["sched"])["assembly"]
+    final_result = run.final_result()
+    if final_result is None:
+        return metric(None, f">= {target}", False, reason="no final")
+    ingredients = sorted(set(final_result["data"].get("ingredients") or []) - {TRAP})
+    return metric(
+        len(ingredients),
+        f">= {target}",
+        len(ingredients) >= target,
+        ingredients=ingredients,
+        final_ticket=final_result["data"]["ticket"],
     )
 
 
-def capture(v: RunView):
-    tgt = TARGETS.get(v.problem, TARGETS["sched"])["capture"]
-    fr = v.final_result()
-    if fr is None or fr["data"].get("score") is None:
-        return _m(None, f">= {tgt:.0%}", False, reason="no scored final")
-    denom = v.ref_score - v.base_score
-    val = (fr["data"]["score"] - v.base_score) / denom if denom else float("nan")
-    return _m(
-        round(val, 4),
-        f">= {tgt:.0%}",
-        val >= tgt,
-        final_score=fr["data"]["score"],
-        baseline=v.base_score,
-        reference=v.ref_score,
+def capture(run: RunView):
+    target = TARGETS.get(run.problem, TARGETS["sched"])["capture"]
+    final_result = run.final_result()
+    if final_result is None or final_result["data"].get("score") is None:
+        return metric(None, f">= {target:.0%}", False, reason="no scored final")
+    gain_span = run.reference_score - run.baseline_score
+    value = (
+        (final_result["data"]["score"] - run.baseline_score) / gain_span
+        if gain_span
+        else float("nan")
+    )
+    return metric(
+        round(value, 4),
+        f">= {target:.0%}",
+        value >= target,
+        final_score=final_result["data"]["score"],
+        baseline=run.baseline_score,
+        reference=run.reference_score,
     )
 
 
-def dead_end_rehits(v: RunView):
+def dead_end_rehits(run: RunView):
     """11.5, literally: for each failed result (constraint violated, void, or below the baseline),
     count the later submits with the same ingredient set (any actor, the same one, duplicates
     included); herd adds, per dead_end write, the later submits matching its hash's ingredients.
     """
     failed = [
-        (r["ts"], frozenset(r["data"].get("ingredients") or []))
-        for r in v.results
-        if v.is_worker(r) and _failed(r, v.base_score)
+        (result["ts"], frozenset(result["data"].get("ingredients") or []))
+        for result in run.results
+        if run.is_worker(result) and is_failed(result, run.baseline_score)
     ]
     marks = list(failed)
-    for w in v.of("blackboard_write"):
+    for write in run.of("blackboard_write"):
         if (
-            w["data"].get("kind") == "dead_end"
-            and w["data"].get("hash") in v.ings_by_hash
+            write["data"].get("kind") == "dead_end"
+            and write["data"].get("hash") in run.ingredients_by_hash
         ):
-            marks.append((w["ts"], v.ings_by_hash[w["data"]["hash"]]))
+            marks.append((write["ts"], run.ingredients_by_hash[write["data"]["hash"]]))
     total, empty_total, distinct = 0, 0, []
-    for s in v.worker_submits():
-        ings = v.ings_by_hash.get(s["data"]["hash"])
-        if ings is None:
+    for submit in run.worker_submits():
+        ingredients = run.ingredients_by_hash.get(submit["data"]["hash"])
+        if ingredients is None:
             continue
-        n = sum(1 for t, m in marks if t < s["ts"] and ings == m)
-        if n:
-            total += n
-            empty_total += n if not ings else 0
+        rehit_count = sum(
+            1
+            for marked_at, marked_ingredients in marks
+            if marked_at < submit["ts"] and ingredients == marked_ingredients
+        )
+        if rehit_count:
+            total += rehit_count
+            empty_total += rehit_count if not ingredients else 0
             distinct.append(
                 {
-                    "ticket": s["data"]["ticket"],
-                    "actor": s.get("actor"),
-                    "ingredients": sorted(ings),
+                    "ticket": submit["data"]["ticket"],
+                    "actor": submit.get("actor"),
+                    "ingredients": sorted(ingredients),
                 }
             )
-    return _m(
+    return metric(
         total,
         "0",
         total == 0,
@@ -197,167 +219,176 @@ def dead_end_rehits(v: RunView):
     )
 
 
-def conflict_handling(v: RunView):
-    fr = v.final_result()
-    if fr is None:
-        return _m(None, "no, or recorded", False, reason="no final")
-    ings = set(fr["data"].get("ingredients") or [])
-    if not set(CONFLICT_PAIR) <= ings:
-        return _m("both off", "no, or recorded", True)
-    for w in v.of("blackboard_write"):
-        if w["data"].get("kind") in ("insight", "compose"):
+def conflict_handling(run: RunView):
+    final_result = run.final_result()
+    if final_result is None:
+        return metric(None, "no, or recorded", False, reason="no final")
+    ingredients = set(final_result["data"].get("ingredients") or [])
+    if not set(CONFLICT_PAIR) <= ingredients:
+        return metric("both off", "no, or recorded", True)
+    for write in run.of("blackboard_write"):
+        if write["data"].get("kind") in ("insight", "compose"):
             union = set()
-            for h in w["data"].get("refs") or []:
-                union |= set(v.ings_by_hash.get(h, ()))
+            for referenced_hash in write["data"].get("refs") or []:
+                union |= set(run.ingredients_by_hash.get(referenced_hash, ()))
             if set(CONFLICT_PAIR) <= union:
-                return _m(
+                return metric(
                     "both on, trade-off recorded",
                     "no, or recorded",
                     True,
-                    record=w["data"].get("id"),
+                    record=write["data"].get("id"),
                 )
-    return _m("both on, no record", "no, or recorded", False)
+    return metric("both on, no record", "no, or recorded", False)
 
 
-def quota_discipline(v: RunView):
-    fast = v.of("fast_run")
-    subs = v.worker_submits()
-    if not subs:
-        return _m(None, ">= 80%", None, reason="no submits")
-    good = 0
-    for s in subs:
-        h = s["data"]["hash"]
+def quota_discipline(run: RunView):
+    fast_runs = run.of("fast_run")
+    submits = run.worker_submits()
+    if not submits:
+        return metric(None, ">= 80%", None, reason="no submits")
+    with_positive_fast_run = 0
+    for submit in submits:
+        submitted_hash = submit["data"]["hash"]
         if any(
-            f["ts"] <= s["ts"]
-            and f["data"].get("hash") == h
-            and f["data"].get("score") is not None
-            and f["data"].get("baseline_score") is not None
-            and f["data"]["score"] > f["data"]["baseline_score"]
-            for f in fast
+            fast_run["ts"] <= submit["ts"]
+            and fast_run["data"].get("hash") == submitted_hash
+            and fast_run["data"].get("score") is not None
+            and fast_run["data"].get("baseline_score") is not None
+            and fast_run["data"]["score"] > fast_run["data"]["baseline_score"]
+            for fast_run in fast_runs
         ):
-            good += 1
-    val = good / len(subs)
-    return _m(
-        round(val, 4),
+            with_positive_fast_run += 1
+    value = with_positive_fast_run / len(submits)
+    return metric(
+        round(value, 4),
         ">= 80%",
-        val >= 0.8,
-        submits=len(subs),
-        with_positive_fast_run=good,
-        duplicates_included=sum(1 for s in subs if s["data"].get("duplicate")),
+        value >= QUOTA_DISCIPLINE_TARGET,
+        submits=len(submits),
+        with_positive_fast_run=with_positive_fast_run,
+        duplicates_included=sum(
+            1 for submit in submits if submit["data"].get("duplicate")
+        ),
     )
 
 
-def prediction_error(v: RunView):
-    pairs = []
-    for s in v.worker_submits():
-        r = v.result_by_ticket.get(s["data"].get("of") or s["data"]["ticket"])
-        if r is None or r["data"].get("score") in (None, 0):
+def prediction_error(run: RunView):
+    relative_errors = []
+    for submit in run.worker_submits():
+        result = run.result_by_ticket.get(
+            submit["data"].get("of") or submit["data"]["ticket"]
+        )
+        if result is None or result["data"].get("score") in (None, 0):
             continue
-        sc = r["data"]["score"]
-        pairs.append(abs(s["data"]["predicted_score"] - sc) / abs(sc))
-    if len(pairs) < 4:
-        return _m(
+        score = result["data"]["score"]
+        relative_errors.append(
+            abs(submit["data"]["predicted_score"] - score) / abs(score)
+        )
+    if len(relative_errors) < MIN_SCORED_SUBMITS_FOR_PREDICTION:
+        return metric(
             None,
             "second half <= 0.8 x first half",
             None,
-            reason=f"only {len(pairs)} scored submits",
+            reason=f"only {len(relative_errors)} scored submits",
         )
-    h = len(pairs) // 2
-    first, second = statistics.median(pairs[:h]), statistics.median(pairs[h:])
-    ok = second <= 0.8 * first if first > 0 else second == 0
-    return _m(
+    half = len(relative_errors) // 2
+    first, second = (
+        statistics.median(relative_errors[:half]),
+        statistics.median(relative_errors[half:]),
+    )
+    ok = second <= PREDICTION_IMPROVEMENT_RATIO * first if first > 0 else second == 0
+    return metric(
         {"first_half": round(first, 4), "second_half": round(second, 4)},
         "second half <= 0.8 x first half",
         ok,
-        n=len(pairs),
+        n=len(relative_errors),
     )
 
 
-def tilt(v: RunView):
-    if not v.is_herd():
-        return _m(
+def tilt(run: RunView):
+    if not run.is_herd():
+        return metric(
             None,
             "allocation toward it within window",
             None,
             reason="not applicable to this arm",
         )
-    window = v.knobs.get("tilt_window_s", 7200)
-    best = v.base_score
-    trig = None
-    for r in v.worker_results():
-        d = r["data"]
-        if d.get("score") is None or not d.get("constraint_ok"):
+    window_seconds = run.knobs.get("tilt_window_s", DEFAULT_TILT_WINDOW_SECONDS)
+    best_score = run.baseline_score
+    trigger = None
+    for result in run.worker_results():
+        data = result["data"]
+        if data.get("score") is None or not data.get("constraint_ok"):
             continue
-        ci = d.get("ci") or [d["score"], d["score"]]
+        ci = data.get("ci") or [data["score"], data["score"]]
         width = (ci[1] - ci[0]) if None not in ci else 0.0
-        if d["score"] > best and d["score"] - best >= width:
-            trig = r
+        if data["score"] > best_score and data["score"] - best_score >= width:
+            trigger = result
             break
-        best = max(best, d["score"])
-    if trig is None:
-        return _m(
+        best_score = max(best_score, data["score"])
+    if trigger is None:
+        return metric(
             None,
             "allocation toward it within window",
             None,
             reason="no result beat the best by >= 1 CI width",
         )
-    ings = set(trig["data"].get("ingredients") or [])
-    for a in v.of("allocation"):
-        if trig["ts"] <= a["ts"] <= trig["ts"] + window:
-            d = a["data"]
+    ingredients = set(trigger["data"].get("ingredients") or [])
+    for allocation in run.of("allocation"):
+        if trigger["ts"] <= allocation["ts"] <= trigger["ts"] + window_seconds:
+            data = allocation["data"]
             if (
-                set(v.ings_by_hash.get(d.get("hash"), ())) & ings
-                and d["workers_after"] > d["workers_before"]
+                set(run.ingredients_by_hash.get(data.get("hash"), ())) & ingredients
+                and data["workers_after"] > data["workers_before"]
             ):
-                return _m(
+                return metric(
                     "yes",
                     "allocation toward it within window",
                     True,
-                    trigger=trig["data"]["ticket"],
-                    after_s=round(a["ts"] - trig["ts"], 1),
+                    trigger=trigger["data"]["ticket"],
+                    after_s=round(allocation["ts"] - trigger["ts"], 1),
                 )
-    return _m(
+    return metric(
         "no",
         "allocation toward it within window",
         False,
-        trigger=trig["data"]["ticket"],
-        window_s=window,
+        trigger=trigger["data"]["ticket"],
+        window_s=window_seconds,
     )
 
 
-def generalization(v: RunView):
-    fr = v.final_result()
-    checks = v.of("final_check")
+def generalization(run: RunView):
+    final_result = run.final_result()
+    checks = run.of("final_check")
     if (
-        fr is None
+        final_result is None
         or not checks
-        or fr["data"].get("score") is None
+        or final_result["data"].get("score") is None
         or checks[-1]["data"].get("score") is None
     ):
-        return _m(None, "< 1", False, reason="missing final or final_check")
-    fc = checks[-1]["data"]
+        return metric(None, "< 1", False, reason="missing final or final_check")
+    final_check_data = checks[-1]["data"]
     if (
-        fc.get("dataset") == "holdout"
+        final_check_data.get("dataset") == "holdout"
     ):  # problem B: seen = final (dev), unseen = holdout
-        seen, unseen = fr["data"]["score"], fc["score"]
+        seen, unseen = final_result["data"]["score"], final_check_data["score"]
     else:  # problem A: seen = public seeds, unseen = final (dev)
-        seen, unseen = fc["score"], fr["data"]["score"]
-    ci = fr["data"].get("ci") or [None, None]
+        seen, unseen = final_check_data["score"], final_result["data"]["score"]
+    ci = final_result["data"].get("ci") or [None, None]
     width = (ci[1] - ci[0]) if None not in ci else 0.0
-    diff = seen - unseen
-    val = (
-        diff / width
+    difference = seen - unseen
+    value = (
+        difference / width
         if width > 0
-        else (0.0 if diff == 0 else math.copysign(math.inf, diff))
+        else (0.0 if difference == 0 else math.copysign(math.inf, difference))
     )
-    return _m(
-        round(val, 4),
+    return metric(
+        round(value, 4),
         "< 1",
-        val < 1,
+        value < 1,
         seen=seen,
         unseen=unseen,
         ci_width=width,
-        dataset=fc.get("dataset"),
+        dataset=final_check_data.get("dataset"),
     )
 
 
@@ -387,77 +418,84 @@ HINTS = {
 }
 
 
-def diagnostics(v: RunView) -> dict:
-    wr = v.worker_results()
+def diagnostics(run: RunView) -> dict:
+    worker_results = run.worker_results()
     scored = [
-        r
-        for r in wr
-        if r["data"].get("score") is not None and r["data"].get("constraint_ok")
+        result
+        for result in worker_results
+        if result["data"].get("score") is not None
+        and result["data"].get("constraint_ok")
     ]
-    best = max(scored, key=lambda r: r["data"]["score"], default=None)
-    of = v.of
-    out = {
-        "arm": v.arm,
-        "problem": v.problem,
-        "T_s": round(v.T, 1),
-        "worker_submits": len(v.worker_submits(include_duplicates=False)),
-        "duplicates": sum(1 for s in v.worker_submits() if s["data"].get("duplicate")),
-        "quota_rejected": len(of("quota_rejected")),
-        "actors": sorted({s.get("actor") for s in v.worker_submits()}),
-        "baseline_advanced": len(of("baseline_advanced")),
-        "integration_failed": len(of("integration_failed")),
-        "compose_tasks": len(of("compose_task")),
-        "baseline_reverted": len(of("baseline_reverted")),
-        "audit_checks": len(of("audit_checked")),
-        "audit_flags": sum(1 for a in of("audit_checked") if a["data"].get("flagged")),
-        "anomalies": len(of("anomaly")),
+    best = max(scored, key=lambda result: result["data"]["score"], default=None)
+    summary = {
+        "arm": run.arm,
+        "problem": run.problem,
+        "T_s": round(run.duration_seconds, 1),
+        "worker_submits": len(run.worker_submits(include_duplicates=False)),
+        "duplicates": sum(
+            1 for submit in run.worker_submits() if submit["data"].get("duplicate")
+        ),
+        "quota_rejected": len(run.of("quota_rejected")),
+        "actors": sorted({submit.get("actor") for submit in run.worker_submits()}),
+        "baseline_advanced": len(run.of("baseline_advanced")),
+        "integration_failed": len(run.of("integration_failed")),
+        "compose_tasks": len(run.of("compose_task")),
+        "baseline_reverted": len(run.of("baseline_reverted")),
+        "audit_checks": len(run.of("audit_checked")),
+        "audit_flags": sum(
+            1 for audit in run.of("audit_checked") if audit["data"].get("flagged")
+        ),
+        "anomalies": len(run.of("anomaly")),
         "system_dev_submits": {
-            a: sum(
+            actor: sum(
                 1
-                for s in v.submits
-                if s.get("actor") == a and s["data"].get("dataset", "dev") == "dev"
+                for submit in run.submits
+                if submit.get("actor") == actor
+                and submit["data"].get("dataset", "dev") == "dev"
             )
-            for a in ("runner", "integrator", "composer")
+            for actor in ("runner", "integrator", "composer")
         },
-        "stale_targets": len(of("stale_target")),
-        "agent_restarts": len(of("agent_restart")),
+        "stale_targets": len(run.of("stale_target")),
+        "agent_restarts": len(run.of("agent_restart")),
     }
     if best is not None:
-        denom = v.ref_score - v.base_score
-        out["actor_best"] = {
+        gain_span = run.reference_score - run.baseline_score
+        summary["actor_best"] = {
             "ticket": best["data"]["ticket"],
             "actor": best.get("actor"),
             "score": best["data"]["score"],
             "capture": (
-                round((best["data"]["score"] - v.base_score) / denom, 4)
-                if denom
+                round((best["data"]["score"] - run.baseline_score) / gain_span, 4)
+                if gain_span
                 else None
             ),
             "ingredients": best["data"].get("ingredients"),
         }
-    fr = v.final_result()
-    if fr is not None:
-        out["final"] = {
-            "ticket": fr["data"]["ticket"],
-            "score": fr["data"]["score"],
-            "ingredients": fr["data"].get("ingredients"),
+    final_result = run.final_result()
+    if final_result is not None:
+        summary["final"] = {
+            "ticket": final_result["data"]["ticket"],
+            "score": final_result["data"]["score"],
+            "ingredients": final_result["data"].get("ingredients"),
         }
-    return out
+    return summary
 
 
 def scorecard(events: list[dict]) -> dict:
-    v = RunView(events)
+    run = RunView(events)
     rows = {}
-    for key, _label, fn in METRICS:
+    for metric_key, _label, metric_function in METRICS:
         try:
-            rows[key] = fn(v)
-        except Exception as e:  # a broken metric must not hide the others
-            rows[key] = _m(None, "", False, error=f"{type(e).__name__}: {e}")
-    run_id = v.events[0].get("run_id") if v.events else None
+            rows[metric_key] = metric_function(run)
+        except Exception as error:  # a broken metric must not hide the others
+            rows[metric_key] = metric(
+                None, "", False, error=f"{type(error).__name__}: {error}"
+            )
+    run_id = run.events[0].get("run_id") if run.events else None
     return {
         "run_id": run_id,
-        "arm": v.arm,
-        "problem": v.problem,
+        "arm": run.arm,
+        "problem": run.problem,
         "metrics": rows,
-        "diagnostics": diagnostics(v),
+        "diagnostics": diagnostics(run),
     }

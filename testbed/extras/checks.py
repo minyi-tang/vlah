@@ -26,6 +26,9 @@ import shutil
 import tempfile
 from pathlib import Path
 
+import yaml
+
+from testbed.arms.scripted.env import ScriptedEnv
 from testbed.problem_api import STATE_DIR, content_hash, load_problem, mean, sd
 
 OUT = STATE_DIR / "extras"
@@ -45,89 +48,117 @@ ALT_EXPECTED = {
     "fairshare_jobs": {"fairshare"},
     "noise": set(),
 }
+HOUR_SECONDS = 3600.0
+CAPTURE_TARGET = 0.7
+AUDIT_K = 2.5  # the integrator's audit rule: flag when |dev gap - audit gap| > 2.5 sigma sqrt2
+ORACLE_KNOBS = {
+    "visible_delay_s": 600,
+    "quota_per_hour": 2,
+    "quota_total": 96,
+    "tilt_window_s": 7200,
+}
+ORACLE_HOURS = 24
 
 
-def _variants(prob):
-    return prob.hidden_module("reference.variants")
+def variants_module(problem):
+    return problem.hidden_module("reference.variants")
 
 
 class Memo:
     """(content hash, seed, tier) -> per-seed result summary, persisted across extras."""
 
-    def __init__(self, prob):
-        self.prob = prob
-        sites = Path(prob.root) / "sites"
-        self.fp = content_hash(sites)[:12] if sites.exists() else ""
-        self.path = OUT / f"cache-{self.fp}.json"
+    def __init__(self, problem):
+        self.problem = problem
+        sites_dir = Path(problem.root) / "sites"
+        self.sites_fingerprint = (
+            content_hash(sites_dir)[:12] if sites_dir.exists() else ""
+        )
+        self.path = OUT / f"cache-{self.sites_fingerprint}.json"
         self.data = json.loads(self.path.read_text()) if self.path.exists() else {}
 
-    def scores(self, d: Path, seeds, tier="slow"):
-        h = content_hash(d)
-        need = [s for s in seeds if f"{h}:{s}:{tier}" not in self.data]
-        if need:
-            for s, r in zip(need, self.prob.evaluate_many(d, need, tier)):
-                self.data[f"{h}:{s}:{tier}"] = {
-                    "score": r["score"],
-                    "per_item": r["per_item"],
+    def scores(self, candidate_dir: Path, seeds, tier="slow"):
+        hash_value = content_hash(candidate_dir)
+        missing_seeds = [
+            seed for seed in seeds if f"{hash_value}:{seed}:{tier}" not in self.data
+        ]
+        if missing_seeds:
+            for seed, result in zip(
+                missing_seeds,
+                self.problem.evaluate_many(candidate_dir, missing_seeds, tier),
+            ):
+                self.data[f"{hash_value}:{seed}:{tier}"] = {
+                    "score": result["score"],
+                    "per_item": result["per_item"],
                     "waits_p99": {
-                        k: v
-                        for k, v in [(it["id"], it["value"]) for it in r["per_item"]]
-                        if k.endswith("p99")
+                        item["id"]: item["value"]
+                        for item in result["per_item"]
+                        if item["id"].endswith("p99")
                     },
                 }
             OUT.mkdir(parents=True, exist_ok=True)
             self.path.write_text(json.dumps(self.data))
-        return [self.data[f"{h}:{s}:{tier}"] for s in seeds]
+        return [self.data[f"{hash_value}:{seed}:{tier}"] for seed in seeds]
 
 
-def _cand(prob, ings, root: Path):
-    name = "+".join(sorted(ings)) or "baseline"
-    d = root / name
-    if not d.exists():
-        if not ings:
-            shutil.copytree(prob.baseline_dir(), d)
+def subset_candidate(problem, ingredients, root: Path):
+    name = "+".join(sorted(ingredients)) or "baseline"
+    candidate_dir = root / name
+    if not candidate_dir.exists():
+        if not ingredients:
+            shutil.copytree(problem.baseline_dir(), candidate_dir)
         else:
-            _variants(prob).make_candidate(sorted(ings), dest=d)
-    return d
+            variants_module(problem).make_candidate(
+                sorted(ingredients), dest=candidate_dir
+            )
+    return candidate_dir
 
 
-def _alt(prob, name, root: Path):
-    d = root / f"alt-{name}"
-    if not d.exists():
-        d.mkdir(parents=True)
-        shutil.copy2(ALT_DIR / f"{name}.py", d / "policy.py")
-        (d / "params.yaml").write_text("{}\n")
-    return d
+def alt_policy_candidate(problem, name, root: Path):
+    candidate_dir = root / f"alt-{name}"
+    if not candidate_dir.exists():
+        candidate_dir.mkdir(parents=True)
+        shutil.copy2(ALT_DIR / f"{name}.py", candidate_dir / "policy.py")
+        (candidate_dir / "params.yaml").write_text("{}\n")
+    return candidate_dir
 
 
-def _spearman(xs, ys):
-    def ranks(v):
-        order = sorted(range(len(v)), key=lambda i: v[i])
-        r = [0.0] * len(v)
-        for pos, i in enumerate(order):
-            r[i] = pos
-        return r
+def spearman(left_values, right_values):
+    def ranks(values):
+        order = sorted(range(len(values)), key=lambda i: values[i])
+        rank_of = [0.0] * len(values)
+        for position, i in enumerate(order):
+            rank_of[i] = position
+        return rank_of
 
-    rx, ry = ranks(xs), ranks(ys)
-    mx, my = mean(rx), mean(ry)
-    num = sum((a - mx) * (b - my) for a, b in zip(rx, ry))
-    den = math.sqrt(sum((a - mx) ** 2 for a in rx) * sum((b - my) ** 2 for b in ry))
-    return num / den if den else float("nan")
+    left_ranks, right_ranks = ranks(left_values), ranks(right_values)
+    left_mean, right_mean = mean(left_ranks), mean(right_ranks)
+    numerator = sum(
+        (left - left_mean) * (right - right_mean)
+        for left, right in zip(left_ranks, right_ranks)
+    )
+    denominator = math.sqrt(
+        sum((left - left_mean) ** 2 for left in left_ranks)
+        * sum((right - right_mean) ** 2 for right in right_ranks)
+    )
+    return numerator / denominator if denominator else float("nan")
 
 
-# ------------------------------------------------------------------------ checks
-
-
-def probes_robust(prob, root, n, out):
+def probes_robust(problem, root, seed_count, emit):
     rows, ok_all = [], True
     for name, want in ALT_EXPECTED.items():
-        got = {k for k, v in prob.probes(_alt(prob, name, root)).items() if v}
+        got = {
+            ingredient
+            for ingredient, fired in problem.probes(
+                alt_policy_candidate(problem, name, root)
+            ).items()
+            if fired
+        }
         ok = got == want
         ok_all &= ok
         rows.append(
             f"| {name} | {sorted(want)} | {sorted(got)} | {'ok' if ok else 'MISMATCH'} |"
         )
-    out(
+    emit(
         [
             "# probes-robust",
             "",
@@ -140,278 +171,392 @@ def probes_robust(prob, root, n, out):
     return ok_all
 
 
-def composability(prob, root, n, out):
-    memo = Memo(prob)
-    seeds = prob.seeds("dev")[:n]
-    res = {}
-    for k in range(0, 6):
-        for sub in itertools.combinations(FIVE, k):
-            res[frozenset(sub)] = [
-                r["score"] for r in memo.scores(_cand(prob, sub, root), seeds)
+def composability(problem, root, seed_count, emit):
+    memo = Memo(problem)
+    seeds = problem.seeds("dev")[:seed_count]
+    scores_by_subset = {}
+    for size in range(0, 6):
+        for subset in itertools.combinations(FIVE, size):
+            scores_by_subset[frozenset(subset)] = [
+                result["score"]
+                for result in memo.scores(
+                    subset_candidate(problem, subset, root), seeds
+                )
             ]
-    extra = {
+    extra_subsets = {
         "backfill+fairshare": {"backfill", "fairshare"},
         "fairshare": {"fairshare"},
     }
-    for name, ings in extra.items():
-        res[frozenset(ings)] = [
-            r["score"] for r in memo.scores(_cand(prob, ings, root), seeds)
+    for ingredients in extra_subsets.values():
+        scores_by_subset[frozenset(ingredients)] = [
+            result["score"]
+            for result in memo.scores(
+                subset_candidate(problem, ingredients, root), seeds
+            )
         ]
-    base = res[frozenset()]
-    full = res[frozenset(FIVE)]
-    gap = mean(full) - mean(base)
+    baseline_scores = scores_by_subset[frozenset()]
+    full_scores = scores_by_subset[frozenset(FIVE)]
+    full_gain = mean(full_scores) - mean(baseline_scores)
 
-    def cap(s):
-        return (mean(res[s]) - mean(base)) / gap
+    def capture(subset):
+        return (mean(scores_by_subset[subset]) - mean(baseline_scores)) / full_gain
 
     lines = [
         "# composability",
         "",
-        f"{n} dev seeds; capture = (subset - baseline) / (all five - baseline)",
+        f"{seed_count} dev seeds; capture = (subset - baseline) / (all five - baseline)",
         "",
     ]
     best = {}
-    for k in range(1, 6):
-        subs = [s for s in res if len(s) == k and s <= set(FIVE)]
-        b = max(subs, key=cap)
-        best[k] = (sorted(b), cap(b))
-        lines.append(f"best {k}: {sorted(b)}  capture {cap(b):.0%}")
-    singles = {i: mean(res[frozenset([i])]) - mean(base) for i in FIVE}
+    for size in range(1, 6):
+        subsets = [
+            subset
+            for subset in scores_by_subset
+            if len(subset) == size and subset <= set(FIVE)
+        ]
+        best_subset = max(subsets, key=capture)
+        best[size] = (sorted(best_subset), capture(best_subset))
+        lines.append(
+            f"best {size}: {sorted(best_subset)}  capture {capture(best_subset):.0%}"
+        )
+    single_gains = {
+        ingredient: mean(scores_by_subset[frozenset([ingredient])])
+        - mean(baseline_scores)
+        for ingredient in FIVE
+    }
     lines += [
         "",
-        f"sum of single gains / full gain = {sum(singles.values()) / gap:.2f} (1 = additive)",
+        f"sum of single gains / full gain = {sum(single_gains.values()) / full_gain:.2f} (1 = additive)",
         "",
         "pairwise interaction = gain(a+b) - gain(a) - gain(b), in units of its paired s.e.",
         "",
         "| pair | interaction | z |",
         "| --- | --- | --- |",
     ]
-    for a, b in itertools.combinations(FIVE, 2):
-        ab = res[frozenset([a, b])]
-        d = [
-            x - y - z + w
-            for x, y, z, w in zip(ab, res[frozenset([a])], res[frozenset([b])], base)
+    for left, right in itertools.combinations(FIVE, 2):
+        pair_scores = scores_by_subset[frozenset([left, right])]
+        interactions = [
+            pair_score - left_score - right_score + baseline_score
+            for pair_score, left_score, right_score, baseline_score in zip(
+                pair_scores,
+                scores_by_subset[frozenset([left])],
+                scores_by_subset[frozenset([right])],
+                baseline_scores,
+            )
         ]
-        z = mean(d) / (sd(d) / math.sqrt(len(d))) if sd(d) > 0 else float("inf")
-        lines.append(f"| {a}+{b} | {mean(d):+.1f} | {z:+.1f} |")
-    bf, fs, bffs = (
-        mean(res[frozenset(x)])
-        for x in (["backfill"], ["fairshare"], ["backfill", "fairshare"])
+        z_score = (
+            mean(interactions) / (sd(interactions) / math.sqrt(len(interactions)))
+            if sd(interactions) > 0
+            else float("inf")
+        )
+        lines.append(f"| {left}+{right} | {mean(interactions):+.1f} | {z_score:+.1f} |")
+    backfill_score, fairshare_score, both_score = (
+        mean(scores_by_subset[frozenset(ingredients)])
+        for ingredients in (["backfill"], ["fairshare"], ["backfill", "fairshare"])
     )
     lines += [
         "",
-        f"conflict pair: backfill {bf:.1f}, fairshare {fs:.1f}, both {bffs:.1f}  "
-        f"-> both worse than backfill alone: {bffs < bf}",
+        f"conflict pair: backfill {backfill_score:.1f}, fairshare {fairshare_score:.1f}, both {both_score:.1f}  "
+        f"-> both worse than backfill alone: {both_score < backfill_score}",
     ]
     lines += ["", "| subset | score | capture |", "| --- | --- | --- |"]
-    for s in sorted((s for s in res if s <= set(FIVE)), key=cap, reverse=True):
+    for subset in sorted(
+        (subset for subset in scores_by_subset if subset <= set(FIVE)),
+        key=capture,
+        reverse=True,
+    ):
         lines.append(
-            f"| {'+'.join(sorted(s)) or 'baseline'} | {mean(res[s]):.1f} | {cap(s):.0%} |"
+            f"| {'+'.join(sorted(subset)) or 'baseline'} | {mean(scores_by_subset[subset]):.1f} | {capture(subset):.0%} |"
         )
-    ok = best[1][1] < 0.7 and bffs < bf
+    ok = best[1][1] < CAPTURE_TARGET and both_score < backfill_score
     lines += [
         "",
         f"RESULT: {'PASS' if ok else 'WARN'}  (pass = no single ingredient reaches 70% capture and the conflict holds)",
     ]
-    out(lines)
+    emit(lines)
     return ok
 
 
-def fidelity(prob, root, n, out):
-    memo = Memo(prob)
-    dev = prob.seeds("dev")[:n]
-    cands = {"baseline": _cand(prob, [], root), "reference": _cand(prob, FIVE, root)}
-    for i in FIVE + ["trap_sjf", "fairshare"]:
-        cands[i] = _cand(prob, [i], root)
-    for a, b in [
+def fidelity(problem, root, seed_count, emit):
+    memo = Memo(problem)
+    dev_seeds = problem.seeds("dev")[:seed_count]
+    candidates = {
+        "baseline": subset_candidate(problem, [], root),
+        "reference": subset_candidate(problem, FIVE, root),
+    }
+    for ingredient in FIVE + ["trap_sjf", "fairshare"]:
+        candidates[ingredient] = subset_candidate(problem, [ingredient], root)
+    for left, right in [
         ("backfill", "admission"),
         ("locality", "est_order"),
         ("backfill", "fairshare"),
     ]:
-        cands[f"{a}+{b}"] = _cand(prob, [a, b], root)
+        candidates[f"{left}+{right}"] = subset_candidate(problem, [left, right], root)
     for name in ALT_EXPECTED:
-        cands[f"alt-{name}"] = _alt(prob, name, root)
-    slow, fast = {}, {}
-    for name, d in cands.items():
-        slow[name] = (
-            mean(r["score"] for r in memo.scores(d, dev) if r["score"] is not None)
-            if all(r["score"] is not None for r in memo.scores(d, dev))
+        candidates[f"alt-{name}"] = alt_policy_candidate(problem, name, root)
+    slow_scores, fast_scores = {}, {}
+    for name, candidate_dir in candidates.items():
+        slow_scores[name] = (
+            mean(
+                result["score"]
+                for result in memo.scores(candidate_dir, dev_seeds)
+                if result["score"] is not None
+            )
+            if all(
+                result["score"] is not None
+                for result in memo.scores(candidate_dir, dev_seeds)
+            )
             else None
         )
-        fast[name] = [r["score"] for r in memo.scores(d, prob.public_seeds, "fast")]
-    names = [k for k in cands if slow[k] is not None and None not in fast[k]]
-    rho_mean = _spearman([mean(fast[k]) for k in names], [slow[k] for k in names])
-    rho_single = [
-        _spearman([fast[k][i] for k in names], [slow[k] for k in names])
-        for i in range(len(prob.public_seeds))
+        fast_scores[name] = [
+            result["score"]
+            for result in memo.scores(candidate_dir, problem.public_seeds, "fast")
+        ]
+    names = [
+        name
+        for name in candidates
+        if slow_scores[name] is not None and None not in fast_scores[name]
     ]
-    base_fast = fast["baseline"]
-    trap_wins = sum(
-        1 for a, b in zip(fast["trap_sjf"], base_fast) if a is not None and a > b
+    rho_mean = spearman(
+        [mean(fast_scores[name]) for name in names],
+        [slow_scores[name] for name in names],
     )
-    bp = memo.scores(cands["baseline"], prob.public_seeds, "fast")
-    tp = memo.scores(cands["trap_sjf"], prob.public_seeds, "fast")
-    visible = 0
-    for b, t in zip(bp, tp):
-        if any(t["waits_p99"][k] > 1.02 * b["waits_p99"][k] for k in b["waits_p99"]):
-            visible += 1
+    rho_single = [
+        spearman(
+            [fast_scores[name][i] for name in names],
+            [slow_scores[name] for name in names],
+        )
+        for i in range(len(problem.public_seeds))
+    ]
+    baseline_fast = fast_scores["baseline"]
+    trap_wins = sum(
+        1
+        for trap_score, baseline_score in zip(fast_scores["trap_sjf"], baseline_fast)
+        if trap_score is not None and trap_score > baseline_score
+    )
+    baseline_public = memo.scores(candidates["baseline"], problem.public_seeds, "fast")
+    trap_public = memo.scores(candidates["trap_sjf"], problem.public_seeds, "fast")
+    visible_regressions = 0
+    for baseline_result, trap_result in zip(baseline_public, trap_public):
+        if any(
+            trap_result["waits_p99"][site] > 1.02 * baseline_result["waits_p99"][site]
+            for site in baseline_result["waits_p99"]
+        ):
+            visible_regressions += 1
     lines = [
         "# fidelity (fast tier vs slow tier)",
         "",
-        f"{len(names)} candidates; slow = mean of {n} dev seeds; fast = public seeds {prob.public_seeds}",
+        f"{len(names)} candidates; slow = mean of {seed_count} dev seeds; fast = public seeds {problem.public_seeds}",
         "",
         f"Spearman(mean of 5 public seeds, slow) = {rho_mean:.2f}",
         "Spearman(single public seed, slow)   = "
-        + ", ".join(f"{x:.2f}" for x in rho_single),
-        f"trap_sjf beats baseline on the fast tier on {trap_wins}/{len(base_fast)} public seeds",
-        f"trap_sjf shows a p99 regression (>2%) at some site on {visible}/{len(base_fast)} public seeds",
+        + ", ".join(f"{rho:.2f}" for rho in rho_single),
+        f"trap_sjf beats baseline on the fast tier on {trap_wins}/{len(baseline_fast)} public seeds",
+        f"trap_sjf shows a p99 regression (>2%) at some site on {visible_regressions}/{len(baseline_fast)} public seeds",
         "",
         "| candidate | slow | fast seeds 1..5 |",
         "| --- | --- | --- |",
     ]
-    for k in names:
+    for name in names:
         lines.append(
-            f"| {k} | {slow[k]:.1f} | " + ", ".join(f"{x:.0f}" for x in fast[k]) + " |"
+            f"| {name} | {slow_scores[name]:.1f} | "
+            + ", ".join(f"{score:.0f}" for score in fast_scores[name])
+            + " |"
         )
     lines += [
         "",
         "constraint on the slow tier (dev seeds) for the trap-like candidates:",
     ]
-    base_agg = prob.aggregate(prob.evaluate_many(cands["baseline"], dev, "slow"))
-    for k in (
+    baseline_aggregate = problem.aggregate(
+        problem.evaluate_many(candidates["baseline"], dev_seeds, "slow")
+    )
+    for name in (
         "trap_sjf",
         "alt-sjf_pure",
         "alt-est_order_aged2h",
         "alt-est_order_aged",
         "est_order",
     ):
-        agg = prob.aggregate(prob.evaluate_many(cands[k], dev, "slow"))
-        v = prob.constraint_violations(agg, base_agg)
-        lines.append(f"  {k:22s} {'ok' if not v else 'VIOLATES ' + '; '.join(v)}")
+        aggregate = problem.aggregate(
+            problem.evaluate_many(candidates[name], dev_seeds, "slow")
+        )
+        violations = problem.constraint_violations(aggregate, baseline_aggregate)
+        lines.append(
+            f"  {name:22s} {'ok' if not violations else 'VIOLATES ' + '; '.join(violations)}"
+        )
     ok = rho_mean >= 0.8 and trap_wins >= 3
     lines += [
         "",
         f"RESULT: {'PASS' if ok else 'WARN'}  (pass = fast tier ranks well on average and the trap looks attractive on it)",
     ]
-    out(lines)
+    emit(lines)
     return ok
 
 
-def audit_noise(prob, root, n, out):
-    memo = Memo(prob)
-    dev, aud = prob.seeds("dev")[:n], prob.seeds("audit")[:n]
+def audit_noise(problem, root, seed_count, emit):
+    memo = Memo(problem)
+    dev_seeds, audit_seeds = (
+        problem.seeds("dev")[:seed_count],
+        problem.seeds("audit")[:seed_count],
+    )
 
-    def ps(s, seeds):
-        return [r["score"] for r in memo.scores(_cand(prob, s, root), seeds)]
+    def per_seed_scores(ingredients, seeds):
+        return [
+            result["score"]
+            for result in memo.scores(
+                subset_candidate(problem, ingredients, root), seeds
+            )
+        ]
 
-    base_d, ref_d = ps([], dev), ps(FIVE, dev)
-    base_a, ref_a = ps([], aud), ps(FIVE, aud)
-    sig_d = sd([a - b for a, b in zip(ref_d, base_d)]) / math.sqrt(n)
-    sig_a = sd([a - b for a, b in zip(ref_a, base_a)]) / math.sqrt(n)
-    thr = 2.5 * math.sqrt(sig_d**2 + sig_a**2)
+    baseline_dev, reference_dev = (
+        per_seed_scores([], dev_seeds),
+        per_seed_scores(FIVE, dev_seeds),
+    )
+    baseline_audit, reference_audit = (
+        per_seed_scores([], audit_seeds),
+        per_seed_scores(FIVE, audit_seeds),
+    )
+    sigma_dev = sd(
+        [
+            reference - baseline
+            for reference, baseline in zip(reference_dev, baseline_dev)
+        ]
+    ) / math.sqrt(seed_count)
+    sigma_audit = sd(
+        [
+            reference - baseline
+            for reference, baseline in zip(reference_audit, baseline_audit)
+        ]
+    ) / math.sqrt(seed_count)
+    threshold = AUDIT_K * math.sqrt(sigma_dev**2 + sigma_audit**2)
     flagged, total, worst = 0, 0, 0.0
-    for k in range(0, 4):
-        for s in itertools.combinations(FIVE, k):
-            for t in itertools.combinations(
-                [x for x in FIVE if x not in s], 2
+    for size in range(0, 4):
+        for prefix in itertools.combinations(FIVE, size):
+            for pair in itertools.combinations(
+                [ingredient for ingredient in FIVE if ingredient not in prefix], 2
             ):  # 2-merge segments
-                j, kk = list(s), list(s) + list(t)
-                dd = mean(ps(kk, dev)) - mean(ps(j, dev))
-                da = mean(ps(kk, aud)) - mean(ps(j, aud))
-                gap = abs(dd - da)
-                worst = max(worst, gap / thr if thr else 0)
-                flagged += gap > thr
+                before, after = list(prefix), list(prefix) + list(pair)
+                dev_gap = mean(per_seed_scores(after, dev_seeds)) - mean(
+                    per_seed_scores(before, dev_seeds)
+                )
+                audit_gap = mean(per_seed_scores(after, audit_seeds)) - mean(
+                    per_seed_scores(before, audit_seeds)
+                )
+                gap = abs(dev_gap - audit_gap)
+                worst = max(worst, gap / threshold if threshold else 0)
+                flagged += gap > threshold
                 total += 1
     lines = [
         "# audit-noise",
         "",
-        f"{n} dev + {n} audit seeds; sigma_dev {sig_d:.2f}, sigma_audit {sig_a:.2f}, "
-        f"threshold 2.5*sqrt(sd^2+sa^2) = {thr:.2f}",
+        f"{seed_count} dev + {seed_count} audit seeds; sigma_dev {sigma_dev:.2f}, sigma_audit {sigma_audit:.2f}, "
+        f"threshold 2.5*sqrt(sd^2+sa^2) = {threshold:.2f}",
         "",
         f"honest 2-merge segments flagged: {flagged}/{total}  (worst gap = {worst:.2f} x threshold)",
         "",
         f"RESULT: {'PASS' if flagged == 0 else 'WARN'}",
     ]
-    out(lines)
+    emit(lines)
     return flagged == 0
 
 
-def oracle(prob, root, n, out):
-    from testbed.arms.scripted.env import ScriptedEnv
-
-    H = 3600.0
-    knobs = {
-        "slow_seeds": n,
-        "visible_delay_s": 600,
-        "quota_per_hour": 2,
-        "quota_total": 96,
-        "tilt_window_s": 7200,
-    }
+def oracle(problem, root, seed_count, emit):
+    knobs = dict(ORACLE_KNOBS, slow_seeds=seed_count)
     rows = []
-    for arm, n_workers in (("single", 1), ("isolated", 5), ("herd", 5)):
+    for arm, worker_count in (("single", 1), ("isolated", 5), ("herd", 5)):
         env = ScriptedEnv(
             root / f"oracle-{arm}",
-            problem=prob.name,
+            problem=problem.name,
             arm=arm,
-            n=n_workers,
+            n=worker_count,
             run_id=f"r-oracle-{arm}",
             overrides=knobs,
         )
-        cal = env.core.calibration(env.run_id)
-        b, r = cal["baseline_slow"]["score"], cal["reference_slow"]["score"]
-        hit70 = None
+        calibration = env.core.calibration(env.run_id)
+        baseline_score, reference_score = (
+            calibration["baseline_slow"]["score"],
+            calibration["reference_slow"]["score"],
+        )
+        hours_to_target = None
         actors = ["solo"] if arm == "single" else [f"w{i + 1}" for i in range(5)]
-        todo = list(FIVE)
-        t = 60.0
-        env.advance_to(t)
+        remaining = list(FIVE)
+        env.advance_to(60.0)
         if arm == "isolated":
-            for actor, ing in zip(actors, todo):
-                d = _variants(prob).make_candidate(
-                    [ing], dest=root / f"oracle-{arm}" / "work" / ing
+            for actor, ingredient in zip(actors, remaining):
+                candidate_dir = variants_module(problem).make_candidate(
+                    [ingredient], dest=root / f"oracle-{arm}" / "work" / ingredient
                 )
-                env.submit(actor, d, predicted=b, target="baseline@0", direction=ing)
-            todo = []
-        while env.now() < 24 * H:
-            if todo:
-                k, bdir = env.base_for(actors[0])
-                ing = todo.pop(0)
-                actor = actors[(len(FIVE) - len(todo) - 1) % len(actors)]
-                d = root / f"oracle-{arm}" / "work" / f"{ing}@{k}"
-                import yaml
-
-                prm = yaml.safe_load((bdir / "params.yaml").read_text()) or {}
+                env.submit(
+                    actor,
+                    candidate_dir,
+                    predicted=baseline_score,
+                    target="baseline@0",
+                    direction=ingredient,
+                )
+            remaining = []
+        while env.now() < ORACLE_HOURS * HOUR_SECONDS:
+            if remaining:
+                base_k, base_dir = env.base_for(actors[0])
+                ingredient = remaining.pop(0)
+                actor = actors[(len(FIVE) - len(remaining) - 1) % len(actors)]
+                candidate_dir = (
+                    root / f"oracle-{arm}" / "work" / f"{ingredient}@{base_k}"
+                )
+                params_yaml = (
+                    yaml.safe_load((base_dir / "params.yaml").read_text()) or {}
+                )
                 if (
-                    "ingredients" not in prm
+                    "ingredients" not in params_yaml
                 ):  # baseline@0 is the production policy, not the switchable one
-                    _variants(prob).make_candidate([ing], dest=d)
+                    variants_module(problem).make_candidate(
+                        [ingredient], dest=candidate_dir
+                    )
                 else:
-                    shutil.copytree(bdir, d, dirs_exist_ok=True)
-                    prm["ingredients"][ing] = True
-                    (d / "params.yaml").write_text(yaml.safe_dump(prm))
+                    shutil.copytree(base_dir, candidate_dir, dirs_exist_ok=True)
+                    params_yaml["ingredients"][ingredient] = True
+                    (candidate_dir / "params.yaml").write_text(
+                        yaml.safe_dump(params_yaml)
+                    )
                 try:
                     env.submit(
-                        actor, d, predicted=b, target=f"baseline@{k}", direction=ing
+                        actor,
+                        candidate_dir,
+                        predicted=baseline_score,
+                        target=f"baseline@{base_k}",
+                        direction=ingredient,
                     )
                 except Exception:
-                    todo.insert(0, ing)
+                    remaining.insert(0, ingredient)
                 env.advance_to(env.now() + 900)
             else:
                 env.advance_to(env.now() + 1800)
-            v = env.integ.versions[-1]
-            if hit70 is None and v.score is not None and (v.score - b) / (r - b) >= 0.7:
-                hit70 = env.now() / H
-        v = env.integ.versions[-1]
-        cap = (v.score - b) / (r - b) if v.score is not None else float("nan")
+            version = env.integrator.versions[-1]
+            if (
+                hours_to_target is None
+                and version.score is not None
+                and (version.score - baseline_score)
+                / (reference_score - baseline_score)
+                >= CAPTURE_TARGET
+            ):
+                hours_to_target = env.now() / HOUR_SECONDS
+        version = env.integrator.versions[-1]
+        capture_fraction = (
+            (version.score - baseline_score) / (reference_score - baseline_score)
+            if version.score is not None
+            else float("nan")
+        )
         rows.append(
-            f"| {arm} | {n_workers} | {hit70 if hit70 is None else round(hit70, 1)} | {cap:.0%} | "
-            f"{env.integ.stats['merged']} | {env.integ.stats['remeasures']} |"
+            f"| {arm} | {worker_count} | "
+            f"{hours_to_target if hours_to_target is None else round(hours_to_target, 1)} | "
+            f"{capture_fraction:.0%} | "
+            f"{env.integrator.stats['merged']} | {env.integrator.stats['remeasures']} |"
         )
         env.close()
-    out(
+    emit(
         [
             "# oracle arms (every worker already knows one ingredient; reference implementations)",
             "",
-            f"slow tier with {n} seeds, 10-minute results, 2 per hour; integrator re-measures 1 per hour, 16 total",
+            f"slow tier with {seed_count} seeds, 10-minute results, 2 per hour; integrator re-measures 1 per hour, 16 total",
             "",
             "| arm | workers | hours to 70% capture | capture at 24 h | merges | integrator re-measures |",
             "| --- | --- | --- | --- | --- | --- |",
@@ -437,21 +582,21 @@ CHECKS = {
 }
 
 
-def main(a) -> int:
-    prob = load_problem(getattr(a, "problem", "sched"))
-    which = a.which or list(CHECKS)
+def main(arguments) -> int:
+    problem = load_problem(getattr(arguments, "problem", "sched"))
+    which = arguments.which or list(CHECKS)
     root = Path(tempfile.mkdtemp(prefix="tb-extras-"))
     OUT.mkdir(parents=True, exist_ok=True)
     status = 0
     for name in which:
-        buf = []
+        report_lines = []
 
-        def out(lines, _buf=buf):
-            _buf.extend(lines)
+        def emit(lines, report_lines=report_lines):
+            report_lines.extend(lines)
             print("\n".join(lines) + "\n", flush=True)
 
-        ok = CHECKS[name](prob, root, a.seeds, out)
-        (OUT / f"{name}.md").write_text("\n".join(buf) + "\n")
+        ok = CHECKS[name](problem, root, arguments.seeds, emit)
+        (OUT / f"{name}.md").write_text("\n".join(report_lines) + "\n")
         status |= 0 if ok else 1
     print(f"reports in {OUT}")
     return status
