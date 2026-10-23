@@ -112,7 +112,11 @@ class RemeasureReady(FrozenModel):
 
     It goes to the Integrator only; it never creates a follow-up task for a worker.
     As in ResultReady, score and paired are None when the run was void, and
-    constraint_ok False means the remeasure was refuted.
+    constraint_ok False means the remeasure was refuted. per_seed is the run's own
+    per-seed scores: result.json is written once per hash, so a second measurement
+    of the same content and target (a reverted baseline measured on the daily set
+    and then on the audit set) has no record of its own there. dataset says which
+    set the judge ran it on (D72).
     """
 
     request_id: str
@@ -124,6 +128,8 @@ class RemeasureReady(FrozenModel):
     score: float | None
     level: str
     constraint_ok: bool | None = None
+    per_seed: tuple[float, ...] = ()
+    dataset: Literal["dev", "audit"] = "dev"
 
 
 class Stopped(FrozenModel):
