@@ -138,10 +138,8 @@ def test_copilot_end_to_end(tmp_path: Path) -> None:
             task_queue=task_queue,
             leases=leases,
             executor=executor,
-            sessions=executor,
             harness=harness,
             tool_server=server,
-            registry=tools,
             context=ContextSources(
                 blackboard=blackboard, indexer=FakeIndexer(), arm=arm, params=params
             ),
