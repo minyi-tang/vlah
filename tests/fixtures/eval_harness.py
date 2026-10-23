@@ -13,7 +13,7 @@ from vlah.adapters.memory.signal_source import FAKE_SCORE_FILE_NAME, FakeSlowSou
 from vlah.arms.config import PRESETS, ArmConfig
 from vlah.core.blackboard.blackboard import StoreBlackboard
 from vlah.core.eval.api import EvalRequest, EvalRequestKind
-from vlah.core.eval.jobs import GateOutcome
+from vlah.core.eval.jobs import BaselineScores, GateOutcome
 from vlah.core.eval.service import LadderEvalService
 from vlah.core.indexer.api import Hit
 from vlah.core.types.candidates import CandidateManifest
@@ -151,6 +151,8 @@ def make_eval_harness(
     declarations: tuple[SourceDecl, ...] = (source_declaration("slow", 1.0, "10m"),),
     gates: tuple[GateSpec, ...] = (),
     blackboard: StoreBlackboard | None = None,
+    baseline_scores: BaselineScores = zero_baseline,
+    params: Params | None = None,
 ) -> EvalHarness:
     """A fresh eval client; over an existing blackboard, it is one restarted."""
     clock = FakeClock()
@@ -172,9 +174,9 @@ def make_eval_harness(
         budget=budget,
         gates=gates,
         gate_runner=scripted_gates,
-        baseline_scores=zero_baseline,
+        baseline_scores=baseline_scores,
         arm=arm,
-        params=Params(),
+        params=params if params is not None else Params(),
         clock=clock,
         random=Random(0),
     )

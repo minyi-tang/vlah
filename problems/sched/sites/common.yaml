@@ -1,0 +1,10 @@
+# Shared simulator settings (public). Times in seconds.
+horizon_s: 518400        # slow tier: 144 h of arrivals (tuned up from 48 h to cut per-seed variance; see testbed/DECISIONS.md)
+fast_horizon_s: 86400    # fast tier (tb fast): 24 h, deliberately noisier than the slow tier
+drain_cap_s: 86400       # after arrivals stop, run at most 24 h more; jobs still queued are censored there
+tick_s: 60               # scheduling pass every tick, plus on every arrival and completion
+hook_budget_s: 0.05      # CPU per hook call
+max_timeout_ratio: 0.01  # above this the whole evaluation is void
+cores_dist: {1: 0.50, 2: 0.25, 4: 0.15, 8: 0.10}
+est_noise_sigma: 0.3     # est_dur = true_dur * lognormal(0, 0.3)
+max_hook_calls_per_site: 5000000   # deterministic runaway guard; well above any sane policy at 144 h

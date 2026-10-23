@@ -60,12 +60,15 @@ class RemeasureRequest(FrozenModel):
 
     candidate_directory holds the candidate already rebased onto baseline; it is a new
     candidate, written by the Integrator, with parent_candidate as its lineage.
+    dataset is "dev" for a remeasure and "audit" for a spot check's fresh measurement
+    on the audit data (D72); the Integrator never sees judge data.
     """
 
     candidate_directory: Path
     baseline: str
     parent_candidate: str
     approach: str
+    dataset: Literal["dev", "audit"] = "dev"
 
 
 class EvalService(Protocol):

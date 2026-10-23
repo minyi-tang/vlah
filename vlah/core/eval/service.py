@@ -359,6 +359,7 @@ class LadderEvalService:
             claim_id=claim_id,
             predictions=new_job.predictions,
             levels=new_job.levels,
+            dataset=new_job.dataset,
         )
         with self.lock:
             self.jobs.append(job)
@@ -411,6 +412,7 @@ class LadderEvalService:
                 levels=(self.ladder[-1],),
                 parent_candidate=request.parent_candidate,
                 rationale=f"Integrator remeasure of {request.parent_candidate} on {request.baseline}.",
+                dataset=request.dataset,
             )
         )
         return job.request_id

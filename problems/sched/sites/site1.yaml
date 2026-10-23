@@ -1,0 +1,14 @@
+id: 1
+summary: >-
+  One big user submits 60% of the jobs, all short single-core ones (a CI-like user). The other
+  19 users submit long, mostly wide jobs (2-8 cores) that block a first-in-first-out queue.
+machines: 16
+cores_per_machine: 8
+racks: 1
+arrival: {kind: poisson, utilization: 0.75}
+duration: {kind: lognormal, mean_s: 2400, sigma_log: 0.5}     # the other users' jobs
+cores: {2: 0.3, 4: 0.3, 8: 0.4}                               # the other users' jobs
+users:
+  n: 20
+  big_user: {share: 0.6, duration: {kind: lognormal, mean_s: 1200, sigma_log: 0.4}, cores: {1: 1.0}}
+mechanisms: {}

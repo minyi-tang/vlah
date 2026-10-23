@@ -1,0 +1,10 @@
+id: 6
+summary: Ordinary site with whole-machine jobs; every job carries a duration estimate.
+machines: 16
+cores_per_machine: 8
+racks: 1
+arrival: {kind: poisson, utilization: 0.8}
+cores: {8: 1.0}
+duration: {kind: lognormal, mean_s: 1800, sigma_log: 0.8}
+users: {n: 20}
+mechanisms: {}
