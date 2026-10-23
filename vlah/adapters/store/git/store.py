@@ -32,6 +32,7 @@ IMPORT_REF = "refs/herd/import"
 TAMPERED_REF_PREFIX = "refs/tampered/"
 NO_COMMIT = "0" * 40
 EVENT_FILE_PATTERN = re.compile(r"events/(?!_seq/)[^/]+/[^/]+\.json")
+GIT_DIRECTORY_SEGMENT = ".git"
 SEQUENCE_POINTER_PREFIX = "events/_seq/"
 SEQUENCE_TRAILER = "Herd-Seq"
 AUTHOR_TRAILER = "Herd-Author"
@@ -88,11 +89,19 @@ def tree_clashes(
     }
 
 
+def unsafe_paths(paths: Iterable[str]) -> list[str]:
+    """Paths git refuses, or that would break the fast-import stream: control characters or a .git segment."""
+    return sorted(
+        path
+        for path in paths
+        if any(character < " " or character == "\x7f" for character in path)
+        or any(segment.lower() == GIT_DIRECTORY_SEGMENT for segment in path.split("/"))
+    )
+
+
 def fast_import_path(path: str) -> str:
     """A path as git fast-import expects it: quoted only when it has to be."""
-    if "\n" in path:
-        raise ValueError(f"paths cannot contain newlines: {path!r}")
-    elif path.startswith('"') or " " in path or "\\" in path:
+    if path.startswith('"') or " " in path or "\\" in path:
         escaped = path.replace("\\", "\\\\").replace('"', '\\"')
         return f'"{escaped}"'
     else:
@@ -230,6 +239,10 @@ class GitVersionedStore:
             raise PushRejectedError(f"commit by {author} has no push token")
         elif not files:
             raise ValueError("a commit needs at least one file")
+        elif rejected_paths := unsafe_paths(files):
+            raise ValueError(
+                f"git cannot hold {rejected_paths}: control characters and .git segments are not allowed"
+            )
         else:
             with self.lock:
                 self.commit_count += 1

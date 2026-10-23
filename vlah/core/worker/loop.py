@@ -51,40 +51,6 @@ NO_CLAIM_REASON = "the session ended without a claim (D4)"
 STOPPING_REASON = "the run is stopping"
 
 
-class TranscriptReader(Protocol):
-    def recent_tool_calls(self, transcript_path: Path, count: int) -> tuple[str, ...]:
-        """The last count tool calls in a transcript, one line each."""
-        ...
-
-    def rate_limit_retries(self, transcript_path: Path) -> int:
-        """How often the model API throttled the session (C7)."""
-        ...
-
-
-class WorkerHarness(Harness, TranscriptReader, Protocol):
-    pass
-
-
-class SessionFiles(Protocol):
-    """Where an executor keeps a task's sandbox and a session's transcript."""
-
-    def sandbox_path(self, agent: ActorId, task_id: str) -> Path: ...
-
-    def transcript_path(self, handle: Handle) -> Path: ...
-
-    def base_revision(self, agent: ActorId, task_id: str) -> str:
-        """What target/ started from, for the working-directory diff (D77)."""
-        ...
-
-
-class AgentRegistry(Protocol):
-    def register_agent(
-        self, agent: ActorId, sandbox_root: Path, task_id: str | None = None
-    ) -> str:
-        """Point eval_request paths at this task's sandbox; count early claims for it."""
-        ...
-
-
 class StartPackBuilder(Protocol):
     def __call__(
         self, agent: ActorId, task: Task, cursor: int
@@ -100,7 +66,11 @@ class StopSignal(Protocol):
 
 
 class InterruptInbox:
-    """Overdue hard interrupts per agent, posted by the runtime from Router.overdue."""
+    """Overdue hard interrupts per agent, posted by the runtime from Router.overdue.
+
+    The inbox knows agents, not tasks: the loop drops an interrupt written before
+    its current task started, so a late one never restarts the next task's session.
+    """
 
     def __init__(self) -> None:
         self.lock = threading.Lock()
@@ -124,10 +94,8 @@ class WorkerDeps:
     task_queue: TaskQueue
     leases: Leases
     executor: Executor
-    sessions: SessionFiles
-    harness: WorkerHarness
+    harness: Harness
     tool_server: ToolServer
-    registry: AgentRegistry
     context: ContextSources
     inbox: InterruptInbox
     workspace: Workspace
@@ -148,6 +116,8 @@ class TaskRun:
     task: Task
     start_pack: StartPack
     handle: Handle
+    # When the task's first session started; an interrupt written earlier is stale.
+    started_at_seconds: float
     context_restarts: int = 0
     over_threshold_since: float | None = None
     # The transcript the wrap-up clock refers to; a new one means a new process.
@@ -178,6 +148,7 @@ def run_task(agent: ActorId, task: Task, deps: WorkerDeps, cursor: int) -> int:
         start_pack, next_cursor = build_start_pack(agent, task, deps.context, cursor)
     else:
         start_pack, next_cursor = deps.start_packs(agent, task, cursor)
+    started_at_seconds = deps.clock.now_seconds()
     try:
         handle = start_session(agent, task, start_pack, deps)
     except Exception:
@@ -185,7 +156,13 @@ def run_task(agent: ActorId, task: Task, deps: WorkerDeps, cursor: int) -> int:
         deps.task_queue.requeue(task.id, "the session could not start")
         return next_cursor
     deps.leases.acquire(agent, task, handle.handle_id)
-    run = TaskRun(agent=agent, task=task, start_pack=start_pack, handle=handle)
+    run = TaskRun(
+        agent=agent,
+        task=task,
+        start_pack=start_pack,
+        handle=handle,
+        started_at_seconds=started_at_seconds,
+    )
     try:
         follow_sessions(run, deps)
     except BaseException:
@@ -207,8 +184,8 @@ def kill_quietly(run: TaskRun, deps: WorkerDeps) -> None:
 def start_session(
     agent: ActorId, task: Task, start_pack: StartPack, deps: WorkerDeps
 ) -> Handle:
-    deps.registry.register_agent(
-        agent, deps.sessions.sandbox_path(agent, task.id), task.id
+    deps.tool_server.register_agent(
+        agent, deps.executor.sandbox_path(agent, task.id), task.id
     )
     spec = deps.harness.build(
         agent,
@@ -239,7 +216,7 @@ def follow_sessions(run: TaskRun, deps: WorkerDeps) -> None:
             else:
                 return
         else:
-            interrupt = None if deps.stop.is_set() else deps.inbox.take(run.agent)
+            interrupt = None if deps.stop.is_set() else fresh_interrupt(run, deps)
             if interrupt is not None:
                 run.last_interrupt = interrupt
                 run.over_threshold_since = None
@@ -249,9 +226,23 @@ def follow_sessions(run: TaskRun, deps: WorkerDeps) -> None:
                 watch_context(run, deps)
 
 
+def fresh_interrupt(run: TaskRun, deps: WorkerDeps) -> Interrupt | None:
+    """The next overdue interrupt written since this task started; older ones are dropped."""
+    while True:
+        interrupt = deps.inbox.take(run.agent)
+        if interrupt is None:
+            return None
+        elif interrupt.written_ts < run.started_at_seconds:
+            logger.info(
+                f"{run.agent} drops interrupt {interrupt.id}: written before {run.task.id}"
+            )
+        else:
+            return interrupt
+
+
 def log_rate_limits(run: TaskRun, deps: WorkerDeps) -> None:
     """The 429 count per session, a standing diagnostic (section 13)."""
-    retries = deps.harness.rate_limit_retries(deps.sessions.transcript_path(run.handle))
+    retries = deps.harness.rate_limit_retries(deps.executor.transcript_path(run.handle))
     logger.info(
         f"{run.agent} session {run.handle.handle_id} on {run.task.id}: "
         f"{retries} rate-limit retries"
@@ -268,7 +259,7 @@ def should_restart(run: TaskRun) -> bool:
 
 def context_fraction(run: TaskRun, deps: WorkerDeps) -> float | None:
     """How full the current session's context is, or None before it has a transcript."""
-    transcript = deps.sessions.transcript_path(run.handle)
+    transcript = deps.executor.transcript_path(run.handle)
     if not transcript.is_file():
         return None
     elif transcript != run.watched_transcript:
@@ -316,7 +307,7 @@ def ended_near_the_limit(run: TaskRun, deps: WorkerDeps) -> bool:
 def restart_interrupt(run: TaskRun, deps: WorkerDeps) -> Interrupt | None:
     """The interrupt the replaced session was given, once: overdue ones the loop
     delivered itself, or the latest one the hook showed the agent (D77 part 3)."""
-    recorded = recorded_interrupts(deps.sessions.sandbox_path(run.agent, run.task.id))
+    recorded = recorded_interrupts(deps.executor.sandbox_path(run.agent, run.task.id))
     candidates = [*recorded, *([run.last_interrupt] if run.last_interrupt else [])]
     run.last_interrupt = None
     unseen = [
@@ -340,11 +331,11 @@ def context_restart_pack(run: TaskRun, deps: WorkerDeps) -> StartPack:
             claims=claim_texts(blackboard, run.agent, claim_ids),
             interrupt=restart_interrupt(run, deps),
             working_diff=working_directory_diff(
-                deps.sessions.sandbox_path(run.agent, run.task.id) / "target",
-                deps.sessions.base_revision(run.agent, run.task.id),
+                deps.executor.sandbox_path(run.agent, run.task.id) / "target",
+                deps.executor.base_revision(run.agent, run.task.id),
             ),
             tool_calls=deps.harness.recent_tool_calls(
-                deps.sessions.transcript_path(run.handle),
+                deps.executor.transcript_path(run.handle),
                 deps.context.params.restart_tool_call_count,
             ),
         ),
