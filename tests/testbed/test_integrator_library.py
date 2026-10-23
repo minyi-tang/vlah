@@ -111,7 +111,7 @@ def test_decisions_come_back_as_data_and_records_match_the_herd(tmp_path):
     assert core.current().score == -800.0
     for k in range(len(core.versions)):
         BaselineRecord.model_validate(
-            json.loads((core.workdir / "baseline" / f"{k}.json").read_text())
+            json.loads((core.wd / "baseline" / f"{k}.json").read_text())
         )
     assert (
         IntegratorConfig.from_json(IntegratorConfig().to_json()) == IntegratorConfig()
@@ -143,7 +143,7 @@ def test_find_culprit_and_revert_primitives(tmp_path):
     decisions = drain(core)
     assert any(decision["type"] == "baseline_reverted" for decision in decisions)
     BaselineRecord.model_validate(
-        json.loads((core.workdir / "baseline" / "4.json").read_text())
+        json.loads((core.wd / "baseline" / "4.json").read_text())
     )
 
 

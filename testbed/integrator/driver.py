@@ -107,8 +107,8 @@ class Integrator:
     task = property(lambda self: self.core.task)
     stats = property(lambda self: self.core.stats)
     frozen = property(lambda self: self.core.frozen)
-    cfg = property(lambda self: self.core.config)
-    wd = property(lambda self: self.core.workdir)
+    cfg = property(lambda self: self.core.cfg)
+    wd = property(lambda self: self.core.wd)
     merges_since_audit = property(lambda self: self.core.merges_since_audit)
 
     def poll_events(self):
@@ -132,7 +132,7 @@ class Integrator:
                 or result_data.get("score") is None
             ):
                 continue
-            payload_dir = self.core.workdir / "cands" / result_data["hash"]
+            payload_dir = self.core.wd / "cands" / result_data["hash"]
             if not payload_dir.exists():
                 unzip_to(
                     self.client.candidate(result_data["hash"])["zip_b64"], payload_dir

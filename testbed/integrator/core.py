@@ -173,14 +173,15 @@ class IntegratorCore:
         on_advance: Callable[[Version], None] | None = None,
     ):
         """calibration: baseline_slow and baseline_audit aggregates (per_seed, score, ci) and audit_sigma {dev, audit}."""
-        self.config = config
-        self.workdir = Path(workdir)
-        (self.workdir / "baseline").mkdir(parents=True, exist_ok=True)
+        # cfg, wd and revert(lo, hi, reason) are names the herd's CoreAdapter (vlah.core.integrator) relies on.
+        self.cfg = config
+        self.wd = Path(workdir)
+        (self.wd / "baseline").mkdir(parents=True, exist_ok=True)
         self.clock = clock
         self.measurer = measurer
         self.on_advance = on_advance
         self.audit_sigma = calibration.get("audit_sigma") or {"dev": 0.0, "audit": 0.0}
-        version0_dir = self.workdir / "baseline" / "0"
+        version0_dir = self.wd / "baseline" / "0"
         copy_tree(baseline_dir, version0_dir)
         baseline_slow = calibration["baseline_slow"]
         self.versions = [
@@ -230,10 +231,10 @@ class IntegratorCore:
         self.pending_decisions.append(dict(data, type=event_type))
 
     def write_version(self, version: Version):
-        (self.workdir / "baseline" / f"{version.k}.json").write_text(
+        (self.wd / "baseline" / f"{version.k}.json").write_text(
             json.dumps(version.record(), indent=1, default=str)
         )
-        (self.workdir / "baseline" / f"{version.k}.testbed.json").write_text(
+        (self.wd / "baseline" / f"{version.k}.testbed.json").write_text(
             json.dumps(asdict(version), indent=1, default=str)
         )
 
@@ -249,7 +250,7 @@ class IntegratorCore:
         if self.closed:
             return None
         if (
-            self.merges_since_audit >= self.config.audit_every
+            self.merges_since_audit >= self.cfg.audit_every
             and self.audits_left(periodic=True) > 0
         ):
             return "now"
@@ -270,7 +271,7 @@ class IntegratorCore:
                 getattr(self, "on_" + task["kind"])(task, measurement)
         elif not self.closed:
             if (
-                self.merges_since_audit >= self.config.audit_every
+                self.merges_since_audit >= self.cfg.audit_every
                 and self.audits_left(periodic=True) > 0
             ):
                 self.start_audit()
@@ -280,8 +281,8 @@ class IntegratorCore:
         return decisions
 
     def audits_left(self, periodic: bool) -> int:
-        left = self.config.audit_max - self.audits_used
-        return left - self.config.audit_reserve if periodic else left
+        left = self.cfg.audit_max - self.audits_used
+        return left - self.cfg.audit_reserve if periodic else left
 
     def submit(
         self,
@@ -338,7 +339,7 @@ class IntegratorCore:
                     "actor": candidate.actor,
                 },
             )
-        rebased_dir = self.workdir / "rebased" / f"{candidate.hash[:16]}@{self.k}"
+        rebased_dir = self.wd / "rebased" / f"{candidate.hash[:16]}@{self.k}"
         try:
             changed_files = three_way(
                 Path(self.versions[target_k].dir),
@@ -452,7 +453,7 @@ class IntegratorCore:
         )
         if paired_gain is not None and remeasured:
             paired_gain["n_reps"] = 1
-            interaction_threshold = self.config.interaction_k * math.sqrt(
+            interaction_threshold = self.cfg.interaction_k * math.sqrt(
                 earlier_paired["se"] ** 2 + paired_gain["se"] ** 2
             )
             if earlier_paired["mean"] - paired_gain["mean"] > interaction_threshold:
@@ -470,11 +471,11 @@ class IntegratorCore:
         if not measurement.constraint_ok or paired_gain is None:
             self.fail(candidate, "constraint", paired_gain=paired_gain)
             return
-        if not (paired_gain["mean"] > self.config.accept_se * paired_gain["se"]):
+        if not (paired_gain["mean"] > self.cfg.accept_se * paired_gain["se"]):
             self.fail(candidate, "below_1se", paired_gain=paired_gain)
             return
         next_k = self.k + 1
-        version_dir = self.workdir / "baseline" / str(next_k)
+        version_dir = self.wd / "baseline" / str(next_k)
         copy_tree(rebased_dir, version_dir)
         version = Version(
             next_k,
@@ -573,7 +574,7 @@ class IntegratorCore:
                 f"audit measurement of baseline@{version_k}",
             )
         except QuotaExhausted:
-            self.audits_used = self.config.audit_max
+            self.audits_used = self.cfg.audit_max
             return False
         self.audits_used += 1
         self.stats["audits"] += 1
@@ -593,7 +594,7 @@ class IntegratorCore:
         self.finish_audit(from_k, to_k, task.get("final", False))
 
     def threshold(self) -> float:
-        return self.config.audit_k * math.sqrt(
+        return self.cfg.audit_k * math.sqrt(
             self.audit_sigma.get("dev", 0.0) ** 2
             + self.audit_sigma.get("audit", 0.0) ** 2
         )
@@ -667,19 +668,19 @@ class IntegratorCore:
                 low_k = mid_k
         return high_k
 
-    def revert(self, low_k: int, high_k: int, reason: str) -> Version:
-        """Remove the merges that produced versions low_k+1..high_k and replay the later ones on top of low_k.
+    def revert(self, lo: int, hi: int, reason: str) -> Version:
+        """Remove the merges that produced versions lo+1..hi and replay the later ones on top of lo.
         Writes a new version (records are append-only) and quarantines the removed candidates.
         """
         top_k = self.k
         removed = [
             self.versions[i].added or self.versions[i].candidates[-1]
-            for i in range(low_k + 1, high_k + 1)
+            for i in range(lo + 1, hi + 1)
         ]
-        current_dir = self.workdir / "revert-tmp"
-        copy_tree(Path(self.versions[low_k].dir), current_dir)
-        for i in range(high_k + 1, top_k + 1):
-            next_dir = self.workdir / "revert-tmp2"
+        current_dir = self.wd / "revert-tmp"
+        copy_tree(Path(self.versions[lo].dir), current_dir)
+        for i in range(hi + 1, top_k + 1):
+            next_dir = self.wd / "revert-tmp2"
             try:
                 three_way(
                     Path(self.versions[i - 1].dir),
@@ -695,7 +696,7 @@ class IntegratorCore:
             shutil.rmtree(current_dir)
             next_dir.rename(current_dir)
         next_k = top_k + 1
-        version_dir = self.workdir / "baseline" / str(next_k)
+        version_dir = self.wd / "baseline" / str(next_k)
         copy_tree(current_dir, version_dir)
         shutil.rmtree(current_dir, ignore_errors=True)
         same_content_version = next(
@@ -752,7 +753,7 @@ class IntegratorCore:
                 "dev",
                 f"measure reverted baseline@{next_k}",
                 exempt=True,
-                predicted=self.versions[low_k].score or 0.0,
+                predicted=self.versions[lo].score or 0.0,
             )
             self.task = {
                 "kind": "revert_measure",
@@ -786,7 +787,7 @@ class IntegratorCore:
                 break
             decisions += self.step()
             if self.task is not None:
-                (wait or (lambda: time.sleep(self.config.poll_s)))()
+                (wait or (lambda: time.sleep(self.cfg.poll_s)))()
         for candidate in list(self.queue):
             self.fail(candidate, "run_ended")
         self.queue.clear()
@@ -797,7 +798,7 @@ class IntegratorCore:
                 decisions += self.step()
                 if self.task is None:
                     break
-                (wait or (lambda: time.sleep(self.config.poll_s)))()
+                (wait or (lambda: time.sleep(self.cfg.poll_s)))()
         version = self.versions[-1]
         if version.ticket is None:
             version.ticket = self.submit(
@@ -816,7 +817,7 @@ class IntegratorCore:
                         measurement.score,
                     )
                     break
-                (wait or (lambda: time.sleep(self.config.poll_s)))()
+                (wait or (lambda: time.sleep(self.cfg.poll_s)))()
             self.write_version(version)
         self.frozen = version
         self.emit(
