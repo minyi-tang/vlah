@@ -29,14 +29,14 @@ SEED_COUNT = 5
 
 
 def source_declaration(
-    source_id: str, cost: float, latency: str, n_for_ci: int = 1
+    source_id: str, cost: float, latency: str, n_for_ci: int = 1, per_day: int = 48
 ) -> SourceDecl:
     return SourceDecl.model_validate(
         {
             "id": source_id,
             "mode": "pull",
             "latency": latency,
-            "budget": SourceBudget(per_day=48, allocated_by="human"),
+            "budget": SourceBudget(per_day=per_day, allocated_by="human"),
             "cost_machine_hours": cost,
             "trust": 0.9,
             "readable_by": ["critic"],

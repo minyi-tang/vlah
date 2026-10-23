@@ -4,6 +4,9 @@ Three budgets:
 - each level's daily runs (budget.per_day);
 - each worker's daily runs at the cheaper levels (t1_per_worker_per_day);
 - the Integrator's own remeasure quota, a total and a per-hour cap.
+
+A submission is charged when it is sent, so the slot is held while the judge works,
+and refunded when the judge reports it answered from its cache (TB section 11.3).
 """
 
 from dataclasses import dataclass, field
@@ -58,13 +61,36 @@ class QuotaTracker:
         else:
             return True
 
-    def record(self, kind: RequestKind, caller: ActorId, level: SourceDecl) -> None:
-        now_seconds = self.clock.now_seconds()
+    def run_lists(
+        self, kind: RequestKind, caller: ActorId, level_id: str
+    ) -> list[list[float]]:
         if kind == "remeasure":
-            self.integrator_runs.append(now_seconds)
+            return [self.integrator_runs]
+        elif level_id != self.top_level_id:
+            return [
+                self.runs_by_level.setdefault(level_id, []),
+                self.cheap_runs_by_worker.setdefault(caller, []),
+            ]
         else:
-            self.runs_by_level.setdefault(level.id, []).append(now_seconds)
-            if level.id != self.top_level_id:
-                self.cheap_runs_by_worker.setdefault(caller, []).append(now_seconds)
-            else:
-                pass
+            return [self.runs_by_level.setdefault(level_id, [])]
+
+    def record(
+        self,
+        kind: RequestKind,
+        caller: ActorId,
+        level_id: str,
+        submitted_at_seconds: float,
+    ) -> None:
+        for run_times in self.run_lists(kind, caller, level_id):
+            run_times.append(submitted_at_seconds)
+
+    def refund(
+        self,
+        kind: RequestKind,
+        caller: ActorId,
+        level_id: str,
+        submitted_at_seconds: float,
+    ) -> None:
+        """Give back a submission the judge answered from its cache."""
+        for run_times in self.run_lists(kind, caller, level_id):
+            run_times.remove(submitted_at_seconds)

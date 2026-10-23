@@ -2,10 +2,14 @@
 
 Its own bookkeeping lives in memory; the blackboard is the record it can rebuild
 from (D13). Only finished worker results are rebuilt into the dedup table, so a
-candidate still in flight when the client stopped can be submitted again.
+candidate still in flight when the client stopped can be submitted again. The quota
+is rebuilt from every result.json: each level the judge ran is charged again at the
+time it was submitted. A resubmitted in-flight candidate comes back as a cache hit
+from a judge that caches, so it is not charged twice.
 """
 
 from vlah.core.blackboard.api import Blackboard
+from vlah.core.eval.quota import QuotaTracker
 from vlah.core.eval.records import EVAL_SERVICE, ResultFile
 from vlah.core.types.claims import parse_claim
 
@@ -55,3 +59,28 @@ def measured_claims_by_hash(blackboard: Blackboard) -> dict[str, str]:
             else:
                 pass
     return claims
+
+
+def replay_recorded_runs(blackboard: Blackboard, quota: QuotaTracker) -> None:
+    """Charge the quota for every judge run a result.json records, remeasures included.
+
+    A hash has one result.json, so a duplicate that ran again without dedup (B1) is
+    counted once, and a run after a judge failure not at all: the first result.json
+    has no entry for the failed level, and the rerun's is never written.
+    """
+    for path in blackboard.list_paths("candidates/", None):
+        # A payload file may be called result.json too; only the top-level one counts.
+        if path.split("/")[1:] != [path.split("/")[1], "result.json"]:
+            continue
+        else:
+            result = ResultFile.model_validate_json(blackboard.read(path, None))
+            claim_path = f"claims/{EVAL_SERVICE}/{result.claim_id}.md"
+            claim = parse_claim(blackboard.read(claim_path, None).decode("utf-8"))
+            kind = "remeasure" if REMEASURE_TAG in claim.tags else "worker"
+            for level in result.levels:
+                if level.is_cached:
+                    continue
+                else:
+                    quota.record(
+                        kind, result.submitter, level.level, level.submitted_at_seconds
+                    )

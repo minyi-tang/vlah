@@ -14,7 +14,7 @@ from vlah.core.blackboard.api import Blackboard, PublicProblemFiles
 from vlah.core.blackboard.blackboard import StoreBlackboard
 from vlah.core.types.clock import SystemClock
 from vlah.core.types.ids import ActorId
-from vlah.ports.store import VersionedStore
+from vlah.ports.store import ObjectStore, VersionedStore
 
 PROBLEM_AUTHOR = ActorId("human")
 NEVER_PUBLIC_NAMES = ("herd.yaml",)
@@ -36,11 +36,14 @@ class GitMirrorStoreFactory:
         return store, push_token
 
 
-def open_blackboard(root: Path, run_id: str, name: str) -> Blackboard:
+def open_blackboard(
+    root: Path, run_id: str, name: str, *, objects: ObjectStore | None = None
+) -> Blackboard:
     """A git-backed blackboard at <root>/<run_id>/<name>.git.
 
     The push token is generated here and kept in memory: the herd writes through git
-    plumbing, so no process outside this one ever needs it.
+    plumbing, so no process outside this one ever needs it. Without an object store,
+    object:// and private:// evidence never resolves.
     """
     run_directory = root / run_id
     push_token = secrets.token_hex(16)
@@ -49,7 +52,7 @@ def open_blackboard(root: Path, run_id: str, name: str) -> Blackboard:
             repository_path=run_directory / f"{name}.git", push_token=push_token
         ),
         push_token=push_token,
-        objects=None,
+        objects=objects,
         mirror_store_factory=GitMirrorStoreFactory(
             run_directory=run_directory, blackboard_name=name
         ),

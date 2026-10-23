@@ -8,7 +8,12 @@ import pytest
 
 from vlah.adapters.memory.store import MemoryObjectStore, MemoryVersionedStore
 from vlah.adapters.store.git.store import GitVersionedStore, MainMovedError
-from vlah.core.blackboard.api import Blackboard, MergedCommit, PublicProblemFiles
+from vlah.core.blackboard.api import (
+    Blackboard,
+    MergedCommit,
+    OpenBlackboard,
+    PublicProblemFiles,
+)
 from vlah.core.blackboard.blackboard import StoreBlackboard
 from vlah.core.blackboard.layout import init_layout, open_blackboard
 from vlah.core.types.claims import Claim, EvidenceRef, render_claim
@@ -22,6 +27,8 @@ pytestmark = pytest.mark.blackboard
 
 WORKER = ActorId("worker-07")
 PUSH_TOKEN = "test-token"
+# pyright checks that the objects keyword keeps the frozen OpenBlackboard protocol.
+OPEN_BLACKBOARD: OpenBlackboard = open_blackboard
 
 
 def claim_file(
@@ -499,3 +506,90 @@ def test_a_raising_listener_skips_only_itself() -> None:
         "merged"
     )
     assert "events/worker-07/00003.json" in mirrored
+
+
+def test_a_worker_cannot_cite_private_evidence_or_probe_for_it() -> None:
+    """A worker's claim citing private:// used to be looked up, so the rejection told whether the key exists (D63)."""
+    objects = MemoryObjectStore()
+    existing_pointer = objects.put("judge/seeds", b"hidden", True)
+    missing_pointer = "private://judge/missing"
+    blackboard = memory_blackboard(objects)
+    receipts = [
+        blackboard.write(
+            WORKER, dict([claim_file(WORKER, 1, EvidenceRef(trace=pointer))]), "cite"
+        )
+        for pointer in (existing_pointer, missing_pointer)
+    ]
+    assert {receipt.status for receipt in receipts} == {"rejected"}
+    assert {
+        violation.rule for receipt in receipts for violation in receipt.violations
+    } == {"path_not_allowed"}
+    assert receipts[0].violations == receipts[1].violations
+    assert blackboard.list_paths("", None) == ()
+    critic = ActorId("critic-1")
+    cited = blackboard.write(
+        critic, dict([claim_file(critic, 1, EvidenceRef(trace=existing_pointer))]), "x"
+    )
+    assert cited.status == "merged", cited.violations
+    dangling = blackboard.write(
+        critic, dict([claim_file(critic, 2, EvidenceRef(trace=missing_pointer))]), "x"
+    )
+    assert [violation.rule for violation in dangling.violations] == [
+        "dangling_evidence"
+    ]
+
+
+ODD_PATHS = (
+    f"claims/{WORKER}/free.txt",
+    f"claims/{WORKER}/sub/c-worker-07-00001.md",
+    f"events/{WORKER}/sub/00001.json",
+    "candidates/abc/candidate/.GIT/config",
+    f"traces/{WORKER}/a\x01b",
+    f"traces/{WORKER}/a\nb",
+)
+
+
+@pytest.mark.parametrize("use_git", [False, True], ids=["memory", "git"])
+def test_odd_paths_are_rejected_before_anything_is_committed(
+    tmp_path: Path, use_git: bool
+) -> None:
+    """Claim and event files outside their checked shape used to merge unchecked, and a
+    .git segment or a control character used to crash inside git after the commit
+    counter was bumped."""
+    blackboard = git_blackboard(tmp_path) if use_git else memory_blackboard()
+    for path in ODD_PATHS:
+        receipt = blackboard.write(WORKER, {path: b"x"}, "odd")
+        assert receipt.status == "rejected", path
+        assert {violation.rule for violation in receipt.violations} == {
+            "path_not_allowed"
+        }, path
+    assert blackboard.list_paths("", None) == ()
+    receipt = blackboard.write(WORKER, {f"traces/{WORKER}/t-1.ptr": b"x"}, "good")
+    assert receipt.commit_id == "blackboard-000001"
+
+
+def test_git_store_refuses_paths_git_cannot_hold_before_touching_git(
+    tmp_path: Path,
+) -> None:
+    store = GitVersionedStore(
+        repository_path=tmp_path / "bb.git", push_token=PUSH_TOKEN
+    )
+    for path in ("a/.git/config", "a/b\x01c", "a/b\nc"):
+        with pytest.raises(ValueError, match="git cannot hold"):
+            store.commit("w", {path: b"x"}, WORKER, "odd", PUSH_TOKEN)
+    assert store.commit("w", {"a/b": b"x"}, WORKER, "good", PUSH_TOKEN) == "bb-000001"
+    store.merge("w")
+    assert store.list_paths("", None) == ("a/b",)
+
+
+def test_open_blackboard_resolves_archived_evidence_through_its_object_store(
+    tmp_path: Path,
+) -> None:
+    """open_blackboard used to pass objects=None, so object:// evidence never resolved on git."""
+    objects = MemoryObjectStore()
+    trace_pointer = objects.put("traces/worker-07/t-1", b"trace", False)
+    blackboard = open_blackboard(tmp_path, "run-1", "blackboard", objects=objects)
+    receipt = blackboard.write(
+        WORKER, dict([claim_file(WORKER, 1, EvidenceRef(trace=trace_pointer))]), "cite"
+    )
+    assert receipt.status == "merged", receipt.violations

@@ -6,6 +6,7 @@ can move a fake clock while real ones sleep.
 """
 
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Protocol
 
 from vlah.core.types.ids import ActorId
@@ -223,12 +224,21 @@ class ExecutorCheckInputs:
 def check_executor(
     executor: Executor, inputs: ExecutorCheckInputs, timer: CheckTimer
 ) -> None:
-    """Heartbeats come from the executor, even when the agent is silent (D32, D60)."""
+    """Heartbeats come from the executor, even when the agent is silent (D32, D60);
+    a task keeps one sandbox and each session has a transcript the loop can find."""
     sink = RecordingHeartbeatSink()
+    agent = inputs.long_running_spec.agent
+    sandbox = executor.sandbox_path(agent, inputs.task.id)
     long_handle = executor.start(
         inputs.long_running_spec, inputs.task, inputs.start_pack, sink
     )
     assert executor.is_alive(long_handle)
+    assert (
+        executor.sandbox_path(agent, inputs.task.id) == sandbox
+    ), "a task keeps one sandbox across its sessions"
+    assert executor.base_revision(
+        agent, inputs.task.id
+    ), "the working-directory diff needs a base revision (D77)"
     timer.wait_seconds(3.5 * inputs.heartbeat_interval_seconds)
     beats_for_agent = [beat for beat in sink.beats if beat[0] == long_handle.agent]
     assert (
@@ -243,8 +253,14 @@ def check_executor(
     quick_handle = executor.start(
         inputs.quick_spec, inputs.task, inputs.start_pack, sink
     )
+    assert executor.transcript_path(quick_handle) != executor.transcript_path(
+        long_handle
+    ), "each session has its own transcript"
     quick_exit = executor.wait(quick_handle, 5 * inputs.heartbeat_interval_seconds)
     assert quick_exit is not None and quick_exit.return_code == 0
+    # The loop reads usage and retries once the session has ended; the path may
+    # be a later process's when the executor restarted the session itself.
+    assert executor.transcript_path(quick_handle).name
     try:
         executor.checkpoint(quick_handle)
     except NotSupportedError:
@@ -256,7 +272,10 @@ def check_executor(
 def check_signal_source(
     source: SignalSource, candidate: CandidateRef, actor: ActorId, timer: CheckTimer
 ) -> None:
-    """Results stay hidden until the declared latency has passed, and always carry n."""
+    """Results stay hidden until the declared latency has passed, and always carry n.
+
+    A first submission is a run, never a cache hit; only a repeat may be one.
+    """
     job_id = source.submit(candidate, actor, "baseline@0", "dev")
     latency_seconds = source.declaration.latency_seconds
     if latency_seconds > 0:
@@ -267,16 +286,20 @@ def check_signal_source(
     result = source.poll(job_id)
     assert result is not None, "a result is visible after the declared latency"
     assert result.n >= 1
+    assert not result.is_cached, "a first submission is a run, not a cache hit"
 
 
 @dataclass(frozen=True, kw_only=True)
 class HarnessCheckInputs:
+    """transcript_path is an empty file in the harness's own transcript format."""
+
     agent: ActorId
     task: Task
     start_pack: StartPack
     tool_endpoint: ToolEndpoint
     hook_config: HookConfig
     workspace: Workspace
+    transcript_path: Path
 
 
 def check_harness(harness: Harness, inputs: HarnessCheckInputs) -> None:
@@ -292,6 +315,11 @@ def check_harness(harness: Harness, inputs: HarnessCheckInputs) -> None:
     assert spec.command, "an agent spec needs a command"
     assert spec.target_repository == inputs.workspace.target_repository
     assert spec.blackboard_clone_url == inputs.workspace.blackboard_clone_url
+    assert harness.recent_tool_calls(inputs.transcript_path, 0) == ()
+    assert (
+        harness.recent_tool_calls(inputs.transcript_path, 5) == ()
+    ), "an empty transcript has no tool calls"
+    assert harness.rate_limit_retries(inputs.transcript_path) == 0
     if not harness.supports_checkpoint:
         try:
             harness.import_state(b"")
