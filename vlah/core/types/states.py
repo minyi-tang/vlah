@@ -83,12 +83,15 @@ TRANSITION_RULES: tuple[TransitionRule, ...] = (
         roles=frozenset({"critic"}),
     ),
     # A worker confirms a dead end by reproducing it; whether that worker is
-    # independent of the author is checked by the indexer, not here.
+    # independent of the author is checked by the indexer, not here. The eval
+    # service confirms the dead ends its gates write: a gate failure is checked
+    # by a machine, and D54 wants it in the pre-submit search, which D26 limits
+    # to confirmed dead ends.
     TransitionRule(
         subject="dead_end",
         from_kinds=frozenset({"proposed"}),
         to_kind="confirmed",
-        roles=frozenset({"critic", "worker"}),
+        roles=frozenset({"critic", "worker", "eval_service"}),
     ),
     TransitionRule(
         subject="dead_end",

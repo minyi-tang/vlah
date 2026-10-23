@@ -45,6 +45,19 @@ All contracts are frozen. They change only in a contract-only PR labelled `contr
 | `vlah/adapters/executor/sandbox/api.py` | W1-12 #22 |
 | `vlah/core/problem/api.py` | W1-13 #23 |
 
+## What the worker loop asks its adapters
+
+These methods exist so that the loop in `vlah/core/worker/loop.py` can run on the ports alone (D61: a capability the loop needs is a port field, never a protocol of its own):
+
+| Method | Port | What it answers |
+|---|---|---|
+| `recent_tool_calls(transcript_path, count)` | `Harness` | the last `count` tool calls, one line each, for the D77 restart pack |
+| `rate_limit_retries(transcript_path)` | `Harness` | how often the model API throttled the session (C7) |
+| `sandbox_path(agent, task_id)` | `Executor` | where the task's sandbox is; the loop registers it with the tool server |
+| `transcript_path(handle)` | `Executor` | where the session's current process writes the transcript the harness reads; still answered after the session ends |
+| `base_revision(agent, task_id)` | `Executor` | what `target/` started from, for the working-directory diff (D77) |
+| `register_agent(agent, sandbox_root, task_id)` | `ToolServer` | the agent's bearer token; `eval_request` paths resolve in that sandbox and earlier claims count for that task |
+
 ## Files people write
 
 ### charter/params.yaml
@@ -177,3 +190,4 @@ The layout and a test vector are posted on #10. `tests/contract/test_candidate_h
   - `[proposed]` items are gap-fills, recorded in `DECISIONS.md` when they are implemented.
 - **Time is epoch seconds** from an injected `Clock`. Randomness is a seeded `random.Random` passed in by the runtime.
 - **Names follow [coding_style.md](coding_style.md).** Wire-schema names from the spec stay as they are (`seq`, `ts`, `n_items`, `n_reps`, `from`).
+- **A judge may answer a repeat from its cache.** A `SignalSource` that did not run a resubmitted candidate returns its `ScoreResult` with `is_cached: true` (the testbed's `duplicate: true`, TB§11.3); a first submission is always a run. The eval client charges neither quota nor budget for a cache hit, and `n_reps` leaves it out (D73). The fake judge in `vlah/adapters/memory/signal_source.py` caches by actor, candidate hash and dataset.

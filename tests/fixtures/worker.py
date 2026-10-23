@@ -16,6 +16,7 @@ from vlah.adapters.memory.executor import (
     MemoryExecutor,
     ScriptedHarness,
     ScriptedProgram,
+    ScriptedSession,
 )
 from vlah.arms.config import ArmConfig
 from vlah.core.blackboard.blackboard import StoreBlackboard
@@ -29,10 +30,10 @@ from vlah.core.worker.loop import InterruptInbox, WorkerDeps
 from vlah.core.worker.start_pack import ContextSources
 from vlah.ports.executor import AgentSpec, Handle, StartPack
 from vlah.ports.harness import ContextUsage, HookConfig, ToolEndpoint, Workspace
+from vlah.tools.herd_tools import HerdTools
 
 WORKER = ActorId("worker-01")
 WINDOW_TOKENS = 200_000
-TRANSCRIPT_VARIABLE = "TEST_TRANSCRIPT"
 TASK = Task(
     id="t-00001",
     approach="a-01",
@@ -67,6 +68,12 @@ def assistant_line(context_tokens: int, tool_name: str | None = None) -> str:
         }
     )
     return "".join(json.dumps(event) + "\n" for event in events)
+
+
+def transcript_of(session: ScriptedSession) -> Path:
+    """The transcript the executor named for this session, ready to be written."""
+    session.transcript_path.parent.mkdir(parents=True, exist_ok=True)
+    return session.transcript_path
 
 
 def rate_limit_line() -> str:
@@ -127,9 +134,24 @@ class DiffingIndexer(FakeIndexer):
 
 @dataclass(kw_only=True)
 class FakeToolServer:
+    """Records registrations; with tools set, the real HerdTools gets them too."""
+
     claims: dict[tuple[ActorId, str], list[str]] = field(
         default_factory=dict[tuple[ActorId, str], list[str]]
     )
+    registered: list[tuple[ActorId, Path, str | None]] = field(
+        default_factory=list[tuple[ActorId, Path, str | None]]
+    )
+    tools: HerdTools | None = None
+
+    def register_agent(
+        self, agent: ActorId, sandbox_root: Path, task_id: str | None = None
+    ) -> str:
+        self.registered.append((agent, sandbox_root, task_id))
+        if self.tools is None:
+            return f"token-{agent}"
+        else:
+            return self.tools.register_agent(agent, sandbox_root, task_id)
 
     def endpoint_for(self, agent: ActorId) -> ToolEndpoint:
         return ToolEndpoint(url="memory://tools/mcp", bearer_token=f"token-{agent}")
@@ -148,24 +170,10 @@ class FakeToolServer:
 
 
 @dataclass(kw_only=True)
-class RecordingRegistry:
-    registered: list[tuple[ActorId, Path, str | None]] = field(
-        default_factory=list[tuple[ActorId, Path, str | None]]
-    )
-
-    def register_agent(
-        self, agent: ActorId, sandbox_root: Path, task_id: str | None = None
-    ) -> str:
-        self.registered.append((agent, sandbox_root, task_id))
-        return f"token-{agent}"
-
-
-@dataclass(kw_only=True)
 class TranscriptHarness:
-    """ScriptedHarness that gives each session a transcript file, read as Claude Code's."""
+    """ScriptedHarness whose transcripts are read in Copilot's format."""
 
     scripted: ScriptedHarness
-    root: Path
     built: list[StartPack] = field(default_factory=list[StartPack])
 
     @property
@@ -186,12 +194,8 @@ class TranscriptHarness:
         workspace: Workspace,
     ) -> AgentSpec:
         self.built.append(start_pack)
-        spec = self.scripted.build(
+        return self.scripted.build(
             agent, task, start_pack, tool_endpoint, hook_config, workspace
-        )
-        transcript = self.root / f"transcript-{len(self.built)}.jsonl"
-        return spec.model_copy(
-            update={"env": {**spec.env, TRANSCRIPT_VARIABLE: str(transcript)}}
         )
 
     def usage(self, transcript_path: Path) -> ContextUsage:
@@ -214,22 +218,6 @@ class TranscriptHarness:
 
 
 @dataclass(frozen=True, kw_only=True)
-class MemorySessionFiles:
-    executor: MemoryExecutor
-    root: Path
-
-    def sandbox_path(self, agent: ActorId, task_id: str) -> Path:
-        return self.root / "sandboxes" / agent / task_id
-
-    def transcript_path(self, handle: Handle) -> Path:
-        spec = self.executor.processes[handle.handle_id].spec
-        return Path(spec.env[TRANSCRIPT_VARIABLE])
-
-    def base_revision(self, agent: ActorId, task_id: str) -> str:
-        return "main"
-
-
-@dataclass(frozen=True, kw_only=True)
 class WorkerHarness:
     deps: WorkerDeps
     blackboard: StoreBlackboard
@@ -238,7 +226,6 @@ class WorkerHarness:
     leases: StrictLeases
     tool_server: FakeToolServer
     harness: TranscriptHarness
-    registry: RecordingRegistry
     inbox: InterruptInbox
     clock: FakeClock
     stop: Event
@@ -276,24 +263,22 @@ def make_worker_harness(
         clock=clock,
         programs=programs,
         heartbeat_interval_seconds=effective_params.heartbeat_interval_seconds,
+        sandbox_root=tmp_path / "sandboxes",
     )
     task_queue = RecordingTaskQueue()
     leases = StrictLeases(clock=clock)
     tool_server = FakeToolServer()
     harness = TranscriptHarness(
-        scripted=ScriptedHarness(default_program=default_program), root=tmp_path
+        scripted=ScriptedHarness(default_program=default_program)
     )
-    registry = RecordingRegistry()
     inbox = InterruptInbox()
     stop = Event()
     deps = WorkerDeps(
         task_queue=task_queue,
         leases=leases,
         executor=executor,
-        sessions=MemorySessionFiles(executor=executor, root=tmp_path),
         harness=harness,
         tool_server=tool_server,
-        registry=registry,
         context=ContextSources(
             blackboard=blackboard,
             indexer=DiffingIndexer(),
@@ -317,7 +302,6 @@ def make_worker_harness(
         leases=leases,
         tool_server=tool_server,
         harness=harness,
-        registry=registry,
         inbox=inbox,
         clock=clock,
         stop=stop,

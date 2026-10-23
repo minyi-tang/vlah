@@ -23,6 +23,7 @@ from tests.fixtures.runtime import (
     result_ready_event,
     toy_problem,
 )
+from tests.fixtures.worker import FakeToolServer
 from vlah.adapters.memory.signal_source import FAKE_SCORE_FILE_NAME, FakeSlowSource
 from vlah.adapters.memory.store import MemoryKeyValueStore
 from vlah.arms.config import PRESETS, ArmName
@@ -30,30 +31,41 @@ from vlah.core.eval.api import EvalRequest, RemeasureRequest
 from vlah.core.eval.service import LadderEvalService
 from vlah.core.queue.queue import KeyValueTaskQueue
 from vlah.core.types.candidates import CandidateManifest
+from vlah.core.types.claims import Claim, EvidenceRef, render_claim
 from vlah.core.types.clock import FakeClock
 from vlah.core.types.events import RemeasureReady, ResultReady
 from vlah.core.types.ids import ActorId
 from vlah.core.types.sources import SourceDecl
 from vlah.runtime.assembly import RunComponents, RunContext
 from vlah.runtime.compose import COMPOSE_AGENT
-from vlah.runtime.herd import RunFanout, build_herd, events_on, top_level_source
+from vlah.runtime.herd import (
+    LocalHerd,
+    RunFanout,
+    build_herd,
+    events_on,
+    top_level_source,
+)
 from vlah.tools.herd_tools import HerdTools
 
 pytestmark = pytest.mark.runtime
 
 WORKER = ActorId("worker-01")
 JUDGE_SECONDS = 700.0
+EARLIER_CLAIM_ID = "c-worker-01-00001"
 
 
 def built_components(
-    tmp_path: Path, clock: FakeClock, sources: tuple[SourceDecl, ...] = (TOY_SOURCE,)
+    tmp_path: Path,
+    clock: FakeClock,
+    sources: tuple[SourceDecl, ...] = (TOY_SOURCE,),
+    arm: ArmName = "S2",
 ) -> tuple[RunContext, RunComponents]:
     """One run's components without a herd around them, so a test subscribes its own fan-out."""
     problem = dataclasses.replace(toy_problem(tmp_path), sources=sources)
     context = RunContext(
         run_id="r-1",
         run_root=tmp_path / "r-1",
-        arm=PRESETS["S2"],
+        arm=PRESETS[arm],
         params=problem.params,
         problem=problem,
         clock=clock,
@@ -85,11 +97,14 @@ def with_real_eval(
     return dataclasses.replace(components, eval_service=eval_service), eval_service
 
 
-def write_candidate(directory: Path, author: ActorId, score: float) -> Path:
+def write_candidate(
+    directory: Path, author: ActorId, score: float, constraint_ok: bool = True
+) -> Path:
     directory.mkdir(parents=True)
     (directory / "policy.py").write_text(f"SCORE = {score}\n", encoding="utf-8")
     (directory / FAKE_SCORE_FILE_NAME).write_text(
-        json.dumps({"per_seed": [score] * 5}), encoding="utf-8"
+        json.dumps({"per_seed": [score] * 5, "constraint_ok": constraint_ok}),
+        encoding="utf-8",
     )
     manifest = CandidateManifest(
         kind="artifact",
@@ -247,10 +262,10 @@ def test_the_compose_slot_gets_the_same_tools_in_every_arm(
     ).prepare()
     components = run.components
     (compose,) = [slot for slot in run.supervisor.slots if slot.is_compose]
-    assert compose.deps.registry is components.compose_registry
     assert compose.deps.tool_server is components.compose_tool_server
-    assert compose.deps.registry is not components.registry
-    tools = compose.deps.registry
+    assert compose.deps.tool_server is not components.tool_server
+    assert isinstance(compose.deps.tool_server, FakeToolServer)
+    tools = compose.deps.tool_server.tools
     assert isinstance(tools, HerdTools)
     assert tools.arm.arm == arm, "the recorder still attributes the run to its arm"
     assert tools.arm.diff_since == "off" and not tools.arm.failure_refresh
@@ -260,6 +275,91 @@ def test_the_compose_slot_gets_the_same_tools_in_every_arm(
         COMPOSE_AGENT, "composed", {TOY_SOURCE.id: 1.0}, "a and b", (), None, None
     )
     assert reply.diff is None, "no sync-point diff for compose, whatever the arm"
+    run.supervisor.finish()
+
+
+def test_judge_runs_count_only_the_runs_the_judge_made(tmp_path: Path) -> None:
+    """judge_runs counted every eval-service claim_status event, so a judge cache hit
+    and a dead end's confirmation each counted as a judge run."""
+    clock = FakeClock()
+    context, components = built_components(tmp_path, clock, arm="B1")
+    components, eval_service = with_real_eval(context, components)
+    fanout = RunFanout(components=components, top_level=TOY_SOURCE.id)
+    components.blackboard.subscribe(fanout)
+    for name, score, constraint_ok in (
+        ("first", 2.0, True),
+        ("repeat", 2.0, True),
+        ("constraint", 2.0, False),
+    ):
+        response = eval_service.request(
+            EvalRequest(
+                candidate_directory=write_candidate(
+                    tmp_path / name, WORKER, score, constraint_ok
+                ),
+                predictions={TOY_SOURCE.id: score},
+                rationale=name,
+            ),
+            WORKER,
+        )
+        assert response.status == "queued", name
+    measure_everything(clock, eval_service, levels=1)
+    statuses = [
+        event.to
+        for event in events_on(components.blackboard)
+        if event.type == "claim_status"
+    ]
+    assert statuses.count("confirmed") == 1, "the constraint dead end is confirmed"
+    assert statuses.count(f"verified:{TOY_SOURCE.id}") == 2, "one is a cache hit"
+    assert fanout.judge_runs == 2
+
+
+def test_a_restarted_runtime_rebuilds_the_indexer(tmp_path: Path) -> None:
+    """A fresh indexer only ever saw apply, so after a process restart every earlier
+    claim was unknown and search and diffs started empty (D13)."""
+
+    @dataclasses.dataclass
+    class RestartedAssembly:
+        """Builds a run whose blackboard already holds an earlier process's claim."""
+
+        inner: MemoryAssembly
+
+        def build(self, context: RunContext) -> RunComponents:
+            components = self.inner.build(context)
+            claim = Claim(
+                id=EARLIER_CLAIM_ID,
+                type="insight",
+                status="proposed",
+                approach=TOY_APPROACH,
+                author=WORKER,
+                evidence=(EvidenceRef(path="spec.md"),),
+                body="written before the restart",
+            )
+            components.blackboard.write(
+                WORKER,
+                {f"claims/{WORKER}/{claim.id}.md": render_claim(claim).encode()},
+                "earlier",
+            )
+            return components
+
+    clock = FakeClock()
+    problem = toy_problem(tmp_path)
+    run = LocalHerd(
+        context=RunContext(
+            run_id="r-1",
+            run_root=tmp_path / "r-1",
+            arm=PRESETS["S2"],
+            params=problem.params,
+            problem=problem,
+            clock=clock,
+            random=random_for_tests(),
+            duration_seconds=60.0,
+        ),
+        assembly=RestartedAssembly(inner=MemoryAssembly(clock=clock, root=tmp_path)),
+        worker_count=1,
+        runner=WaitingRunner(),
+        poll_seconds=1.0,
+    ).prepare()
+    assert run.components.indexer.claim_state(EARLIER_CLAIM_ID).status == "proposed"
     run.supervisor.finish()
 
 

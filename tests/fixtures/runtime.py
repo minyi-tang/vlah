@@ -13,12 +13,7 @@ from random import Random
 from tests.fixtures.fakes import FakeLeases, FakeRouter, RecordingBudget
 from tests.fixtures.herd import TOY_APPROACH, TOY_SOURCE, make_store_blackboard
 from tests.fixtures.tools import RecordingRecorder, ScriptedEval
-from tests.fixtures.worker import (
-    FakeToolServer,
-    MemorySessionFiles,
-    RecordingTaskQueue,
-    TranscriptHarness,
-)
+from tests.fixtures.worker import FakeToolServer, RecordingTaskQueue, TranscriptHarness
 from vlah.adapters.memory.executor import MemoryExecutor, ScriptedHarness
 from vlah.adapters.memory.model import MemoryModel
 from vlah.adapters.memory.store import MemoryKeyValueStore, MemoryVectorIndex
@@ -213,6 +208,7 @@ class MemoryAssembly:
             clock=self.clock,
             programs={},
             heartbeat_interval_seconds=context.params.heartbeat_interval_seconds,
+            sandbox_root=context.run_root / "sandboxes",
         )
         eval_service = ScriptedEval()
         tools, compose_tools = (
@@ -244,14 +240,9 @@ class MemoryAssembly:
             stop_rules=ScriptedStopRules(),
             metrics=ZeroMetrics(),
             executor=executor,
-            sessions=MemorySessionFiles(executor=executor, root=context.run_root),
-            harness=TranscriptHarness(
-                scripted=ScriptedHarness(default_program="none"), root=context.run_root
-            ),
-            tool_server=FakeToolServer(),
-            registry=tools,
-            compose_tool_server=FakeToolServer(),
-            compose_registry=compose_tools,
+            harness=TranscriptHarness(scripted=ScriptedHarness(default_program="none")),
+            tool_server=FakeToolServer(tools=tools),
+            compose_tool_server=FakeToolServer(tools=compose_tools),
             target_repository="memory://target",
             target_ref="main",
         )

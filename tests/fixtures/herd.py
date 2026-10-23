@@ -260,6 +260,7 @@ def make_toy_herd(
             clock=clock,
             programs=programs,
             heartbeat_interval_seconds=params.heartbeat_interval_seconds,
+            sandbox_root=tmp_path / "sandboxes",
         ),
         harness=ScriptedHarness(default_program="toy"),
         components=components,

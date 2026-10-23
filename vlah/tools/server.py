@@ -8,6 +8,7 @@ is a 409.
 """
 
 from dataclasses import dataclass
+from pathlib import Path
 
 import uvicorn
 from mcp.server.auth.middleware.auth_context import get_access_token
@@ -188,6 +189,11 @@ class McpToolServer:
         return self.server.streamable_http_app(
             streamable_http_path=MCP_PATH, host=self.host
         )
+
+    def register_agent(
+        self, agent: ActorId, sandbox_root: Path, task_id: str | None = None
+    ) -> str:
+        return self.tools.register_agent(agent, sandbox_root, task_id)
 
     def endpoint_for(self, agent: ActorId) -> ToolEndpoint:
         return ToolEndpoint(

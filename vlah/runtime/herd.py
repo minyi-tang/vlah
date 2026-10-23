@@ -2,8 +2,10 @@
 
 build_herd fixes everything a run is made of: one RunContext (run id and root,
 ArmConfig, the problem's Params, clock), the components the assembly builds from it,
-and one worker slot per worker plus the compose slot. start subscribes the merge
-fan-out, starts the supervisor thread, and returns the Run.
+and one worker slot per worker plus the compose slot. prepare rebuilds the Indexer
+from the blackboard once, so a restarted process knows every earlier claim (D13),
+then subscribes the merge fan-out; start starts the supervisor thread and returns
+the Run.
 
 The merge fan-out, on every merged commit:
 - feeds the Indexer and the Router;
@@ -12,14 +14,18 @@ The merge fan-out, on every merged commit:
   submitter is the compose slot and in the arm queue otherwise (D74);
 - hands a result claim to the Integrator when a claim_status event moves it to
   verified at the top level of the judge ladder, unless the claim is one of the
-  Integrator's own remeasures, which the eval service tags "remeasure".
+  Integrator's own remeasures, which the eval service tags "remeasure";
+- counts judge runs from each finished candidate's result.json, each candidate
+  hash once: one per level the judge ran itself, so a cache hit (a repeat of a
+  hash already counted) and a dead-end confirmation do not count.
 It runs on the writing thread, so it never calls the executor.
 """
 
+import json
 import logging
 import threading
 from collections.abc import Iterator
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from random import Random
 
@@ -30,7 +36,7 @@ from vlah.core.problem.api import LoadProblem, Problem
 from vlah.core.types.baseline import BaselineRecord
 from vlah.core.types.claims import parse_claim
 from vlah.core.types.clock import Clock
-from vlah.core.types.events import Event, ResultReady, event_from_json
+from vlah.core.types.events import Event, RemeasureReady, ResultReady, event_from_json
 from vlah.core.types.ids import ActorId
 from vlah.core.types.sources import SourceDecl
 from vlah.core.worker.loop import InterruptInbox, WorkerDeps, run_worker
@@ -70,6 +76,22 @@ def top_level_source(sources: tuple[SourceDecl, ...]) -> str | None:
         return ladder[-1].id
 
 
+def judge_runs_in(blackboard: Blackboard, candidate_hash: str) -> int:
+    """The levels of candidates/<hash>/result.json the judge ran itself: a level
+    answered from the judge's cache is not a run (DECISIONS: judge cache hits)."""
+    path = f"candidates/{candidate_hash}/result.json"
+    if path not in blackboard.list_paths(path, None):
+        return 0
+    else:
+        result: object = json.loads(blackboard.read(path, None))
+        levels = result.get("levels", []) if isinstance(result, dict) else []
+        return sum(
+            1
+            for level in levels
+            if isinstance(level, dict) and not level.get("is_cached", False)
+        )
+
+
 def is_remeasure_claim(blackboard: Blackboard, claim_id: str) -> bool:
     path = f"claims/{EVAL_SERVICE}/{claim_id}.md"
     if path not in blackboard.list_paths(path, None):
@@ -83,15 +105,23 @@ def is_remeasure_claim(blackboard: Blackboard, claim_id: str) -> bool:
 class RunFanout:
     components: RunComponents
     top_level: str | None
-    # One per measured judge level, so status() never re-reads the blackboard.
+    # Summed as candidates finish, so status() never re-reads the blackboard.
     judge_runs: int = 0
+    counted_hashes: set[str] = field(default_factory=set[str])
 
     def __call__(self, merged_commit: MergedCommit) -> None:
         self.components.indexer.apply(merged_commit)
         self.components.router.on_commit(merged_commit)
         for event in merged_commit.events:
-            if event.type == "claim_status" and event.actor == EVAL_SERVICE:
-                self.judge_runs += 1
+            finished = event.data
+            if (
+                isinstance(finished, (ResultReady, RemeasureReady))
+                and finished.candidate not in self.counted_hashes
+            ):
+                self.counted_hashes.add(finished.candidate)
+                self.judge_runs += judge_runs_in(
+                    self.components.blackboard, finished.candidate
+                )
             else:
                 pass
             if event.type == "result_ready":
@@ -245,13 +275,9 @@ class LocalHerd:
             ),
             leases=components.leases,
             executor=components.executor,
-            sessions=components.sessions,
             harness=components.harness,
             tool_server=(
                 components.compose_tool_server if is_compose else components.tool_server
-            ),
-            registry=(
-                components.compose_registry if is_compose else components.registry
             ),
             context=ContextSources(
                 blackboard=components.blackboard,
@@ -282,6 +308,8 @@ class LocalHerd:
             components=components,
             top_level=top_level_source(context.problem.sources),
         )
+        # A fresh Indexer knows nothing merged before this process started.
+        components.indexer.rebuild()
         components.blackboard.subscribe(fanout)
         inbox = InterruptInbox()
         stop_signal = threading.Event()

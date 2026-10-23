@@ -9,20 +9,25 @@ from pathlib import Path
 import pytest
 
 from tests.fixtures.eval_harness import WORKER, make_eval_harness, source_declaration
+from vlah.adapters.memory.model import MemoryModel
 from vlah.adapters.memory.signal_source import FakeSlowSource
+from vlah.adapters.memory.store import MemoryVectorIndex
 from vlah.arms.config import PRESETS
 from vlah.core.eval.api import RemeasureRequest
 from vlah.core.eval.jobs import GateOutcome
 from vlah.core.indexer.api import Hit
+from vlah.core.indexer.indexer import StoreIndexer
+from vlah.core.types.candidates import payload_text
 from vlah.core.types.events import RemeasureReady, ResultReady
 from vlah.core.types.ids import ActorId
-from vlah.core.types.params import GateSpec
+from vlah.core.types.params import GateSpec, GateStage, Params
 from vlah.core.types.sources import ScoreResult, SourceDecl
 from vlah.ports.errors import JudgeBusyError
 from vlah.ports.signal_source import CandidateRef, Dataset
 
 pytestmark = pytest.mark.eval
 
+OTHER = ActorId("worker-08")
 CHEAP = source_declaration("cheap", 0.1, "2m")
 EXPENSIVE = source_declaration("expensive", 10.0, "6h")
 
@@ -105,18 +110,38 @@ def test_a_confirm_token_works_once_and_only_for_its_caller(tmp_path: Path) -> N
 
 
 def test_b1_runs_duplicates_and_asks_nothing(tmp_path: Path) -> None:
-    """B1 has no sharing: duplicates really run and are billed (D58)."""
+    """B1 has no sharing: another worker's duplicate really runs and is billed (D58)."""
     harness = make_eval_harness(tmp_path, arm=PRESETS["B1"])
     harness.indexer.candidate_hits = (
         Hit(item_id="c-old", kind="candidate", similarity=0.99, summary="same"),
     )
     directory = harness.candidate(1.0)
     first = harness.service.request(harness.request(directory), WORKER)
-    second = harness.service.request(harness.request(directory), WORKER)
+    second = harness.service.request(harness.request(directory), OTHER)
     assert (first.status, second.status) == ("queued", "queued")
     harness.run(seconds=3600)
     assert len(harness.sources[0].jobs) == 2
     assert len(harness.budget.records) == 2
+
+
+def test_a_cache_hit_costs_neither_quota_nor_budget(tmp_path: Path) -> None:
+    """The judge answered a repeat from its cache, so no run was spent (TB section 11.3)."""
+    harness = make_eval_harness(
+        tmp_path,
+        arm=PRESETS["B1"],
+        declarations=(source_declaration("slow", 1.0, "10m", per_day=2),),
+    )
+    directory = harness.candidate(1.0)
+    harness.service.request(harness.request(directory), WORKER)
+    harness.service.request(harness.request(directory), WORKER)
+    harness.run(seconds=3600)
+    assert len(harness.budget.records) == 1, "the repeat was not run"
+    third = harness.service.request(harness.request(harness.candidate(2.0)), WORKER)
+    events = harness.run(seconds=3600)
+    assert any(
+        event.type == "result_ready" and event.target == third.claim_id
+        for event in events
+    ), "the refunded slot lets a third candidate run the same day"
 
 
 def test_the_worker_is_the_actor_and_the_bytes_are_unchanged(tmp_path: Path) -> None:
@@ -181,6 +206,38 @@ def test_constraint_failure_refutes_and_records_a_dead_end(tmp_path: Path) -> No
     assert any(
         b"gate:constraint" in harness.blackboard.read(path, None) for path in dead_ends
     )
+
+
+@pytest.mark.parametrize("stage", ["pre_submit", "post_result"])
+def test_a_gate_dead_end_is_confirmed_so_the_presearch_warns_about_it(
+    tmp_path: Path, stage: GateStage
+) -> None:
+    """D54 wants gate failures in the pre-submit search, which covers confirmed dead ends only (D26)."""
+    harness = make_eval_harness(
+        tmp_path, gates=(GateSpec(name="unit_tests", command="pytest", when=(stage,)),)
+    )
+    harness.gates.failing.add("unit_tests")
+    directory = harness.candidate(1.0)
+    harness.service.request(harness.request(directory), WORKER)
+    harness.run(seconds=3600)
+    indexer = StoreIndexer(
+        blackboard=harness.blackboard,
+        vectors=MemoryVectorIndex(),
+        model=MemoryModel(),
+        params=Params(),
+        clock=harness.clock,
+        top_level="slow",
+    )
+    indexer.rebuild()
+    (confirmation,) = [
+        event
+        for event in harness.events_on_blackboard()
+        if event.type == "claim_status" and event.to == "confirmed"
+    ]
+    assert confirmation.actor == "eval_service" and confirmation.target is not None
+    assert indexer.claim_state(confirmation.target).status == "confirmed"
+    hits = indexer.similar_dead_ends(payload_text(directory), 5, OTHER)
+    assert [hit.item_id for hit in hits] == [confirmation.target]
 
 
 def test_remeasure_runs_once_at_the_top_level_for_the_integrator(

@@ -1,6 +1,7 @@
 """What the Copilot harness asks Copilot CLI to do, its runner, and how it reads usage."""
 
 import json
+import logging
 import os
 import subprocess
 import sys
@@ -23,7 +24,7 @@ from vlah.adapters.harness.copilot.harness import (
     CopilotHarness,
 )
 from vlah.adapters.harness.copilot.runner import session_id_for
-from vlah.core.types.params import Params
+from vlah.core.types.params import EgressPolicy, HostRule, Params
 from vlah.ports.errors import NotSupportedError
 from vlah.ports.executor import Handle, StartPack
 from vlah.ports.harness import HookConfig, ToolEndpoint, Workspace
@@ -35,7 +36,7 @@ CONFIG = CopilotConfig(
     model="model-from-herd-yaml",
     reasoning_effort="max",
     python_executable="/venv/bin/python",
-    allowed_urls=("http://127.0.0.1:8200",),
+    allowed_urls=("http://127.0.0.1:8200", "docs.example.com"),
     environment={"SOME_PASSTHROUGH": "yes"},
 )
 ENDPOINT = ToolEndpoint(url="http://127.0.0.1:8100/mcp", bearer_token="agent-token")
@@ -55,7 +56,9 @@ def harness(config: CopilotConfig = CONFIG) -> CopilotHarness:
     return CopilotHarness(config=config, params=Params())
 
 
-def test_passes_the_harness_check() -> None:
+def test_passes_the_harness_check(tmp_path: Path) -> None:
+    transcript = tmp_path / "transcript.jsonl"
+    transcript.write_text("")
     check_harness(
         harness(),
         HarnessCheckInputs(
@@ -65,6 +68,7 @@ def test_passes_the_harness_check() -> None:
             tool_endpoint=ENDPOINT,
             hook_config=HOOKS,
             workspace=WORKSPACE,
+            transcript_path=transcript,
         ),
     )
     with pytest.raises(NotSupportedError):
@@ -116,6 +120,48 @@ def test_build_runs_copilot_with_the_herd_server_and_the_hook() -> None:
     assert "herd-repo_write" in spec.env["VLAH_WRAP_UP_TOOLS"].split(",")
     assert spec.env["SOME_PASSTHROUGH"] == "yes"
     assert spec.files["CONTEXT.md"] == START_PACK.files["CONTEXT.md"]
+
+
+def test_build_allows_the_herd_the_testbed_and_copilot_hosts_only() -> None:
+    """The hook endpoints share the tool server, so they do not repeat it; a tool
+    server on a non-default port keeps that port (D75, #56 H5)."""
+    spec = harness().build(WORKER, TASK, START_PACK, ENDPOINT, HOOKS, WORKSPACE)
+    assert spec.egress == EgressPolicy(
+        allow=(
+            HostRule(host="127.0.0.1", ports=(8100,), purpose="tools"),
+            HostRule(host="127.0.0.1", ports=(8200,), purpose="testbed"),
+            HostRule(host="docs.example.com", ports=(443,), purpose="testbed"),
+            HostRule(host="api.github.com", ports=(443,), purpose="model_api"),
+            HostRule(host="*.githubcopilot.com", ports=(443,), purpose="model_api"),
+        )
+    )
+
+
+def usage_record_line(model: str) -> str:
+    usage = {"model": model, "inputTokens": 10, "maxPromptTokens": WINDOW_TOKENS}
+    return json.dumps({"type": "session.usage_record", "data": {"usage": usage}}) + "\n"
+
+
+def test_a_model_other_than_the_configured_one_is_logged_once(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """An account setting can override --model (DECISIONS: gpt-6.1-sol); P10 wants
+    the mismatch visible, and the loop polls usage() every few seconds."""
+    transcript = tmp_path / "events.jsonl"
+    transcript.write_text(usage_record_line("model-from-herd-yaml"))
+    copilot = harness()
+    with caplog.at_level(logging.WARNING, logger="vlah.adapters.harness"):
+        copilot.usage(transcript)
+        assert copilot.models_used(transcript) == ("model-from-herd-yaml",)
+        assert caplog.records == []
+        with transcript.open("a") as lines:
+            lines.write(usage_record_line("gpt-6.1-sol"))
+        copilot.usage(transcript)
+        copilot.usage(transcript)
+    assert copilot.models_used(transcript) == ("model-from-herd-yaml", "gpt-6.1-sol")
+    (warning,) = caplog.records
+    assert "gpt-6.1-sol" in warning.getMessage()
+    assert "model-from-herd-yaml" in warning.getMessage()
 
 
 def test_usage_comes_from_the_latest_usage_record(tmp_path: Path) -> None:

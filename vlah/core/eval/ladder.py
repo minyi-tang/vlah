@@ -13,6 +13,10 @@ A level ends one of three ways:
 A transient judge error (a network failure, a 5xx, a status call that failed) is
 retried with exponential backoff and jitter; a ValueError from the judge, such as
 a refused submission, is permanent.
+
+Quota is charged when a level is submitted and given back when the judge says it
+answered from its cache; the budget's machine hours are charged when a result
+arrives, and only for a run the judge made (TB section 11.3, D73).
 """
 
 import logging
@@ -149,13 +153,10 @@ class LadderRunner:
                 manifest=manifest,
             )
             job.job_id = level.submit(candidate, job.caller, job.baseline, "dev")
+            job.submitted_at_seconds = self.clock.now_seconds()
             job.error_count = 0
-            self.quota.record(job.kind, job.caller, level.declaration)
-            self.budget.record(
-                role_of_actor(job.caller),
-                job.approach,
-                level.declaration.id,
-                level.declaration.cost_machine_hours,
+            self.quota.record(
+                job.kind, job.caller, level.declaration.id, job.submitted_at_seconds
             )
 
     def level_end(self, job: EvalJob, score: ScoreResult) -> LevelEnd | None:
@@ -178,7 +179,9 @@ class LadderRunner:
                 )
                 return None
             else:
-                paired = pair_per_seed(score.per_seed, baseline_per_seed, 1)
+                paired = pair_per_seed(
+                    score.per_seed, baseline_per_seed, 0 if score.is_cached else 1
+                )
                 if score.constraint_ok is False:
                     failure: tuple[str, str] | None = (
                         CONSTRAINT_GATE,
@@ -197,14 +200,35 @@ class LadderRunner:
         if end is None:
             return []
         else:
+            assert job.submitted_at_seconds is not None
+            if score.is_cached:
+                self.quota.refund(
+                    job.kind,
+                    job.caller,
+                    level.declaration.id,
+                    job.submitted_at_seconds,
+                )
+            else:
+                self.budget.record(
+                    role_of_actor(job.caller),
+                    job.approach,
+                    level.declaration.id,
+                    level.declaration.cost_machine_hours,
+                )
+            events: list[Event] = []
             if end.failure is not None:
                 new_status = "refuted"
-                self.records.write_gate_dead_end(
-                    job.approach, job.candidate_hash, end.failure[0], end.failure[1]
+                events.append(
+                    self.records.write_gate_dead_end(
+                        job.approach,
+                        job.candidate_hash,
+                        end.failure[0],
+                        end.failure[1],
+                    )
                 )
             else:
                 new_status = f"verified:{level.declaration.id}"
-            events = [
+            events.append(
                 self.records.write_event(
                     "claim_status",
                     target=job.claim_id,
@@ -212,7 +236,7 @@ class LadderRunner:
                     to_status=new_status,
                     source=level.declaration.id,
                 )
-            ]
+            )
             job.status = new_status
             predicted = job.predictions.get(level.declaration.id)
             job.level_results.append(
@@ -230,10 +254,13 @@ class LadderRunner:
                     ),
                     constraint_ok=score.constraint_ok,
                     status=new_status,
+                    submitted_at_seconds=job.submitted_at_seconds,
+                    is_cached=score.is_cached,
                 )
             )
             job.held_score = None
             job.job_id = None
+            job.submitted_at_seconds = None
             is_last_level = job.level_index == len(job.levels) - 1
             if (
                 end.failure is None
@@ -280,6 +307,7 @@ class LadderRunner:
             ResultFile(
                 candidate=job.candidate_hash,
                 claim_id=job.claim_id,
+                submitter=job.caller,
                 baseline=job.baseline,
                 levels=tuple(job.level_results),
             )

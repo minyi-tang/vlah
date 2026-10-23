@@ -26,7 +26,7 @@ EVAL_SERVICE = ActorId("eval_service")
 
 
 class LevelResult(FrozenModel):
-    """One level of result.json."""
+    """One level of result.json; submitted_at_seconds and is_cached rebuild the quota."""
 
     level: str
     score: float | None
@@ -37,6 +37,8 @@ class LevelResult(FrozenModel):
     prediction_error: float | None
     constraint_ok: bool | None
     status: str
+    submitted_at_seconds: float
+    is_cached: bool
 
 
 class ResultFile(FrozenModel):
@@ -44,6 +46,7 @@ class ResultFile(FrozenModel):
 
     candidate: str
     claim_id: str
+    submitter: ActorId
     baseline: str
     levels: tuple[LevelResult, ...]
 
@@ -151,14 +154,25 @@ class EvalRecords:
 
     def write_gate_dead_end(
         self, approach: str, hash_value: str, gate_name: str, output: str
-    ) -> None:
-        """A failed gate is never a score; it becomes a dead end others are warned about (D54)."""
-        self.write_claim(
+    ) -> Event:
+        """A failed gate is never a score; it becomes a dead end others are warned about (D54).
+
+        The pre-submit search covers confirmed dead ends only (D26), and a gate's
+        verdict needs no second worker to reproduce it, so the eval service confirms
+        the dead end as soon as it writes it.
+        """
+        claim_id = self.write_claim(
             "dead_end",
             approach,
             EvidenceRef(path=f"candidates/{hash_value}/manifest.yaml"),
             f"Gate {gate_name} failed for candidate {hash_value}.\n\n{output}",
             tags=(f"gate:{gate_name}",),
+        )
+        return self.write_event(
+            "claim_status",
+            target=claim_id,
+            from_status="proposed",
+            to_status="confirmed",
         )
 
     def write_event(

@@ -39,6 +39,7 @@ from vlah.core.eval.api import (
 from vlah.core.eval.history import (
     REMEASURE_TAG,
     measured_claims_by_hash,
+    replay_recorded_runs,
     stored_level_score,
 )
 from vlah.core.eval.jobs import (
@@ -100,13 +101,13 @@ class LadderEvalService:
             )
         self.blackboard = blackboard
         self.records = EvalRecords(blackboard=blackboard, clock=clock)
+        quota = QuotaTracker(
+            clock=clock, params=params, top_level_id=self.ladder[-1].declaration.id
+        )
+        replay_recorded_runs(blackboard, quota)
         self.runner = LadderRunner(
             records=self.records,
-            quota=QuotaTracker(
-                clock=clock,
-                params=params,
-                top_level_id=self.ladder[-1].declaration.id,
-            ),
+            quota=quota,
             budget=budget,
             gates=gates,
             gate_runner=gate_runner,

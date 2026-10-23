@@ -58,6 +58,7 @@ class EvalJob:
     levels: tuple[SignalSource, ...]
     level_index: int = 0
     job_id: str | None = None
+    submitted_at_seconds: float | None = None
     retry_at_seconds: float = 0.0
     # Transient judge errors since the last successful call (retried with backoff).
     error_count: int = 0

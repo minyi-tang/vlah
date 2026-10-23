@@ -3,8 +3,10 @@
 Copilot persists every session's events to $COPILOT_HOME/session-state/<id>/events.jsonl.
 Its stdout stream (--output-format json) carries no token counts, so the runner
 mirrors the persisted file instead. The events used here:
-- session.usage_record: one per model call, with usage.inputTokens (cache reads and
-  writes included) and usage.maxPromptTokens, the model's context window;
+- session.usage_record: one per model call, with usage.model, the model that call
+  ran on (an administrator setting can override --model, which Copilot records as
+  session.model_change with source managed_settings), usage.inputTokens (cache
+  reads and writes included) and usage.maxPromptTokens, the model's context window;
 - tool.execution_start: toolName and arguments of each tool call;
 - session.error with errorType "rate_limit", and assistant.turn_retry: throttling;
 - session.compaction_start: Copilot compacted the conversation itself.
@@ -74,6 +76,22 @@ def latest_context(transcript_path: Path) -> ContextReading:
         else:
             continue
     return reading
+
+
+def models(transcript_path: Path) -> tuple[str, ...]:
+    """Every model a call ran on so far, in order of first use (P10)."""
+    models: dict[str, None] = {}
+    for record in records(transcript_path):
+        usage = event_data(record).get("usage")
+        if record.get("type") == "session.usage_record" and isinstance(usage, dict):
+            model = usage.get("model")
+            if isinstance(model, str) and model:
+                models[model] = None
+            else:
+                continue
+        else:
+            continue
+    return tuple(models)
 
 
 def context_fraction(

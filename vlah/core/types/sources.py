@@ -69,7 +69,12 @@ class PerItemScore(FrozenModel):
 
 
 class ScoreResult(FrozenModel):
-    """What a judge returns for one candidate; value is None when the run was void."""
+    """What a judge returns for one candidate; value is None when the run was void.
+
+    is_cached is True when the judge answered from its cache instead of running the
+    candidate (Herd Testbed section 11.3, duplicate): such a result cost no judge run,
+    so the eval client charges neither quota nor budget for it and n_reps leaves it out.
+    """
 
     value: float | None
     n: int = Field(ge=1)
@@ -78,6 +83,7 @@ class ScoreResult(FrozenModel):
     per_seed: tuple[float, ...] = ()
     constraint_ok: bool | None = None
     extra: dict[str, JsonValue] = {}
+    is_cached: bool = False
 
 
 class Paired(FrozenModel):
