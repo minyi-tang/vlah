@@ -286,6 +286,10 @@ class StoreIndexer:
 
     # Queries
 
+    def head_sequence(self) -> int:
+        with self.lock:
+            return self.state.head
+
     def claim_state(self, claim_id: str) -> ClaimState:
         with self.lock:
             return self.state.claim_state(claim_id)
