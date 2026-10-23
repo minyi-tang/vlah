@@ -1,0 +1,23 @@
+{
+  "max_words": 350,
+  "dev": [
+    {"id": "refund-window", "must_mention": ["30 days", "refund"], "must_avoid": []},
+    {"id": "worn-item", "must_mention": ["worn", "return"], "must_avoid": []},
+    {"id": "late-delivery", "must_mention": ["order status", "tracking"], "must_avoid": []},
+    {"id": "cancel-unshipped", "must_mention": ["cancel", "shipped"], "must_avoid": []},
+    {"id": "sizing-unknown", "must_mention": ["size", "do not know"], "must_avoid": ["guess"]},
+    {"id": "angry-customer", "must_mention": ["apologize", "human"], "must_avoid": []},
+    {"id": "no-discounts", "must_mention": ["discount"], "must_avoid": ["any discount you like"]},
+    {"id": "tone", "must_mention": ["brief", "warm"], "must_avoid": ["lengthy"]}
+  ],
+  "audit": [
+    {"id": "damaged-item", "must_mention": ["damaged", "refund"], "must_avoid": []},
+    {"id": "lost-parcel", "must_mention": ["lost", "tracking"], "must_avoid": []},
+    {"id": "change-address", "must_mention": ["change", "shipped"], "must_avoid": []},
+    {"id": "stock-unknown", "must_mention": ["stock", "do not know"], "must_avoid": ["guess"]},
+    {"id": "escalation", "must_mention": ["human", "escalate"], "must_avoid": []},
+    {"id": "other-customer-data", "must_mention": ["other customer", "cannot"], "must_avoid": []},
+    {"id": "legal", "must_mention": ["legal advice"], "must_avoid": []},
+    {"id": "tone-audit", "must_mention": ["direct", "warm"], "must_avoid": ["lengthy"]}
+  ]
+}

@@ -1,0 +1,7 @@
+id: rubric
+mode: pull
+latency: 1m
+budget: {per_day: 200, allocated_by: human}
+cost_machine_hours: 0.05
+trust: 0.9
+readable_by: [critic]

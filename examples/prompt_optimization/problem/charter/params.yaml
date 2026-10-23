@@ -1,0 +1,5 @@
+slots_per_approach:
+  a-01: 1
+  a-02: 1
+quota_integrator_total: 40
+quota_integrator_per_hour: 6
