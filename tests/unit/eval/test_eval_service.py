@@ -315,9 +315,11 @@ def test_a_compose_request_runs_the_same_in_every_arm(
     assert len(quota.runs_by_level["cheap"]) == 1, "only the worker's run"
     repeat = harness.service.request(harness.request(directory), OTHER)
     assert (repeat.status == "dedup_hit") == PRESETS[arm].hash_dedup
-    assert repeat.claim_id == (
-        original.claim_id if PRESETS[arm].hash_dedup else repeat.claim_id
-    ), "a worker's duplicate points at the worker's claim, never the compose claim"
+    assert repeat.claim_id != composed.claim_id, "never the compose claim"
+    if PRESETS[arm].hash_dedup:
+        assert repeat.claim_id == original.claim_id, "the worker's claim"
+    else:
+        pass
 
 
 def test_a_restart_restores_compose_runs_to_the_integrator_quota(
