@@ -50,6 +50,7 @@ SCHEMA: dict[str, list[str]] = {
     "quarantined": ["candidate", "reason"],
     "integrator_frozen": ["baseline", "ticket", "hash"],
     "stale_target": ["candidate", "claimed", "effective"],
+    "unsafe_no_sandbox": ["actor", "reason"],
     # service housekeeping
     "anomaly": ["ticket", "score", "reference_score"],
     "run_end": [],
