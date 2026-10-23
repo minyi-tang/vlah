@@ -147,7 +147,7 @@ def candidate_zip(candidate: CandidateRef, actor: ActorId, baseline: str) -> byt
     return archive_bytes.getvalue()
 
 
-def score_from_aggregate(aggregate: SlowTierAggregate) -> ScoreResult:
+def score_from_aggregate(aggregate: SlowTierAggregate, is_cached: bool) -> ScoreResult:
     """A run with a failed seed is void: no score, and its constraints are not met."""
     seeds = [seed for seed in aggregate.per_seed if seed is not None]
     if aggregate.score is None or len(seeds) != len(aggregate.per_seed):
@@ -156,6 +156,7 @@ def score_from_aggregate(aggregate: SlowTierAggregate) -> ScoreResult:
             n=max(aggregate.n, 1),
             constraint_ok=False,
             extra=aggregate.extra,
+            is_cached=is_cached,
         )
     else:
         low, high = aggregate.ci if aggregate.ci is not None else (None, None)
@@ -167,16 +168,22 @@ def score_from_aggregate(aggregate: SlowTierAggregate) -> ScoreResult:
             per_seed=tuple(seeds),
             constraint_ok=aggregate.constraint_ok,
             extra=aggregate.extra,
+            is_cached=is_cached,
         )
 
 
 class SlowTierSource:
-    """The slow tier as a pull judge; it reports 429s as JudgeBusyError and holds no quota."""
+    """The slow tier as a pull judge; it reports 429s as JudgeBusyError and holds no quota.
+
+    A duplicate ticket (the testbed already had this hash) is a cache hit: its result
+    says is_cached, so the eval client charges nothing for it.
+    """
 
     def __init__(self, *, client: SlowTierClient, declaration: SourceDecl) -> None:
         self.client = client
         self.source_declaration = declaration
         self.actor_by_ticket: dict[str, ActorId] = {}
+        self.cached_tickets: set[str] = set()
 
     @property
     def declaration(self) -> SourceDecl:
@@ -192,9 +199,13 @@ class SlowTierSource:
             "POST", "/submit", {"zip_b64": zip_text, "dataset": dataset}
         )
         if reply.status == 200:
-            ticket = SubmitReply.model_validate(reply.body).ticket
-            self.actor_by_ticket[ticket] = actor
-            return ticket
+            submit_reply = SubmitReply.model_validate(reply.body)
+            self.actor_by_ticket[submit_reply.ticket] = actor
+            if submit_reply.duplicate:
+                self.cached_tickets.add(submit_reply.ticket)
+            else:
+                pass
+            return submit_reply.ticket
         elif reply.status == 429 and isinstance(reply.body, dict):
             retry_at: object = reply.body.get("next_slot_at")
             if isinstance(retry_at, int | float):
@@ -223,7 +234,9 @@ class SlowTierSource:
         else:
             status = StatusReply.model_validate(reply.body)
             if status.state == "done" and status.result is not None:
-                return score_from_aggregate(status.result)
+                return score_from_aggregate(
+                    status.result, job_id in self.cached_tickets
+                )
             elif status.state == "failed":
                 # The testbed's own infrastructure failed; the candidate is not judged.
                 error = status.result.extra.get("error") if status.result else None

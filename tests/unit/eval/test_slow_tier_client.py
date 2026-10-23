@@ -52,6 +52,7 @@ class FakeSlowTierState:
     submissions_left: int = 100
     next_slot_at: float | None = 3600.0
     tickets: dict[str, float] = field(default_factory=dict[str, float])
+    ticket_by_archive: dict[bytes, str] = field(default_factory=dict[bytes, str])
     archives: list[bytes] = field(default_factory=list[bytes])
     run_headers: list[str] = field(default_factory=list[str])
     key_headers: list[str] = field(default_factory=list[str])
@@ -125,15 +126,26 @@ def handler_for(state: FakeSlowTierState) -> type[BaseHTTPRequestHandler]:
                     self.send_header("Content-Length", str(len(raw)))
                     self.end_headers()
                     self.wfile.write(raw)
+                elif base64.b64decode(str(body["zip_b64"])) in state.ticket_by_archive:
+                    # The slow tier keeps one ticket per hash and charges no quota (11.3).
+                    archive = base64.b64decode(str(body["zip_b64"]))
+                    original = state.ticket_by_archive[archive]
+                    ticket = f"ticket-{len(state.tickets) + 1}"
+                    state.tickets[ticket] = state.tickets[original]
+                    self.reply(
+                        200, {"ticket": ticket, "duplicate": True, "of": original}
+                    )
                 elif state.submissions_left <= 0:
                     self.reply(
                         429, {"reason": "quota", "next_slot_at": state.next_slot_at}
                     )
                 else:
                     state.submissions_left -= 1
-                    state.archives.append(base64.b64decode(str(body["zip_b64"])))
+                    archive = base64.b64decode(str(body["zip_b64"]))
+                    state.archives.append(archive)
                     ticket = f"ticket-{len(state.tickets) + 1}"
                     state.tickets[ticket] = state.clock.now_seconds() + 600.0
+                    state.ticket_by_archive[archive] = ticket
                     self.reply(
                         200, {"ticket": ticket, "position": 1, "visible_at": 600.0}
                     )
@@ -221,6 +233,21 @@ def test_submission_carries_the_unchanged_payload_and_the_worker(
         "note": "",
         "target": "baseline@2",
     }
+
+
+def test_a_duplicate_ticket_is_a_cache_hit(
+    tmp_path: Path, slow_tier: tuple[SlowTierClient, FakeSlowTierState]
+) -> None:
+    """The testbed's duplicate: true means it did not run the candidate (TB section 11.3)."""
+    client, state = slow_tier
+    source = SlowTierSource(client=client, declaration=DECLARATION)
+    first = source.submit(candidate(tmp_path), WORKER, "baseline@0", "dev")
+    repeat = source.submit(candidate(tmp_path), WORKER, "baseline@0", "dev")
+    state.clock.advance(601.0)
+    first_result, repeat_result = source.poll(first), source.poll(repeat)
+    assert first_result is not None and not first_result.is_cached
+    assert repeat_result is not None and repeat_result.is_cached
+    assert repeat_result.per_seed == first_result.per_seed
 
 
 def test_a_used_up_quota_is_busy_for_the_rest_of_the_run(

@@ -26,7 +26,7 @@ EVAL_SERVICE = ActorId("eval_service")
 
 
 class LevelResult(FrozenModel):
-    """One level of result.json."""
+    """One level of result.json; submitted_at_seconds and is_cached rebuild the quota."""
 
     level: str
     score: float | None
@@ -37,6 +37,8 @@ class LevelResult(FrozenModel):
     prediction_error: float | None
     constraint_ok: bool | None
     status: str
+    submitted_at_seconds: float
+    is_cached: bool
 
 
 class ResultFile(FrozenModel):
@@ -44,6 +46,7 @@ class ResultFile(FrozenModel):
 
     candidate: str
     claim_id: str
+    submitter: ActorId
     baseline: str
     levels: tuple[LevelResult, ...]
 
