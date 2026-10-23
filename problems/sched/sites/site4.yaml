@@ -1,7 +1,8 @@
 id: 4
 summary: >-
   Many small single-core jobs from 60 users. A job whose user has not run on that machine in the last
-  20 minutes first waits 12 minutes for its environment to be prepared (the cores are not held meanwhile).
+  20 minutes is charged 12 minutes of environment preparation as waiting time; the job itself starts at
+  once and holds its cores only for its run time.
 machines: 4
 cores_per_machine: 8
 racks: 1

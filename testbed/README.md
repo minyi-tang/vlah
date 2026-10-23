@@ -76,7 +76,7 @@ tb selftest                                       # §11.9: perfect_herd / lone_
 **Day 3: precheck, then the single arm.**
 
 ```bash
-tb precheck sched                                 # precheck rows on 20 dev seeds (~25 min; all must PASS)
+tb precheck sched                                 # precheck rows 1–6 on 20 dev seeds (~40 min; all must PASS)
 tb run --arm single --problem sched --hours 4 \
        --agent-cmd 'copilot -p "$(cat {prompt_file})" --yolo'
 ```
@@ -188,5 +188,5 @@ flowchart LR
 
 ```bash
 uv run pytest tests/testbed                       # every PR (CI job testbed-selfcheck): no LLM, ~1-2 min
-uv run pytest -m slow tests/testbed/test_precheck_sched.py -s   # the day-3 precheck (needs hidden material, ~25 min)
+uv run pytest -m slow tests/testbed/test_precheck_sched.py -s   # the day-3 precheck (needs hidden material, ~40 min)
 ```
