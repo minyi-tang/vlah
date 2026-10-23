@@ -8,7 +8,6 @@ import pytest
 from tests.fixtures.runtime import (
     FakeIntegrator,
     MemoryAssembly,
-    ScriptedStopRules,
     SwitchedRouter,
     WaitingRunner,
     random_for_tests,
@@ -94,13 +93,19 @@ def test_a_crashed_worker_is_started_again(tmp_path: Path) -> None:
 def test_every_stop_path_closes_out_exactly_once(tmp_path: Path, trigger: str) -> None:
     run = prepared_run(tmp_path, WaitingRunner())
     supervisor = run.supervisor
-    stop_rules = run.components.stop_rules
-    assert isinstance(stop_rules, ScriptedStopRules)
     if trigger == "stop rule":
-        stop_rules.stop_at_seconds = 10.0
+        # The real rules: spending the whole limit stops the run (D52).
+        limit = run.context.problem.limits.eval_machine_hours
+        run.components.budget.record("worker", "a-01", "toy_slow", limit / 2)
         supervisor.tick(9.0)
         assert not supervisor.is_stopping
-        supervisor.tick(10.0)
+        run.components.budget.record("worker", "a-01", "toy_slow", limit / 2)
+        escalation = supervisor.tick(10.0)
+        assert [event.type for event in escalation] == ["escalation"]
+        assert not supervisor.is_stopping, "the 80% escalation goes first"
+        stopped = supervisor.tick(11.0)
+        assert [event.type for event in stopped] == ["stopped"]
+        assert supervisor.is_stopping, "a stop rule"
     elif trigger == "time limit":
         supervisor.tick(DURATION_SECONDS)
     else:

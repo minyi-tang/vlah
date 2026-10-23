@@ -10,7 +10,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from random import Random
 
-from tests.fixtures.fakes import FakeLeases, FakeRouter, RecordingBudget
+from tests.fixtures.fakes import FakeLeases, FakeRouter
 from tests.fixtures.herd import TOY_APPROACH, TOY_SOURCE, make_store_blackboard
 from tests.fixtures.tools import RecordingRecorder, ScriptedEval
 from tests.fixtures.worker import FakeToolServer, RecordingTaskQueue, TranscriptHarness
@@ -19,12 +19,14 @@ from vlah.adapters.memory.model import MemoryModel
 from vlah.adapters.memory.store import MemoryKeyValueStore, MemoryVectorIndex
 from vlah.arms.config import ArmConfig
 from vlah.core.blackboard.api import MergedCommit, PublicProblemFiles
+from vlah.core.budget.meter import KeyValueBudgetMeter
 from vlah.core.indexer.indexer import StoreIndexer
-from vlah.core.metrics.api import StandingMetrics
+from vlah.core.metrics.standing import HerdMetrics
 from vlah.core.problem.api import AdapterChoice, HerdConfig, Problem
 from vlah.core.queue.api import Leases
 from vlah.core.router.api import Router
 from vlah.core.router.router import KeyValueRouter
+from vlah.core.stop.rules import BudgetStopRules, EscalationPolicy
 from vlah.core.types.baseline import BaselineRecord
 from vlah.core.types.clock import FakeClock
 from vlah.core.types.events import Event
@@ -108,6 +110,7 @@ class FakeIntegrator:
     verified: list[str] = field(default_factory=list[str])
     closeout_count: int = 0
     closeout_fails: bool = False
+    baseline: BaselineRecord = BASELINE_ZERO
 
     def on_verified(self, result_claim_id: str) -> None:
         self.verified.append(result_claim_id)
@@ -116,7 +119,7 @@ class FakeIntegrator:
         return ()
 
     def current(self) -> BaselineRecord:
-        return BASELINE_ZERO
+        return self.baseline
 
     def closeout(self) -> BaselineRecord:
         self.closeout_count += 1
@@ -127,47 +130,11 @@ class FakeIntegrator:
 
 
 @dataclass(kw_only=True)
-class ScriptedStopRules:
-    stop_at_seconds: float | None = None
-    has_fired: bool = False
-
-    def evaluate(self, now_seconds: float) -> Event | None:
-        if (
-            self.stop_at_seconds is not None
-            and now_seconds >= self.stop_at_seconds
-            and not self.has_fired
-        ):
-            self.has_fired = True
-            return Event.model_validate(
-                {
-                    "local_id": "human/00001",
-                    "ts": now_seconds,
-                    "actor": "human",
-                    "role": "human",
-                    "type": "stopped",
-                    "data": {"reason": "budget"},
-                }
-            )
-        else:
-            return None
-
-
-class ZeroMetrics:
-    def standing(self) -> StandingMetrics:
-        return StandingMetrics(
-            holdout_score=None,
-            dead_end_rewalk_count=0,
-            insight_reuse_counts={},
-            prediction_error_by_agent={},
-            prediction_error_by_approach={},
-        )
-
-
-@dataclass(kw_only=True)
 class MemoryAssembly:
     """Builds every component from fakes and in-memory stores; remembers what it built.
 
-    The router is the real one over a memory key-value store; use_real_router False
+    The router, the budget meter, the stop rules and the metrics are the real ones over
+    memory key-value stores; use_real_router False
     swaps in SwitchedRouter, whose overdue and failures a test can script.
     """
 
@@ -190,12 +157,11 @@ class MemoryAssembly:
             clock=self.clock,
             top_level=top_level_source(context.problem.sources),
         )
+        run_store = MemoryKeyValueStore(clock=self.clock, namespace=context.run_id)
         router: Router
         if self.use_real_router:
             router = KeyValueRouter(
-                store=MemoryKeyValueStore(
-                    clock=self.clock, namespace=f"{context.run_id}-router"
-                ),
+                store=run_store,
                 leases=leases,
                 indexer=indexer,
                 arm=context.arm,
@@ -231,6 +197,8 @@ class MemoryAssembly:
                 (compose_arm(context.arm), True),
             )
         )
+        integrator = FakeIntegrator(params=context.params)
+        meter = KeyValueBudgetMeter(store=run_store, limits=context.problem.limits)
         components = RunComponents(
             blackboard=blackboard,
             indexer=indexer,
@@ -239,10 +207,24 @@ class MemoryAssembly:
             leases=leases,
             eval_service=ScriptedEval(),
             router=router,
-            integrator=FakeIntegrator(params=context.params),
-            budget=RecordingBudget(),
-            stop_rules=ScriptedStopRules(),
-            metrics=ZeroMetrics(),
+            integrator=integrator,
+            budget=meter,
+            stop_rules=BudgetStopRules(
+                store=run_store,
+                blackboard=blackboard,
+                meter=meter,
+                integrator=integrator,
+                limits=context.problem.limits,
+                target=context.problem.target,
+                policy=EscalationPolicy(),
+            ),
+            metrics=HerdMetrics(
+                blackboard=blackboard,
+                indexer=indexer,
+                budget=meter,
+                router=router if isinstance(router, KeyValueRouter) else None,
+                top_level=top_level_source(context.problem.sources),
+            ),
             executor=executor,
             harness=TranscriptHarness(scripted=ScriptedHarness(default_program="none")),
             tool_server=FakeToolServer(tools=tools),
