@@ -1,10 +1,12 @@
 """Judge quota, counted by the eval client and nobody else (v2.2 D40, D74; TB section 11.8.1).
 
-Three budgets:
+Four budgets:
 - each level's daily runs (budget.per_day);
 - each worker's daily runs at the cheaper levels (t1_per_worker_per_day);
 - the Integrator's own quota, a total and a per-hour cap, spent by its remeasures
-  and by compose candidates, which are its work too (D74).
+  and by compose candidates, which are its work too (D74);
+- the spot checks' audit-set measurements, capped per run (holdout_run_cap, D72)
+  and outside the Integrator's slots, so a spot check never stalls integration.
 
 A submission is charged when it is sent, so the slot is held while the judge works,
 and refunded when the judge reports it answered from its cache (TB section 11.3).
@@ -17,6 +19,7 @@ from vlah.core.types.clock import Clock
 from vlah.core.types.ids import ActorId
 from vlah.core.types.params import Params
 from vlah.core.types.sources import SourceDecl
+from vlah.ports.signal_source import Dataset
 
 DAY_SECONDS = 86400.0
 HOUR_SECONDS = 3600.0
@@ -36,6 +39,7 @@ class QuotaTracker:
         default_factory=dict[ActorId, list[float]]
     )
     integrator_runs: list[float] = field(default_factory=list[float])
+    audit_runs: list[float] = field(default_factory=list[float])
 
     def count_since(self, run_times: list[float], window_seconds: float) -> int:
         now_seconds = self.clock.now_seconds()
@@ -43,8 +47,16 @@ class QuotaTracker:
             1 for run_time in run_times if run_time > now_seconds - window_seconds
         )
 
-    def allows(self, kind: RequestKind, caller: ActorId, level: SourceDecl) -> bool:
-        if kind in ("remeasure", "compose"):
+    def allows(
+        self,
+        kind: RequestKind,
+        caller: ActorId,
+        level: SourceDecl,
+        dataset: Dataset = "dev",
+    ) -> bool:
+        if dataset == "audit":
+            return len(self.audit_runs) < self.params.holdout_run_cap
+        elif kind in ("remeasure", "compose"):
             return (
                 len(self.integrator_runs) < self.params.quota_integrator_total
                 and self.count_since(self.integrator_runs, HOUR_SECONDS)
@@ -63,9 +75,11 @@ class QuotaTracker:
             return True
 
     def run_lists(
-        self, kind: RequestKind, caller: ActorId, level_id: str
+        self, kind: RequestKind, caller: ActorId, level_id: str, dataset: Dataset
     ) -> list[list[float]]:
-        if kind in ("remeasure", "compose"):
+        if dataset == "audit":
+            return [self.audit_runs]
+        elif kind in ("remeasure", "compose"):
             return [self.integrator_runs]
         elif level_id != self.top_level_id:
             return [
@@ -81,8 +95,9 @@ class QuotaTracker:
         caller: ActorId,
         level_id: str,
         submitted_at_seconds: float,
+        dataset: Dataset = "dev",
     ) -> None:
-        for run_times in self.run_lists(kind, caller, level_id):
+        for run_times in self.run_lists(kind, caller, level_id, dataset):
             run_times.append(submitted_at_seconds)
 
     def refund(
@@ -91,7 +106,8 @@ class QuotaTracker:
         caller: ActorId,
         level_id: str,
         submitted_at_seconds: float,
+        dataset: Dataset = "dev",
     ) -> None:
         """Give back a submission the judge answered from its cache."""
-        for run_times in self.run_lists(kind, caller, level_id):
+        for run_times in self.run_lists(kind, caller, level_id, dataset):
             run_times.remove(submitted_at_seconds)

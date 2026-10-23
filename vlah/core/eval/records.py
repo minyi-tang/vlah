@@ -19,6 +19,7 @@ from vlah.core.types.clock import Clock
 from vlah.core.types.events import Event, EventPayload, EventType, event_to_json
 from vlah.core.types.ids import ActorId, format_claim_id, format_event_local_id
 from vlah.core.types.sources import Paired
+from vlah.ports.signal_source import Dataset
 
 logger = logging.getLogger(__name__)
 
@@ -39,6 +40,7 @@ class LevelResult(FrozenModel):
     status: str
     submitted_at_seconds: float
     is_cached: bool
+    dataset: Dataset = "dev"
 
 
 class ResultFile(FrozenModel):
