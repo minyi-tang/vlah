@@ -137,6 +137,13 @@ temp dirs is not. That covers the spec documents, this repo, `private/`, other a
 sessions' transcripts (`tests/test_agent_sandbox.py`). A CLI installed elsewhere under /Users (e.g. node
 via nvm for `claude`) needs `--sandbox-allow`. For real runs, separate machines or containers are still better.
 
+There is no other sandbox. On any other host (Linux, or macOS without `sandbox-exec`) `tb run` refuses
+to start the single and isolated arms, because their agents and the composer would read the hidden
+material, the spec documents, this repo and each other's workspaces. `--unsafe-no-sandbox` runs them
+anyway (and turns the sandbox off on macOS); the run then starts with an `unsafe_no_sandbox` event
+(`data.reason`: `flag`, `not-macos` or `no-sandbox-exec`), so its `events.jsonl` says it was not a fair run.
+The herd arm is not affected: its runtime launches and confines its own workers.
+
 The slow-eval service writes a key to `private/testbed/var/slow_eval/system.key`. Only the runner and the integrator
 use it (to create runs, act as the testbed, and read events and calibration). Never give it to an agent.
 

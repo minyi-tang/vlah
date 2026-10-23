@@ -28,6 +28,7 @@ import threading
 import time
 from datetime import datetime
 from pathlib import Path
+from typing import Literal
 
 from testbed.cli.client import SlowClient
 from testbed.cli.pack import leaked, pack_problem
@@ -39,6 +40,9 @@ from testbed.recorder.log import read_events
 from testbed.scorecard.report import render_one
 
 PUSH_ARMS = {"single", "herd"}
+# Why an LLM arm runs without the agent sandbox: the operator asked for it on a macOS host that has
+# sandbox-exec, the host is not macOS, or macOS lacks sandbox-exec. Recorded in the run's events.
+UnsandboxedReason = Literal["flag", "not-macos", "no-sandbox-exec"]
 NO_HUMAN = "无人在线，按你的方案执行，把对齐内容写进 PLAN.md。"
 CONTINUE = (
     "\n\n---\n会话重启（第 {n} 次启动）。距结束还有 {left:.1f} 小时。你不记得上一次会话做过什么："
@@ -152,14 +156,9 @@ def agent_sandbox_prefix(ws: Path, extra_allow: list[Path] | None = None) -> lis
     the agent's own workspace (read/write), the venv and the Python it links to, the testbed package
     without testbed/extras, the agent CLI binary, and any --sandbox-allow paths. The repo, var/
     (precheck, earlier runs, the slow-eval data and its system key), the spec documents, other
-    agents' workspaces and other sessions' files are therefore out of reach.
+    agents' workspaces and other sessions' files are therefore out of reach. Callers decide whether
+    the host can run it (tb run refuses otherwise, unless --unsafe-no-sandbox).
     """
-    if (
-        sys.platform != "darwin"
-        or not shutil.which("sandbox-exec")
-        or os.environ.get("TB_AGENT_SANDBOX") == "off"
-    ):
-        return []
     import testbed
 
     pkg = Path(testbed.__file__).resolve().parent
@@ -293,10 +292,12 @@ def llm_composer(
     wd: Path,
     env: dict,
     extra_allow: list[Path],
+    sandboxed: bool,
     timeout_s: float = 1800,
 ):
     """Compose task executor: a fresh agent session outside every arm's worker pool (11.8.1 step 2).
-    It runs in its own sandboxed workspace and in the background, so the integrator keeps going.
+    It runs in its own sandboxed workspace (unless the run is unsandboxed) and in the background, so
+    the integrator keeps going.
     """
     from concurrent.futures import ThreadPoolExecutor
 
@@ -321,9 +322,11 @@ def llm_composer(
             prompt_file=str(d / "PROMPT.md"), workdir=str(d), actor="composer"
         )
         e = agent_env(env, d, "composer")
-        prefix = agent_sandbox_prefix(d, extra_allow)
+        prefix = agent_sandbox_prefix(d, extra_allow) if sandboxed else []
         if prefix:
             e["TB_SANDBOX"] = "inherit"
+        else:
+            pass
         try:
             with (d / "agent.log").open("w") as log:
                 subprocess.run(
@@ -359,6 +362,27 @@ def main(a):
         sys.exit(
             "tb run: --agent-cmd is required (or --scripted NAME). See README: 'Running an arm with an LLM'."
         )
+    # Anti-cheat rule 1 (TB §2): the single and isolated arms' agents and the composer must not read
+    # hidden material. The herd runtime launches and confines its own workers.
+    unsandboxed_reason: UnsandboxedReason | None
+    if arm == "herd":
+        unsandboxed_reason = None
+    elif sys.platform != "darwin":
+        unsandboxed_reason = "not-macos"
+    elif not shutil.which("sandbox-exec"):
+        unsandboxed_reason = "no-sandbox-exec"
+    elif a.unsafe_no_sandbox:
+        unsandboxed_reason = "flag"
+    else:
+        unsandboxed_reason = None
+    if unsandboxed_reason is not None and not a.unsafe_no_sandbox:
+        sys.exit(
+            f"tb run: no agent sandbox on this host ({unsandboxed_reason}: {sys.platform}), so the agents "
+            "and the composer would run with read access to hidden material. Pass --unsafe-no-sandbox "
+            "to run anyway; the run then records an unsafe_no_sandbox event."
+        )
+    else:
+        pass
     run_id = a.run_id or f"r-{datetime.now():%Y%m%d-%H%M%S}-{arm}"
     wd = Path(a.workdir or STATE_DIR / "runs" / run_id)
     wd.mkdir(parents=True, exist_ok=True)
@@ -387,6 +411,20 @@ def main(a):
         f"[{run_id}] creating run on {url} (calibration may take a few minutes the first time)"
     )
     runner.create_run(arm, a.problem, n, overrides, actor_tokens=tokens)
+    if unsandboxed_reason is not None:
+        runner.post_events(
+            [
+                {
+                    "type": "unsafe_no_sandbox",
+                    "data": {"actor": "all", "reason": unsandboxed_reason},
+                }
+            ]
+        )
+        print(
+            f"[{run_id}] WARNING: the agents and the composer run without a sandbox ({unsandboxed_reason})"
+        )
+    else:
+        pass
     knobs = runner.calibration()["knobs"]
     problem_dir = resolve_problem_dir(a.problem)
     prob = load_problem(a.problem)
@@ -431,7 +469,13 @@ def main(a):
         prob.baseline_dir(),
         time.time,
         integrator_config(arm),
-        composer=llm_composer(a.agent_cmd, wd, base_env, extra_allow),
+        composer=llm_composer(
+            a.agent_cmd,
+            wd,
+            base_env,
+            extra_allow,
+            sandboxed=unsandboxed_reason is None,
+        ),
         on_advance=pusher(dirs) if arm in PUSH_ARMS else None,
         log=lambda m: print(f"[integrator] {m}"),
     )
@@ -459,11 +503,15 @@ def main(a):
             TB_TARGET_FILE=str(d / "BASELINE_TARGET"),
             TB_TOKEN=tokens[actor],
         )
-        prefix = agent_sandbox_prefix(d, extra_allow)
+        prefix = (
+            agent_sandbox_prefix(d, extra_allow) if unsandboxed_reason is None else []
+        )
         if (
             prefix
         ):  # macOS cannot nest sandbox-exec: policies inherit the agent's sandbox
             env["TB_SANDBOX"] = "inherit"
+        else:
+            pass
         cmd = cmd_tpl.format(prompt_file=str(prompt_file), workdir=str(d), actor=actor)
         log = (d / "agent.log").open("a")
         log.write(f"\n===== start {n} at {datetime.now():%H:%M:%S} =====\n")

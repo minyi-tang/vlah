@@ -59,6 +59,7 @@ RESERVED_EVENTS = {
     "integrator_frozen",
     "stale_target",
     "agent_restart",
+    "unsafe_no_sandbox",
 }
 
 
