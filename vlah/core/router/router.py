@@ -459,10 +459,11 @@ class KeyValueRouter:
         due: list[Interrupt] = []
         for member, fallback_from_ts in self.store.sorted_range(PENDING_KEY):
             agent = ActorId(member)
-            lease = self.leases.get(agent)
-            if now_seconds - fallback_from_ts < timeout or lease is None:
+            if now_seconds - fallback_from_ts < timeout:
                 continue
-            elif not self.store.sorted_remove(PENDING_KEY, member):
+            else:
+                lease = self.leases.get(agent)
+            if lease is None or not self.store.sorted_remove(PENDING_KEY, member):
                 continue
             else:
                 while True:

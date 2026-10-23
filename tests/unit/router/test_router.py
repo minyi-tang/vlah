@@ -261,6 +261,18 @@ def test_a_reinstated_dependency_withdraws_the_pending_refutation_interrupt(
     ], "a later refutation interrupts again"
 
 
+def test_a_reinstated_target_is_announced_as_a_reinstatement() -> None:
+    """Rule 2's template says "moved to {to}", and a reinstated event has no to."""
+    harness = leased("S2")
+    (interrupt,) = harness.router.on_commit(
+        commit(reinstated(1, TARGET, actor="critic-1", role="critic"))
+    )
+    assert interrupt.reason == (
+        f"{TARGET}, which your task is about, was reinstated by critic-1. "
+        "the refutation was wrong"
+    )
+
+
 def test_withdrawing_the_shown_interrupt_shows_the_next_one() -> None:
     harness = leased("S2")
     harness.router.on_commit(commit(claim_status(1, DEPENDENCY, "refuted")))
@@ -493,13 +505,15 @@ def test_concurrent_hooks_committers_and_the_supervisor_lose_no_acknowledgement(
                 raised.extend(hard)
 
     def hook(agent: ActorId) -> None:
+        # The flag is read before the check: a miss after it is final.
         while True:
+            is_done = committers_done.is_set()
             shown = harness.router.check(agent)
             if shown is not None:
                 harness.router.acknowledge(agent, shown.id)
                 with bookkeeping:
                     acked.append(shown.id)
-            elif committers_done.is_set():
+            elif is_done:
                 return
             else:
                 continue

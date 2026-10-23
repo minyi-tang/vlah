@@ -20,12 +20,21 @@
 
 - id: target-changed
   rule: 2
-  events: [claim_status, reinstated]
+  events: [claim_status]
   match: targets_lease_claim
   kind: hard
   priority: 3
   enabled_by: router_rules_2_5
   reason: "{target}, which your task is about, moved to {to}. {event_reason}"
+
+- id: target-reinstated
+  rule: 2
+  events: [reinstated]
+  match: targets_lease_claim
+  kind: hard
+  priority: 3
+  enabled_by: router_rules_2_5
+  reason: "{target}, which your task is about, was reinstated by {actor}. {event_reason}"
 
 - id: approach-closed
   rule: 3
