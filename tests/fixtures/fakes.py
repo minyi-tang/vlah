@@ -179,12 +179,14 @@ class FakeIndexer:
 
     claims: dict[str, Claim] = field(default_factory=dict[str, Claim])
     statuses: dict[str, str] = field(default_factory=dict[str, str])
+    head: int = 0
 
     def apply(self, merged_commit: MergedCommit) -> None:
         for claim in merged_commit.claims:
             self.claims[claim.id] = claim
             self.statuses[claim.id] = claim.status
         for event in merged_commit.events:
+            self.head = max(self.head, event.seq or 0)
             if (
                 event.type == "claim_status"
                 and event.target is not None
@@ -196,6 +198,9 @@ class FakeIndexer:
 
     def rebuild(self) -> None:
         pass
+
+    def head_sequence(self) -> int:
+        return self.head
 
     def claim_state(self, claim_id: str) -> ClaimState:
         return ClaimState(
