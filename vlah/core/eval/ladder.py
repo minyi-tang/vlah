@@ -215,14 +215,20 @@ class LadderRunner:
                     level.declaration.id,
                     level.declaration.cost_machine_hours,
                 )
+            events: list[Event] = []
             if end.failure is not None:
                 new_status = "refuted"
-                self.records.write_gate_dead_end(
-                    job.approach, job.candidate_hash, end.failure[0], end.failure[1]
+                events.append(
+                    self.records.write_gate_dead_end(
+                        job.approach,
+                        job.candidate_hash,
+                        end.failure[0],
+                        end.failure[1],
+                    )
                 )
             else:
                 new_status = f"verified:{level.declaration.id}"
-            events = [
+            events.append(
                 self.records.write_event(
                     "claim_status",
                     target=job.claim_id,
@@ -230,7 +236,7 @@ class LadderRunner:
                     to_status=new_status,
                     source=level.declaration.id,
                 )
-            ]
+            )
             job.status = new_status
             predicted = job.predictions.get(level.declaration.id)
             job.level_results.append(
