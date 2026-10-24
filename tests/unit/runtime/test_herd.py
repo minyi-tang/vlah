@@ -39,6 +39,7 @@ from vlah.core.types.ids import ActorId
 from vlah.core.types.sources import SourceDecl
 from vlah.runtime.assembly import RunComponents, RunContext
 from vlah.runtime.compose import COMPOSE_AGENT
+from vlah.runtime.demo import run_demo
 from vlah.runtime.herd import (
     LocalHerd,
     RunFanout,
@@ -401,3 +402,12 @@ def test_b0_is_one_agent(tmp_path: Path) -> None:
                     random=random_for_tests(),
                     runner=WaitingRunner(),
                 )
+
+
+def test_the_demo_gives_the_same_deliverable_for_the_same_seed() -> None:
+    """runtime.api.RunDemo raised NotSupportedError; the deliverable must also not
+    be the empty baseline@0, which any seed would repeat trivially."""
+    first, second = run_demo(7), run_demo(7)
+    assert first.deliverable == second.deliverable
+    assert first.deliverable.k >= 2, "wins stack onto the baseline"
+    assert run_demo(8).deliverable.per_seed != first.deliverable.per_seed

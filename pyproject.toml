@@ -70,6 +70,7 @@ markers = [
     "cli: W1-13 #23",
     "docker: L-01 #128",
     "kubernetes: L-04 #131",
+    "critic: W2-05 #121",
 ]
 
 # Formatting is black + isort and linting is ruff with its default rules, all via pre-commit
