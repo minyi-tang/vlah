@@ -1,0 +1,14 @@
+# Deployment settings. Workers never see this file.
+judges:
+  rubric:
+    command: "python3 {problem_root}/private/judge.py {candidate_dir} --dataset {dataset}"
+executor:
+  kind: local
+  settings:
+    target_repository: __TARGET_REPOSITORY__
+    target_ref: main
+harness:
+  kind: copilot
+  settings: {}
+models:
+  worker: gpt-6.1-sol
