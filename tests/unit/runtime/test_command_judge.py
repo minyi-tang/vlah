@@ -169,3 +169,17 @@ def test_baseline_scores_measure_baseline_zero_once_and_read_later_records(
         )["score"]
         == 0.2
     )
+
+
+def test_a_repeat_after_a_void_run_runs_the_command_again(tmp_path: Path) -> None:
+    """A void run is a judge failure, not a result: answering a resubmission from it
+    would make every retry void too (first run of the model-graded judge)."""
+    judge = make_judge(tmp_path)
+    candidate = candidate_at(tmp_path, -1.0, name="flaky")
+    first = wait_for(judge, judge.submit(candidate, WORKER, "baseline@0", "audit"))
+    assert first.value is None
+    (candidate.payload_directory / "score.txt").write_text("0.7", encoding="utf-8")
+    again = wait_for(judge, judge.submit(candidate, WORKER, "baseline@0", "audit"))
+    assert again.value == 0.7 and again.is_cached is False
+    repeat = wait_for(judge, judge.submit(candidate, WORKER, "baseline@0", "audit"))
+    assert repeat.value == 0.7 and repeat.is_cached is True

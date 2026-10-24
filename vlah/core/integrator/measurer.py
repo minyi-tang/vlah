@@ -7,6 +7,10 @@ a candidate written by the actor integrator, and answered with a remeasure_ready
 event; the wrapper hands that event here as the measurement. The ticket is the
 eval client's request id. A spot check's audit measurement is the same request
 on the audit dataset (D72); the eval client counts it under its own cap.
+
+A void answer (the judge could not score the run) is never handed to the core,
+which would read its empty scores as a measurement: it is submitted again, up to
+VOID_RETRIES times, and the wrapper decides what happens after that.
 """
 
 import logging
@@ -29,6 +33,7 @@ MeasurementDataset = Literal["dev", "audit"]
 # The approach a measurement of a baseline itself (a revert, the deliverable) is
 # recorded under: it belongs to no worker's approach.
 BASELINE_APPROACH = "integrator"
+VOID_RETRIES = 2
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -36,7 +41,9 @@ class Submitted:
     ticket: str
     candidate_directory: Path
     baseline: int
+    dataset: MeasurementDataset
     note: str
+    request: RemeasureRequest
 
 
 @dataclass(kw_only=True)
@@ -47,6 +54,9 @@ class EvalMeasurer:
     approach_by_hash: dict[str, str] = field(default_factory=dict[str, str])
     results: dict[str, Measurement] = field(default_factory=dict[str, Measurement])
     submitted: list[Submitted] = field(default_factory=list[Submitted])
+    # A resubmission's ticket, to the ticket the core is waiting on.
+    original_by_ticket: dict[str, str] = field(default_factory=dict[str, str])
+    retries_by_ticket: dict[str, int] = field(default_factory=dict[str, int])
 
     def approach_of(self, parent: str | None) -> str:
         if parent is None:
@@ -97,28 +107,60 @@ class EvalMeasurer:
             raise ValueError(f"the core asked for an unknown dataset {dataset!r}")
         parent = parents[0] if parents else None
         manifest = self.write_manifest(candidate_dir, baseline, parent, note)
-        ticket = self.eval_service.remeasure(
-            RemeasureRequest(
-                candidate_directory=candidate_dir,
-                baseline=manifest.target,
-                parent_candidate=manifest.target if parent is None else parent,
-                approach=manifest.approach,
-                dataset=requested,
-            )
+        request = RemeasureRequest(
+            candidate_directory=candidate_dir,
+            baseline=manifest.target,
+            parent_candidate=manifest.target if parent is None else parent,
+            approach=manifest.approach,
+            dataset=requested,
         )
+        ticket = self.eval_service.remeasure(request)
         self.submitted.append(
             Submitted(
                 ticket=ticket,
                 candidate_directory=candidate_dir,
                 baseline=baseline,
+                dataset=requested,
                 note=note,
+                request=request,
             )
         )
         return ticket
 
+    def original_ticket(self, ticket: str) -> str:
+        return self.original_by_ticket.get(ticket, ticket)
+
+    def submission(self, ticket: str) -> Submitted | None:
+        original = self.original_ticket(ticket)
+        return next((item for item in self.submitted if item.ticket == original), None)
+
+    def resubmit(self, ticket: str) -> bool:
+        """Ask again after a void answer; False once VOID_RETRIES are spent."""
+        original = self.original_ticket(ticket)
+        submitted = self.submission(original)
+        retries = self.retries_by_ticket.get(original, 0)
+        if submitted is None or retries >= VOID_RETRIES:
+            return False
+        else:
+            again = self.eval_service.remeasure(submitted.request)
+            self.original_by_ticket[again] = original
+            self.retries_by_ticket[original] = retries + 1
+            logger.warning(
+                f"the judge returned no score for {submitted.note}; asking again "
+                f"({retries + 1} of {VOID_RETRIES})"
+            )
+            return True
+
     def answer(self, measurement: Measurement) -> None:
         """A remeasure_ready event, as the measurement the core polls for."""
-        self.results[measurement.ticket] = measurement
+        original = self.original_ticket(measurement.ticket)
+        self.results[original] = Measurement(
+            original,
+            measurement.hash,
+            measurement.per_seed,
+            measurement.score,
+            measurement.constraint_ok,
+        )
 
     def result(self, ticket: str) -> Measurement | None:
         return self.results.get(ticket)
