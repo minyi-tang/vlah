@@ -69,6 +69,15 @@ def create_app(
         need_system(x_tb_key)
         return se.create_run(body)
 
+    @app.post("/actors")
+    def register_actors(
+        body: dict = Body(...),
+        x_tb_run: str | None = Header(None),
+        x_tb_key: str | None = Header(None),
+    ):
+        need_system(x_tb_key)
+        return se.register_actors(need_run(x_tb_run), body)
+
     @app.post("/submit")
     def submit(
         body: dict = Body(...),

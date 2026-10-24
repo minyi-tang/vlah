@@ -2,6 +2,7 @@
 
 import base64
 import io
+import json
 import os
 import zipfile
 
@@ -366,3 +367,91 @@ def test_per_agent_tokens_bind_an_agent_to_itself(service, tmp_path):
     assert trusted.submit_dir(
         stub_candidate(tmp_path / "e", ["locality"]), predicted=-900
     )["ticket"]
+
+
+def test_operator_registers_worker_tokens_after_the_run_exists(service, tmp_path):
+    runner = service.new_run(
+        arm="herd", n=3
+    )  # created with no tokens, as tb run does for the herd
+    registration = runner.register_actors({"worker-01": "tok-1", "worker-02": "tok-2"})
+    assert registration == {
+        "run_id": "r1",
+        "added": ["worker-01", "worker-02"],
+        "unchanged": [],
+        "actors": ["worker-01", "worker-02"],
+    }
+    assert "tok-" not in json.dumps(registration)
+    first_worker = SlowClient(None, "r1", "worker-01", http=service.http, token="tok-1")
+    receipt = first_worker.submit_dir(
+        stub_candidate(tmp_path / "c", ["backfill"]), predicted=-900
+    )
+    first_worker.status(receipt["ticket"])
+    impostors = [
+        SlowClient(None, "r1", "worker-01", http=service.http, token="tok-2"),
+        SlowClient(None, "r1", "worker-03", http=service.http, token="tok-3"),
+        SlowClient(None, "r1", "worker-01", http=service.http),
+    ]
+    for impostor in impostors:
+        with pytest.raises(ServiceError) as error:
+            impostor.history()
+        assert error.value.status_code == 403
+    repeated = runner.register_actors({"worker-01": "tok-1", "worker-03": "tok-3"})
+    assert repeated["added"] == ["worker-03"]
+    assert repeated["unchanged"] == ["worker-01"]
+    assert repeated["actors"] == ["worker-01", "worker-02", "worker-03"]
+    late_worker = SlowClient(None, "r1", "worker-03", http=service.http, token="tok-3")
+    history_items = late_worker.history()["items"]
+    late_tickets = [item["ticket"] for item in history_items if isinstance(item, dict)]
+    assert late_tickets == [receipt["ticket"]]
+
+
+def test_only_the_system_key_registers_actors(service):
+    service.new_run(arm="herd")
+    for key, token in ((None, None), ("wrong-key", None), (None, "tok-1")):
+        caller = SlowClient(
+            None, "r1", "worker-01", http=service.http, key=key, token=token
+        )
+        with pytest.raises(ServiceError) as error:
+            caller.register_actors({"worker-01": "tok-1"})
+        assert error.value.status_code == 403
+        assert error.value.body == {"reason": "testbed only"}
+    assert json.loads(service.core.run_row("r1")["tokens"]) == {}
+    with pytest.raises(ServiceError) as error:
+        service.client("r-unknown", "runner").register_actors({"worker-01": "tok-1"})
+    assert error.value.status_code == 404
+
+
+def test_actor_registration_rejects_replacements_and_bad_input_unchanged(service):
+    runner = service.new_run(arm="herd")
+    runner.register_actors({"worker-01": "tok-1"})
+
+    def post_actors(body):
+        return service.http.post("/actors", json=body, headers=runner.headers())
+
+    conflicts = [
+        ({"worker-01": "tok-other", "worker-02": "tok-2"}, ["worker-01"]),
+        ({"worker-02": "tok-1"}, ["worker-02"]),  # token held by worker-01
+        ({"worker-02": "tok-x", "worker-03": "tok-x"}, ["worker-03"]),
+    ]
+    for actor_tokens, conflicting_actors in conflicts:
+        response = post_actors({"actor_tokens": actor_tokens})
+        assert response.status_code == 409
+        assert response.json() == {
+            "reason": "actor_token_conflict",
+            "actors": conflicting_actors,
+        }
+    invalid_bodies = [
+        {},
+        {"actor_tokens": {}},
+        {"actor_tokens": ["worker-02"]},
+        {"actor_tokens": {"worker-02": ""}},
+        {"actor_tokens": {"worker-02": 7}},
+        {"actor_tokens": {"": "tok-2"}},
+        {"actor_tokens": {"worker-02": "tok-2", "runner": "tok-r"}},
+        {"actor_tokens": {"composer": "tok-c"}},
+    ]
+    for body in invalid_bodies:
+        response = post_actors(body)
+        assert response.status_code == 400
+        assert response.json()["reason"] == "invalid_actor_tokens"
+    assert json.loads(service.core.run_row("r1")["tokens"]) == {"worker-01": "tok-1"}

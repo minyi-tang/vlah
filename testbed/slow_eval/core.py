@@ -349,6 +349,69 @@ class SlowEval:
         if tokens and (actor not in tokens or tokens[actor] != token):
             raise ApiError(403, {"reason": "unknown actor or wrong X-TB-Token"})
 
+    def register_actors(self, run_id: str, body: dict) -> dict:
+        """Adds per-agent tokens to an existing run (DECISIONS I17), for runtimes such as the herd that
+        start their workers after POST /runs. Registration only adds: re-sending an actor with the same
+        token is a no-op, and any replacement or shared token rejects the whole request unchanged.
+        """
+        actor_tokens = body.get("actor_tokens")
+        if not isinstance(actor_tokens, dict) or not actor_tokens:
+            raise ApiError(
+                400,
+                {
+                    "reason": "invalid_actor_tokens",
+                    "detail": "actor_tokens must be a non-empty map of actor to token",
+                },
+            )
+        for actor, token in actor_tokens.items():
+            if not actor or not isinstance(token, str) or not token:
+                raise ApiError(
+                    400,
+                    {
+                        "reason": "invalid_actor_tokens",
+                        "detail": "actor names and tokens must be non-empty strings",
+                    },
+                )
+            if actor in SYSTEM_ACTORS:
+                raise ApiError(
+                    400,
+                    {
+                        "reason": "invalid_actor_tokens",
+                        "detail": f"actor {actor!r} is reserved for the testbed",
+                    },
+                )
+        with self.lock:
+            registered = json.loads(self.run_row(run_id)["tokens"] or "{}")
+            owner_by_token = {token: actor for actor, token in registered.items()}
+            conflicting_actors = set()
+            for actor, token in actor_tokens.items():
+                if actor in registered and registered[actor] != token:
+                    conflicting_actors.add(actor)
+                if owner_by_token.setdefault(token, actor) != actor:
+                    conflicting_actors.add(actor)
+            if conflicting_actors:
+                raise ApiError(
+                    409,
+                    {
+                        "reason": "actor_token_conflict",
+                        "actors": sorted(conflicting_actors),
+                    },
+                )
+            added_actors = sorted(set(actor_tokens) - set(registered))
+            unchanged_actors = sorted(set(actor_tokens) & set(registered))
+            if added_actors:
+                registered.update(actor_tokens)
+                self.db.execute(
+                    "UPDATE runs SET tokens=? WHERE run_id=?",
+                    (json.dumps(registered), run_id),
+                )
+        return {
+            "run_id": run_id,
+            "added": added_actors,
+            "unchanged": unchanged_actors,
+            "actors": sorted(registered),
+        }
+
     def calibration(self, run_id) -> dict:
         r = self.run_row(run_id)
         return json.loads(r["cal"]) if r["cal"] else {}
