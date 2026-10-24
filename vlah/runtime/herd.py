@@ -12,13 +12,17 @@ The merge fan-out, on every merged commit:
 - turns result_ready, and only result_ready, into the submitter's follow-up task
   (remeasure_ready belongs to the Integrator), in the compose queue when the
   submitter is the compose slot and in the arm queue otherwise (D74);
-- hands a result claim to the Integrator when a claim_status event moves it to
-  verified at the top level of the judge ladder, unless the claim is one of the
-  Integrator's own remeasures, which the eval service tags "remeasure";
+- hands a result claim to the Critic, which passes it on to the Integrator
+  (directly to the Integrator in a run without one), when a claim_status event
+  moves it to verified at the top level of the judge ladder, unless the claim is
+  one of the Integrator's own remeasures, which the eval service tags "remeasure";
 - counts judge runs from each finished candidate's result.json, each candidate
   hash once: one per level the judge ran itself, so a cache hit (a repeat of a
   hash already counted) and a dead-end confirmation do not count.
 It runs on the writing thread, so it never calls the executor.
+
+A started run writes its status file after every tick (vlah.runtime.status); the
+workers get the run's leases through a ledger that records each session's task.
 """
 
 import json
@@ -33,6 +37,7 @@ from vlah.arms.config import PRESETS, ArmName
 from vlah.core.blackboard.api import Blackboard, MergedCommit
 from vlah.core.metrics.api import StandingMetrics
 from vlah.core.problem.api import LoadProblem, Problem
+from vlah.core.queue.api import Leases
 from vlah.core.types.baseline import BaselineRecord
 from vlah.core.types.claims import parse_claim
 from vlah.core.types.clock import Clock
@@ -41,13 +46,25 @@ from vlah.core.types.ids import ActorId
 from vlah.core.types.sources import SourceDecl
 from vlah.core.worker.loop import InterruptInbox, WorkerDeps, run_worker
 from vlah.core.worker.start_pack import ContextSources
-from vlah.ports.errors import NotSupportedError
 from vlah.ports.harness import Workspace
 from vlah.runtime.api import ArmRunRequest, Report, RunStatus
 from vlah.runtime.assembly import Assembly, RunComponents, RunContext
 from vlah.runtime.compose import COMPOSE_AGENT, ComposeStartPacks
 from vlah.runtime.isolation import worker_view
-from vlah.runtime.supervisor import Supervisor, WorkerRunner, WorkerSlot
+from vlah.runtime.status import (
+    STATUS_FILE_NAME,
+    LedgerLeases,
+    RunActivity,
+    SessionLedger,
+    build_status,
+    write_status,
+)
+from vlah.runtime.supervisor import (
+    STOP_REQUEST_FILE_NAME,
+    Supervisor,
+    WorkerRunner,
+    WorkerSlot,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -76,20 +93,21 @@ def top_level_source(sources: tuple[SourceDecl, ...]) -> str | None:
         return ladder[-1].id
 
 
-def judge_runs_in(blackboard: Blackboard, candidate_hash: str) -> int:
-    """The levels of candidates/<hash>/result.json the judge ran itself: a level
-    answered from the judge's cache is not a run (DECISIONS: judge cache hits)."""
+def judge_runs_in(blackboard: Blackboard, candidate_hash: str) -> list[str]:
+    """The levels of candidates/<hash>/result.json the judge ran itself, by source
+    id: a level answered from the judge's cache is not a run (DECISIONS: judge cache
+    hits)."""
     path = f"candidates/{candidate_hash}/result.json"
     if path not in blackboard.list_paths(path, None):
-        return 0
+        return []
     else:
         result: object = json.loads(blackboard.read(path, None))
         levels = result.get("levels", []) if isinstance(result, dict) else []
-        return sum(
-            1
+        return [
+            str(level.get("level"))
             for level in levels
             if isinstance(level, dict) and not level.get("is_cached", False)
-        )
+        ]
 
 
 def is_remeasure_claim(blackboard: Blackboard, claim_id: str) -> bool:
@@ -106,8 +124,12 @@ class RunFanout:
     components: RunComponents
     top_level: str | None
     # Summed as candidates finish, so status() never re-reads the blackboard.
-    judge_runs: int = 0
+    judge_runs_by_source: dict[str, int] = field(default_factory=dict[str, int])
     counted_hashes: set[str] = field(default_factory=set[str])
+
+    @property
+    def judge_runs(self) -> int:
+        return sum(self.judge_runs_by_source.values())
 
     def __call__(self, merged_commit: MergedCommit) -> None:
         self.components.indexer.apply(merged_commit)
@@ -119,9 +141,12 @@ class RunFanout:
                 and finished.candidate not in self.counted_hashes
             ):
                 self.counted_hashes.add(finished.candidate)
-                self.judge_runs += judge_runs_in(
+                for source in judge_runs_in(
                     self.components.blackboard, finished.candidate
-                )
+                ):
+                    self.judge_runs_by_source[source] = (
+                        self.judge_runs_by_source.get(source, 0) + 1
+                    )
             else:
                 pass
             if event.type == "result_ready":
@@ -141,16 +166,20 @@ class RunFanout:
                 and event.to == f"{VERIFIED_PREFIX}{self.top_level}"
                 and not is_remeasure_claim(self.components.blackboard, event.target)
             ):
-                self.components.integrator.on_verified(event.target)
+                if self.components.critic is not None:
+                    self.components.critic.on_verified(event.target)
+                else:
+                    self.components.integrator.on_verified(event.target)
             else:
                 pass
 
 
 def events_on(blackboard: Blackboard) -> Iterator[Event]:
-    """Every merged event, in sequence order."""
+    """Every merged event, in sequence order, with the number it was given."""
     for sequence in range(1, blackboard.head_sequence() + 1):
         path = blackboard.read(f"events/_seq/{sequence}", None).decode()
-        yield event_from_json(blackboard.read(path, None).decode())
+        event = event_from_json(blackboard.read(path, None).decode())
+        yield event.model_copy(update={"seq": sequence})
 
 
 def baselines_on(blackboard: Blackboard) -> tuple[BaselineRecord, ...]:
@@ -172,6 +201,8 @@ class HerdRun:
         components: RunComponents,
         supervisor: Supervisor,
         fanout: RunFanout,
+        ledger: SessionLedger,
+        activity: RunActivity,
         worker_count: int,
         poll_seconds: float,
     ) -> None:
@@ -179,6 +210,8 @@ class HerdRun:
         self.components = components
         self.supervisor = supervisor
         self.fanout = fanout
+        self.ledger = ledger
+        self.activity = activity
         self.worker_count = worker_count
         self.poll_seconds = poll_seconds
         self.finished = threading.Event()
@@ -186,15 +219,51 @@ class HerdRun:
             target=self.supervise, name=f"supervisor-{context.run_id}", daemon=True
         )
 
+    @property
+    def status_path(self) -> Path:
+        return self.context.run_root / STATUS_FILE_NAME
+
+    def write_status(self) -> None:
+        """A status that cannot be written is logged; it never stops the run."""
+        try:
+            write_status(
+                self.status_path,
+                build_status(
+                    context=self.context,
+                    components=self.components,
+                    supervisor=self.supervisor,
+                    ledger=self.ledger,
+                    activity=self.activity,
+                    judge_runs_by_source=dict(self.fanout.judge_runs_by_source),
+                    poll_seconds=self.poll_seconds,
+                ),
+            )
+        except Exception:
+            logger.exception(f"could not write {self.status_path}")
+
+    def tick(self, now_seconds: float) -> tuple[Event, ...]:
+        """One supervisor tick, then the status file."""
+        events = self.supervisor.tick(now_seconds)
+        self.write_status()
+        return events
+
+    def close(self) -> None:
+        """Finish the run, writing the status as closing starts and once it ends."""
+        self.write_status()
+        try:
+            self.supervisor.finish()
+        finally:
+            self.write_status()
+
     def supervise(self) -> None:
         try:
             while not self.supervisor.is_stopping:
                 try:
-                    self.supervisor.tick(self.context.clock.now_seconds())
+                    self.tick(self.context.clock.now_seconds())
                 except Exception:
                     logger.exception("the supervisor's tick failed; it keeps going")
                 self.supervisor.stop_signal.wait(self.poll_seconds)
-            self.supervisor.finish()
+            self.close()
         finally:
             self.finished.set()
 
@@ -219,7 +288,7 @@ class HerdRun:
         if self.thread.ident is None:
             # Never started: there is no supervisor thread to finish the run.
             try:
-                self.supervisor.finish()
+                self.close()
             finally:
                 self.finished.set()
         else:
@@ -259,6 +328,7 @@ class LocalHerd:
         self,
         agent: ActorId,
         components: RunComponents,
+        leases: Leases,
         inbox: InterruptInbox,
         stop_signal: threading.Event,
         is_compose: bool,
@@ -273,7 +343,7 @@ class LocalHerd:
             task_queue=(
                 components.compose_queue if is_compose else components.task_queue
             ),
-            leases=components.leases,
+            leases=leases,
             executor=components.executor,
             harness=components.harness,
             tool_server=(
@@ -308,16 +378,26 @@ class LocalHerd:
             components=components,
             top_level=top_level_source(context.problem.sources),
         )
+        activity = RunActivity(clock=context.clock)
         # A fresh Indexer knows nothing merged before this process started.
         components.indexer.rebuild()
         components.blackboard.subscribe(fanout)
+        components.blackboard.subscribe(activity)
+        stale_request = context.run_root / STOP_REQUEST_FILE_NAME
+        if stale_request.is_file():
+            logger.warning(f"removing {stale_request}, left by an earlier process")
+            stale_request.unlink()
+        else:
+            pass
+        ledger = SessionLedger()
+        leases = LedgerLeases(leases=components.leases, ledger=ledger)
         inbox = InterruptInbox()
         stop_signal = threading.Event()
         slots = tuple(
             WorkerSlot(
                 agent=agent,
                 deps=self.worker_deps(
-                    agent, components, inbox, stop_signal, is_compose
+                    agent, components, leases, inbox, stop_signal, is_compose
                 ),
                 is_compose=is_compose,
             )
@@ -343,6 +423,8 @@ class LocalHerd:
             components=components,
             supervisor=supervisor,
             fanout=fanout,
+            ledger=ledger,
+            activity=activity,
             worker_count=self.worker_count,
             poll_seconds=self.poll_seconds,
         )
@@ -417,12 +499,3 @@ class AssembledRunArm:
         run = herd.start()
         run.wait(None)
         return run.report()
-
-
-def run_demo(seed: int) -> Report:
-    """runtime.api.RunDemo. It needs in-package Router, Indexer, Integrator, budget,
-    stop rules and metrics, which do not exist yet (#12, #15, #19, #20)."""
-    raise NotSupportedError(
-        "vlah demo waits for the Router (#15), Indexer (#12), Integrator (#19) and "
-        "budget, stop rules and metrics (#20)"
-    )

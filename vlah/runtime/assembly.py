@@ -27,6 +27,7 @@ from vlah.core.types.clock import Clock
 from vlah.core.types.params import Params
 from vlah.ports.executor import Executor
 from vlah.ports.harness import Harness
+from vlah.roles.critic.holdout import HoldoutCritic
 from vlah.tools.api import ToolServer
 
 
@@ -42,6 +43,22 @@ class RunContext:
     clock: Clock
     random: Random
     duration_seconds: float
+
+
+@dataclass(frozen=True, kw_only=True)
+class QueuedTaskCounts:
+    arm: int
+    compose: int
+
+
+class CountQueuedTasks(Protocol):
+    def __call__(self) -> QueuedTaskCounts:
+        """Tasks waiting in the arm and compose queues, for the status file.
+
+        The TaskQueue contract has no count, so the assembly that built the queues
+        supplies it.
+        """
+        ...
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -68,6 +85,10 @@ class RunComponents:
     compose_tool_server: ToolServer
     target_repository: str
     target_ref: str
+    count_queued_tasks: CountQueuedTasks
+    # None: verified claims go straight to the Integrator and nothing in the run
+    # scores the verdict split (D66).
+    critic: HoldoutCritic | None = None
 
 
 class Assembly(Protocol):

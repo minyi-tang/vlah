@@ -54,6 +54,7 @@ def report_summary(report: Report) -> str:
         f"deliverable: baseline@{deliverable.k} with {len(deliverable.candidates)} "
         f"merged candidate(s)",
         f"baselines written: {len(report.baselines)}",
+        f"holdout score (verdict split): {report.metrics.holdout_score}",
     ]
     for candidate in deliverable.candidates:
         lines.append(f"  merged {candidate}")
@@ -67,6 +68,7 @@ def write_report(report: Report, path: Path) -> None:
                 "run_id": report.run_id,
                 "arm": report.arm,
                 "deliverable": report.deliverable.model_dump(mode="json"),
+                "holdout_score": report.metrics.holdout_score,
                 "baselines": [
                     record.model_dump(mode="json") for record in report.baselines
                 ],
