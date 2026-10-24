@@ -32,13 +32,20 @@ def pack_problem(name: str, out: Path) -> Path:
     if out.exists():
         shutil.rmtree(out)
     out.mkdir(parents=True)
+    # A problem that writes its own worker view of sites/ (problem A, A19) keeps the originals,
+    # with their workload and mechanism settings, out of the copy.
+    write_worker_sites = getattr(prob, "write_worker_sites", None)
     for p in sorted(src.rglob("*")):
         rel = p.relative_to(src)
         if _excluded(rel) or not p.is_file():
             continue
+        if write_worker_sites is not None and rel.parts[0] == "sites":
+            continue
         q = out / rel
         q.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(p, q)
+    if write_worker_sites is not None:
+        write_worker_sites(out)
     fast, detail = {}, {}
     for s in prob.public_seeds:
         r = prob.evaluate(prob.baseline_dir(), "fast", s)

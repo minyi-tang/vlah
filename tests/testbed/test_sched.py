@@ -65,6 +65,24 @@ def test_pack_excludes_hidden_material(tmp_path):
         assert (packed_dir / must).exists(), must
     for gone in ("hidden", "reference", "probes", "problem.yaml", "pi_prompt.md"):
         assert not (packed_dir / gone).exists(), gone
+    # The worker's site files carry the plant and the symptom only, plus the public traces (A19).
+    for site_file in sorted((packed_dir / "sites").glob("*.yaml")):
+        settings = yaml.safe_load(site_file.read_text())
+        for key in (
+            "mechanisms",
+            "arrival",
+            "duration",
+            "users",
+            "cores",
+            "est_noise_sigma",
+        ):
+            assert key not in settings, (site_file.name, key)
+    for seed in (1, 2, 3, 4, 5):
+        for site in range(1, 7):
+            trace = (
+                packed_dir / "sites" / "traces" / f"seed{seed}" / f"site{site}.jsonl"
+            )
+            assert trace.exists(), trace
     if PROBLEM.hidden is not None:
         secret = str(PROBLEM.seeds("dev")[0])
         for packed_file in packed_dir.rglob("*"):

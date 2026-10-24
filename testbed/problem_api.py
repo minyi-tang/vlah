@@ -8,13 +8,18 @@ repo (slow-eval machine, has hidden files) and in a packed worker copy (no hidde
 from __future__ import annotations
 
 import atexit
+import contextvars
 import hashlib
 import importlib
 import importlib.util
 import math
+import multiprocessing
 import os
 import random
 import sys
+from collections.abc import Iterator
+from concurrent.futures import ProcessPoolExecutor
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Literal, Protocol
 
@@ -230,9 +235,18 @@ def candidate_hash(candidate_dir: Path, target: str = "baseline@0") -> str:
     return h.hexdigest()
 
 
-# ---------------------------------------------------------------- process pool (spawn-safe)
+# ---------------------------------------------------------------- process pools (spawn-safe)
 
-_POOL = None
+# One 24 h public seed is six site simulations, so six workers run one fast request at full
+# width (issue #113).
+FAST_POOL_WORKERS = 6
+# Which pool evaluate_many submits to. Problems call pool() with no argument, so the slow-eval
+# service switches a request onto the small fast pool with the fast_pool() context manager
+# instead of threading a pool name through the problem protocol.
+POOL_NAME: contextvars.ContextVar[str] = contextvars.ContextVar(
+    "TB_POOL_NAME", default="slow"
+)
+POOLS: dict[str, ProcessPoolExecutor] = {}
 
 
 def call_problem(root: str, method: str, *args, **kwargs):
@@ -240,16 +254,32 @@ def call_problem(root: str, method: str, *args, **kwargs):
     return getattr(load_problem(root), method)(*args, **kwargs)
 
 
-def pool():
-    global _POOL
-    if _POOL is None:
-        import multiprocessing as mp
-        import os
-        from concurrent.futures import ProcessPoolExecutor
-
-        n = int(os.environ.get("TB_WORKERS", "0")) or (os.cpu_count() or 4)
-        _POOL = ProcessPoolExecutor(
-            max_workers=n, mp_context=mp.get_context("forkserver")
+def pool() -> ProcessPoolExecutor:
+    """The process pool named by POOL_NAME: "slow" (TB_WORKERS or every core) by default, "fast"
+    (at most FAST_POOL_WORKERS) inside fast_pool(). A fast request must not queue behind a
+    slow batch of 120 site tasks, so the two never share an executor."""
+    name = POOL_NAME.get()
+    if name not in POOLS:
+        cpu_count = os.cpu_count() or 4
+        if name == "fast":
+            worker_count = min(FAST_POOL_WORKERS, cpu_count)
+        else:
+            worker_count = int(os.environ.get("TB_WORKERS", "0")) or cpu_count
+        POOLS[name] = ProcessPoolExecutor(
+            max_workers=worker_count,
+            mp_context=multiprocessing.get_context("forkserver"),
         )
-        atexit.register(_POOL.shutdown, wait=False, cancel_futures=True)
-    return _POOL
+        atexit.register(POOLS[name].shutdown, wait=False, cancel_futures=True)
+    else:
+        pass
+    return POOLS[name]
+
+
+@contextmanager
+def fast_pool() -> Iterator[None]:
+    """Run the problem's evaluations in this thread on the fast pool for the duration of the block."""
+    token = POOL_NAME.set("fast")
+    try:
+        yield
+    finally:
+        POOL_NAME.reset(token)

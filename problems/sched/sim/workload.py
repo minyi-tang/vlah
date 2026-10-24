@@ -4,8 +4,10 @@ Every dataset (public / dev / audit / judge) uses this same generator with diffe
 hidden seeds live only on the slow-eval machine.
 """
 
+import json
 import math
 import random
+from pathlib import Path
 
 _DAY = 86400.0
 
@@ -125,7 +127,17 @@ def generate(profile, common, seed, scale=1.0):
             else f"u{rng.randrange(1 if big is not None else 0, n_users)}"
         )
         est = dur * rng.lognormvariate(0.0, sigma)
-        rack_pref = rng.randrange(racks) if has_affinity else None
+        if has_affinity:
+            rack_pref = rng.randrange(racks)
+        elif racks > 1:
+            # Every site with racks gives its jobs a preferred rack, so the field alone tells a
+            # policy nothing about which site penalizes off-rack runs (A20). Drawn from its own
+            # stream so the job stream above stays byte-identical to the single-site version.
+            rack_pref = random.Random(f"rack:{seed}:{site}:{len(jobs)}").randrange(
+                racks
+            )
+        else:
+            rack_pref = None
         jobs.append(
             {
                 "id": len(jobs),
@@ -139,3 +151,18 @@ def generate(profile, common, seed, scale=1.0):
             }
         )
     return jobs
+
+
+def write_trace(jobs, path):
+    """Write a job list as one JSON object per line (the public traces in the worker copy)."""
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w") as f:
+        for job in jobs:
+            f.write(json.dumps(job, separators=(",", ":")) + "\n")
+
+
+def load_trace(path):
+    """Read a job list written by write_trace."""
+    with Path(path).open() as f:
+        return [json.loads(line) for line in f if line.strip()]

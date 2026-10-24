@@ -3,7 +3,7 @@ summary: >-
   Users complain that quick jobs sit in the queue for a long time behind other people's work.
 machines: 16
 cores_per_machine: 8
-racks: 1
+racks: 4
 arrival: {kind: poisson, utilization: 0.72}
 duration: {kind: lognormal, mean_s: 2600, sigma_log: 0.52}    # the other users' jobs
 cores: {2: 0.3, 4: 0.3, 8: 0.4}                               # the other users' jobs

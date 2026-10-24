@@ -51,6 +51,17 @@ DUR_BUCKETS = [
     (3600, 4 * 3600, "d1h-4h"),
     (4 * 3600, 1e18, "d>4h"),
 ]
+# What the worker copy's site files keep (A19): the plant and the symptom, and the engine's run
+# settings. Everything that describes the workload or how machines behave stays out.
+WORKER_SITE_KEYS = ("id", "summary", "machines", "cores_per_machine", "racks")
+WORKER_COMMON_KEYS = (
+    "fast_horizon_s",
+    "drain_cap_s",
+    "tick_s",
+    "hook_budget_s",
+    "max_timeout_ratio",
+    "max_hook_calls_per_site",
+)
 
 
 def load_profiles(sites_dir: Path) -> tuple[dict, list[dict]]:
@@ -148,6 +159,45 @@ class SchedProblem:
                 return f"params.yaml does not parse: {e}"
         return None
 
+    # ------------------------------------------------------------------ worker copy (A19)
+    def trace_path(self, seed: int, site_id: int) -> Path:
+        return self.root / "sites" / "traces" / f"seed{seed}" / f"site{site_id}.jsonl"
+
+    def write_worker_sites(self, out: Path) -> None:
+        """The worker's `sites/`: per site the plant and the symptom, the engine's run settings,
+        and the public 24 h traces. No generator or mechanism settings (A19): `tb fast` inside a
+        run is served by the slow-eval service on the public tier; the local simulator runs these
+        traces without the mechanisms, as a smoke test."""
+        sites_dir = Path(out) / "sites"
+        sites_dir.mkdir(parents=True, exist_ok=True)
+        common = {
+            k: self.public_common[k]
+            for k in WORKER_COMMON_KEYS
+            if k in self.public_common
+        }
+        (sites_dir / "common.yaml").write_text(
+            "# Simulator run settings for the worker copy. Times in seconds. The traces under\n"
+            "# traces/seed<N>/ are the public trace (last month's sample); the official evaluation\n"
+            "# uses traces you cannot see.\n" + yaml.safe_dump(common, sort_keys=False)
+        )
+        for prof in self.public_sites:
+            plant = {k: prof[k] for k in WORKER_SITE_KEYS if k in prof}
+            (sites_dir / f"site{prof['id']}.yaml").write_text(
+                yaml.safe_dump(plant, sort_keys=False, width=100)
+            )
+        fast_common = dict(self.public_common, horizon_s=self.horizon("fast"))
+        for seed in self.public_seeds:
+            for prof in self.public_sites:
+                jobs = workload.generate(prof, fast_common, seed, scale=self.scale)
+                workload.write_trace(
+                    jobs,
+                    Path(out)
+                    / "sites"
+                    / "traces"
+                    / f"seed{seed}"
+                    / f"site{prof['id']}.jsonl",
+                )
+
     # ------------------------------------------------------------------ evaluation
     def profiles(self, tier: str) -> tuple[dict, list[dict]]:
         """(common, sites) for a tier: the public tier for "fast", the judge's for "slow"."""
@@ -162,11 +212,9 @@ class SchedProblem:
     def horizon(self, tier: str) -> float:
         """Slow tier (and final_check): horizon_s. Fast tier: the shorter fast_horizon_s."""
         common, _ = self.profiles(tier)
-        return (
-            common.get("fast_horizon_s", common["horizon_s"])
-            if tier == "fast"
-            else common["horizon_s"]
-        )
+        if tier == "fast" and "fast_horizon_s" in common:
+            return common["fast_horizon_s"]
+        return common["horizon_s"]
 
     def site_result(
         self,
@@ -179,7 +227,10 @@ class SchedProblem:
         common, sites = self.profiles(tier)
         prof = sites[site_idx]
         common = dict(common, horizon_s=self.horizon(tier))
-        jobs = workload.generate(prof, common, seed, scale=self.scale)
+        if "arrival" in prof:
+            jobs = workload.generate(prof, common, seed, scale=self.scale)
+        else:  # a worker copy: no generator settings, only the public traces (A19)
+            jobs = workload.load_trace(self.trace_path(seed, prof["id"]))
         out = engine.run_site(
             prof, common, jobs, Path(candidate_dir), timeout=timeout, scale=self.scale
         )

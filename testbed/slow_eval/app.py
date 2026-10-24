@@ -80,6 +80,19 @@ def create_app(
             need_run(x_tb_run), body, trusted=trusted(x_tb_key), token=x_tb_token
         )
 
+    @app.post("/fast")
+    def fast(
+        body: dict = Body(...),
+        x_tb_run: str | None = Header(None),
+        x_tb_actor: str | None = Header(None),
+        x_tb_key: str | None = Header(None),
+        x_tb_token: str | None = Header(None),
+    ):
+        run = need_run(x_tb_run)
+        return se.fast(
+            run, body, actor_ok(run, x_tb_actor or "anon", x_tb_key, x_tb_token)
+        )
+
     @app.get("/status/{ticket}")
     def status(
         ticket: str,
