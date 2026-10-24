@@ -243,6 +243,22 @@ def test_a_symbolic_link_in_the_candidate_is_refused(tmp_path: Path) -> None:
     assert not harness.blackboard.list_paths("candidates/", None)
 
 
+def test_a_git_checkout_submitted_as_a_candidate_is_refused_with_guidance(
+    tmp_path: Path,
+) -> None:
+    """A worker submitted its target/ clone; the blackboard refused the .git paths and
+    the agent saw only an opaque tool error (first real run, #109)."""
+    harness = make_eval_harness(tmp_path)
+    directory = harness.candidate(1.0)
+    (directory / ".git").mkdir()
+    (directory / ".git" / "HEAD").write_text("ref: refs/heads/main\n")
+    response = harness.service.request(harness.request(directory), WORKER)
+    assert response.status == "invalid_request"
+    assert "contains .git" in str(response.error)
+    assert "never a git checkout" in str(response.error)
+    assert not harness.blackboard.list_paths("candidates/", None)
+
+
 def test_dedup_survives_a_restart_but_unfinished_work_is_released(
     tmp_path: Path,
 ) -> None:

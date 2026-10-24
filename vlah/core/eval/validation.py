@@ -17,6 +17,7 @@ from vlah.ports.signal_source import SignalSource
 
 MAX_CANDIDATE_BYTES = 5 * 1024 * 1024
 BASELINE_PATTERN = re.compile(r"baseline@(?P<number>\d+)")
+GIT_DIRECTORY_NAME = ".git"
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -29,6 +30,16 @@ def symbolic_link_in(directory: Path) -> Path | None:
     """The first symbolic link under directory; hashing or copying it would follow it."""
     for path in sorted(directory.rglob("*")):
         if path.is_symlink():
+            return path
+        else:
+            continue
+    return None
+
+
+def git_entry_in(directory: Path) -> Path | None:
+    """A .git entry anywhere under directory: the candidate is a checkout, not a payload."""
+    for path in sorted(directory.rglob("*")):
+        if path.name.lower() == GIT_DIRECTORY_NAME:
             return path
         else:
             continue
@@ -56,10 +67,17 @@ def check_candidate(
         return "the candidate directory has no manifest.yaml"
     else:
         link = symbolic_link_in(candidate_directory)
+        git_entry = git_entry_in(candidate_directory)
         if link is not None:
             return (
                 f"the candidate contains a symbolic link "
                 f"({link.relative_to(candidate_directory)})"
+            )
+        elif git_entry is not None:
+            return (
+                f"the candidate contains {git_entry.relative_to(candidate_directory)}: "
+                "submit a fresh directory holding only the candidate's files and "
+                "manifest.yaml, never a git checkout such as target/"
             )
         else:
             try:

@@ -1,6 +1,9 @@
 These are suggestions, not rules.
 
 - Search the blackboard before you submit a candidate: someone may have tried it.
+- A candidate is a fresh directory holding only the files to evaluate plus
+  manifest.yaml. Copy those files into it; never submit target/ or any other git
+  checkout, since a candidate that contains .git is refused.
 - When an idea fails, record a dead_end whose evidence cites the candidate it
   tested (candidates/<hash>/...), so nobody runs it again.
 - Use surprise for anything unexpected, even before you know what it means.
