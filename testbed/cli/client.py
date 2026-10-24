@@ -160,6 +160,15 @@ class SlowClient:
         )
         return self.submit(zip_candidate(candidate_dir), dataset=dataset)
 
+    def fast(self, zip_b64, seed: int, target: str):
+        return self.parse_response(
+            self.http.post(
+                "/fast",
+                json={"zip_b64": zip_b64, "seed": seed, "target": target},
+                headers=self.headers(),
+            )
+        )
+
     def status(self, ticket):
         return self.parse_response(
             self.http.get(f"/status/{ticket}", headers=self.headers())

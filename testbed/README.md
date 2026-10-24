@@ -60,6 +60,12 @@ tb fast problems/sched/policy --seed 1            # baseline: a few seconds (24 
 tb fast private/testbed/sched/reference --seed 1  # the reference policy (hidden from workers)
 ```
 
+Inside a run (`TB_SLOW_URL` and `TB_RUN_ID` set) `tb fast` does not simulate locally: it zips the
+candidate and calls the slow-eval service's `POST /fast`, which evaluates on the public tier with its
+mechanisms, records the `fast_run` event and returns the same JSON, minus `extra.mechanisms`. Free,
+unlimited, no ticket, no visibility delay, identical in every arm (DECISIONS I16). If the service
+cannot be reached the command fails rather than falling back to the worker's local copy.
+
 **Day 2: slow tier, recorder, probes, scorecard.**
 
 ```bash
@@ -112,7 +118,7 @@ runner uses the herd's last baseline.
 
 ```
 PROMPT.md   the PI prompt (spec §3), with hours/quota filled in and the "no one online" line
-TOOLS.md    how to use tb fast / submit / status / history / final (identical in all arms)
+TOOLS.md    how to use tb fast (served by /fast) / submit / status / history / final (identical in all arms)
 problem/    the worker copy of the problem: sim/, sites/ (plant, symptoms, public traces; A19), policy/, map/, baseline_scores.json
 work/       a copy of the baseline policy to start from
 baseline/   the current baseline; in single and herd it changes as the integrator merges
@@ -175,8 +181,9 @@ Each writes `private/testbed/var/extras/<name>.md`. `--seeds N` sets how many de
 
 ```mermaid
 flowchart LR
-  A[Agent] -->|tb fast: free, served on the public tier| S
-  A -->|tb submit: scarce| S[slow eval]
+  A[Agent] -->|tb fast: free, no quota, public tier| S[slow eval]
+  A -->|tb submit: scarce| S
+  A -.->|sim/: local smoke test on the public traces| P[problem copy]
   S --> H[hidden seeds + probes]
   S --> R[(events.jsonl)]
   I[integrator] <-->|re-measure, audit| S
