@@ -34,8 +34,10 @@ DEFAULT_ENV_FILE = Path.home() / "litellm-copilot" / ".env"
 DEFAULT_BASE_URL = "http://127.0.0.1:4000"
 ASSISTANT_MODEL = "claude-haiku-5-5"
 GRADER_MODEL = "claude-sonnet-5-5"
-ASSISTANT_MAX_TOKENS = 400
-GRADER_MAX_TOKENS = 800
+# The API needs a cap on every reply; these sit far above what either reply needs,
+# so nothing is cut off to save tokens (P10). Brevity is the grader's job.
+ASSISTANT_MAX_TOKENS = 4000
+GRADER_MAX_TOKENS = 4000
 # A grader that reasons first can run out of tokens before its JSON: grade again.
 GRADER_ATTEMPTS = 3
 SCORE_PATTERN = re.compile(r'"score"\s*:\s*(\d+(?:\.\d+)?)')
