@@ -6,7 +6,7 @@ These rules apply to every coding agent working in this repository, including Co
 
 VLAH runs many LLM agents on one hard optimization problem, where the only trustworthy judge is slow and scarce. The bet (H1) is that agents who share as they go beat the same agents working in isolation and merged the same way, with the same time and the same judge budget.
 
-**Where we are:** the Foundation (#4) comes first. Then 13 Wave-1 components (#11–#23) are built in parallel. The testbed (#10) is the herd's guardrail and semi-CI. The plan is the roadmap, #3.
+**Where we are:** the Foundation (#4) and the 13 Wave-1 components (#11–#23) are done, and real runs work end to end on one machine. Wave 2 (#117–#124) has two tracks: Track A (#117–#121) makes every component work on a real problem and comes first; Track B (#122–#124) leads to the H1 comparison on the testbed. The testbed (#10) is the herd's guardrail and semi-CI. The plan is the roadmap, #3.
 
 ## Start here
 
@@ -65,7 +65,13 @@ Component markers: `blackboard indexer queue eval router tools executor harness 
 | `adapters/executor/sandbox/` | W1-12 #22 |
 | `cli/`, `core/problem/`, `adapters/human/cli/`; `examples/` (repo root) | W1-13 #23 |
 | `spikes/checkpoint/`, `docs/spikes/h11.md` (repo root) | S-01 #24 |
-| `roles/` | Wave 2 (no issues yet) |
+| `roles/critic/` | W2-05 #121 |
+| `roles/` (other roles) | later waves (no issues yet) |
+| `experiment/` | W2-08 #124 |
+| `adapters/signal/command/` | W2-01 #117 |
+| `adapters/store/sqlite/` | W2-04 #120 |
+| `examples/testbed-sched/` (repo root) | W2-07 #123 |
+| Wave-1 paths a Wave-2 issue lists under **Owns** | that issue, for the files it names |
 | `testbed/`, `problems/`, `tests/testbed/` (repo root) | **testbed agents** (#10) |
 | `tests/unit/<component>/` (repo root) | that component |
 | `tests/l0/test_l0_<NN>.py` (repo root) | the component listed in #9's table (the Foundation creates them as stubs) |
