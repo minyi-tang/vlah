@@ -41,7 +41,6 @@ import shlex
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
-from urllib.parse import urlsplit
 
 from vlah.adapters.harness.copilot.transcript import (
     latest_context,
@@ -49,6 +48,7 @@ from vlah.adapters.harness.copilot.transcript import (
     rate_limit_events,
     tool_calls,
 )
+from vlah.adapters.harness.egress import session_policy
 from vlah.adapters.harness.interrupt_hook import HERD_SERVER_NAME, WRAP_UP_TOOL_NAMES
 from vlah.core.types.ids import ActorId
 from vlah.core.types.params import EgressPolicy, HostRule, Params
@@ -95,36 +95,17 @@ class CopilotConfig:
     environment: dict[str, str] = field(default_factory=dict[str, str])
 
 
-def host_and_port(url: str) -> tuple[str, int]:
-    """The destination of a URL, or of a bare domain as --allow-url accepts it."""
-    parts = urlsplit(url if "://" in url else f"https://{url}")
-    if parts.hostname is None:
-        raise ValueError(f"{url!r} names no host")
-    elif parts.port is not None:
-        return parts.hostname, parts.port
-    else:
-        return parts.hostname, 80 if parts.scheme == "http" else 443
-
-
 def egress_policy(
     config: CopilotConfig, tool_endpoint: ToolEndpoint, hook_config: HookConfig
 ) -> EgressPolicy:
     """Everything the worker sandbox may reach (D75): the herd's tools, the hosts
     in allowed_urls, and Copilot's own hosts, in that order, without repeats."""
-    rules: list[HostRule] = []
-    for url in (
-        tool_endpoint.url,
-        hook_config.interrupt_check_url,
-        hook_config.interrupt_ack_url,
-    ):
-        host, port = host_and_port(url)
-        rules.append(HostRule(host=host, ports=(port,), purpose="tools"))
-    for url in config.allowed_urls:
-        host, port = host_and_port(url)
-        rules.append(HostRule(host=host, ports=(port,), purpose="testbed"))
-    for host in config.copilot_api_hosts:
-        rules.append(HostRule(host=host, purpose="model_api"))
-    return EgressPolicy(allow=tuple(dict.fromkeys(rules)))
+    return session_policy(
+        tool_endpoint,
+        hook_config,
+        config.allowed_urls,
+        [HostRule(host=host, purpose="model_api") for host in config.copilot_api_hosts],
+    )
 
 
 def mcp_config(tool_endpoint: ToolEndpoint) -> str:

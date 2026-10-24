@@ -30,6 +30,7 @@ import yaml
 from testbed.problem_api import (
     candidate_hash,
     content_hash,
+    fast_pool,
     load_problem,
     resolve_problem_dir,
     sd,
@@ -37,6 +38,11 @@ from testbed.problem_api import (
 from testbed.recorder.log import Recorder
 
 MAX_ZIP = 5 * 1024 * 1024
+# Fast requests evaluating at once; a burst waits here instead of forking a process per site.
+FAST_CONCURRENT_EVALUATIONS = 2
+# Per-site counters and job waits stay on the service: they would show a worker which hidden
+# mechanisms fired (issue #113).
+FAST_EXTRA_HIDDEN_KEYS = ("waits", "mechanisms")
 SYSTEM_ACTORS = {"runner", "integrator", "composer", "slow_eval"}
 EXEMPT_CAP = 6
 # Event types the testbed itself writes. Over HTTP only the system key may post them.
@@ -192,6 +198,9 @@ class SlowEval:
         self.system_key = kf.read_text().strip()
         self._problems: dict[str, object] = {}
         self._fps: dict[str, str] = {}
+        self.fast_evaluation_slots = threading.Semaphore(FAST_CONCURRENT_EVALUATIONS)
+        # (problem name, public seed) -> baseline fast score, for runs whose calibration lacks it
+        self.baseline_fast_scores: dict[tuple[str, int], float | None] = {}
 
     # ------------------------------------------------------------------ helpers
     def now(self):
@@ -597,6 +606,104 @@ class SlowEval:
         else:
             self.pool.submit(self._run_ticket, ticket)
         return {"ticket": ticket, "position": position, "visible_at": visible}
+
+    # ------------------------------------------------------------------ fast tier (issue #113)
+    def baseline_fast(self, run_id: str, problem_name: str, seed: int) -> float | None:
+        """The baseline's fast score on a public seed: from the run's calibration when it has it,
+        else evaluated once per process."""
+        calibration_scores = self.calibration(run_id).get("baseline_fast") or {}
+        if str(seed) in calibration_scores:
+            return calibration_scores[str(seed)]
+        else:
+            pass
+        cache_key = (problem_name, seed)
+        if cache_key not in self.baseline_fast_scores:
+            prob = self.problem(problem_name)
+            self.baseline_fast_scores[cache_key] = prob.evaluate(
+                prob.baseline_dir(), "fast", seed
+            )["score"]
+        else:
+            pass
+        return self.baseline_fast_scores[cache_key]
+
+    def fast(self, run_id: str, body: dict, actor: str) -> dict:
+        """Evaluate a candidate on the public tier for one public seed and record one fast_run
+        event. No ticket, no quota, no visibility delay: the fast tier is free and unlimited, it
+        only moves from the worker's machine to the service so the worker copy needs no mechanisms.
+        """
+        run = self.run_row(run_id)
+        try:
+            zip_bytes = base64.b64decode(body.get("zip_b64") or "")
+        except Exception:
+            raise ApiError(400, {"reason": "invalid_candidate", "detail": "bad base64"})
+        if len(zip_bytes) > MAX_ZIP:
+            raise ApiError(400, {"reason": "too_large"})
+        else:
+            pass
+        prob = self.problem(run["problem"])
+        seed = body.get("seed")
+        if (
+            not isinstance(seed, int)
+            or isinstance(seed, bool)
+            or seed not in prob.public_seeds
+        ):
+            raise ApiError(
+                400,
+                {
+                    "reason": "invalid_seed",
+                    "detail": f"only public seeds {list(prob.public_seeds)} are allowed",
+                },
+            )
+        else:
+            pass
+        staging = self.data / "runs" / run_id / "fast" / ("staging-" + uuid.uuid4().hex)
+        candidate_dir = self._unzip(zip_bytes, staging)
+        started_at = self.now()
+        try:
+            manifest_path = candidate_dir / "manifest.yaml"
+            manifest = (
+                (yaml.safe_load(manifest_path.read_text()) or {})
+                if manifest_path.exists()
+                else {}
+            )
+            validation_error = prob.validate_candidate(candidate_dir)
+            if validation_error:
+                raise ApiError(
+                    400, {"reason": "invalid_candidate", "detail": validation_error}
+                )
+            else:
+                pass
+            target = str(body.get("target") or manifest.get("target") or "baseline@0")
+            submitted_hash = candidate_hash(candidate_dir, target)
+            with self.fast_evaluation_slots, fast_pool():
+                result = prob.evaluate(candidate_dir, "fast", seed)
+                baseline_score = self.baseline_fast(run_id, run["problem"], seed)
+        finally:
+            shutil.rmtree(candidate_dir, ignore_errors=True)
+        self.recorder(run_id).write(
+            "fast_run",
+            {
+                "hash": submitted_hash,
+                "seed": seed,
+                "score": result["score"],
+                "baseline_score": baseline_score,
+            },
+            ts=self.now(),
+            actor=actor,
+        )
+        return {
+            "hash": submitted_hash,
+            "seed": seed,
+            "score": result["score"],
+            "baseline_score": baseline_score,
+            "per_item": result["per_item"],
+            "extra": {
+                key: value
+                for key, value in result["extra"].items()
+                if key not in FAST_EXTRA_HIDDEN_KEYS
+            },
+            "elapsed_s": round(self.now() - started_at, 1),
+        }
 
     def _run_ticket(self, ticket):
         with self.lock:

@@ -2,7 +2,7 @@ id: 5
 summary: Nothing special reported. Jobs take whole machines, and users fill in a duration estimate when they submit.
 machines: 16
 cores_per_machine: 8
-racks: 1
+racks: 4
 arrival: {kind: poisson, utilization: 0.78}
 cores: {8: 1.0}
 duration: {kind: lognormal, mean_s: 1900, sigma_log: 0.75}

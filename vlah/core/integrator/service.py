@@ -9,6 +9,10 @@ baselines, the core's final spot check, then the frozen deliverable.
 
 One re-entrant lock covers the core: on_verified runs on whichever thread delivers
 a merge, tick and closeout on the supervisor's.
+
+A new wrapper first restores what earlier processes of the run left on the
+blackboard (resume.py): the versions, the spot-check counters, the guard batch and
+its queue of verified claims, so a resumed run continues where it stopped (D13).
 """
 
 import logging
@@ -42,10 +46,17 @@ from vlah.core.integrator.opportunity_map import (
     run_script,
 )
 from vlah.core.integrator.records import IntegratorRecords
+from vlah.core.integrator.resume import (
+    baseline_records,
+    read_history,
+    replay_versions,
+    restore_guard,
+    restore_spot_checks,
+)
 from vlah.core.queue.api import TaskQueue
 from vlah.core.types.baseline import BaselineRecord
 from vlah.core.types.candidates import CandidateManifest
-from vlah.core.types.claims import parse_claim
+from vlah.core.types.claims import Claim, parse_claim
 from vlah.core.types.clock import Clock
 from vlah.core.types.events import Event, RemeasureReady, event_from_json
 from vlah.core.types.params import GateSpec, Params
@@ -55,8 +66,9 @@ logger = logging.getLogger(__name__)
 STEPS_PER_TICK = 8
 DRAIN_STEPS = 10_000
 VERIFIED_PREFIX = "verified:"
-# The eval client tags the result claim of a compose candidate (D74).
+# The eval client tags the result claim of a compose candidate and of a remeasure (D74).
 COMPOSE_TAG = "compose"
+REMEASURE_TAG = "remeasure"
 EVAL_SERVICE = "eval_service"
 
 
@@ -89,6 +101,12 @@ class ResultRecord(BaseModel):
 
     def at(self, level: str) -> LevelRecord | None:
         return next((item for item in self.levels if item.level == level), None)
+
+
+def candidate_of(claim: Claim) -> str | None:
+    """The candidate hash a result claim's evidence points at."""
+    pointers = [item.candidate for item in claim.evidence if item.candidate]
+    return pointers[0].split("/")[1] if pointers else None
 
 
 @dataclass(kw_only=True)
@@ -158,6 +176,7 @@ class HerdIntegrator:
         self.event_cursor = self.blackboard.head_sequence()
         self.on_version_complete(self.core.versions[0])
         self.map.run(0, Path(self.core.versions[0].dir))
+        self.restore()
 
     # The core's callback: a version is complete
 
@@ -197,6 +216,59 @@ class HerdIntegrator:
             directory.mkdir(parents=True, exist_ok=True)
             return directory
 
+    def restore(self) -> None:
+        """Continue from the run's earlier processes; a new run has nothing to restore.
+
+        Payloads materialized before a crash may be partial, so they are written again.
+        """
+        shutil.rmtree(self.work_directory / "cands", ignore_errors=True)
+        history = read_history(self.blackboard, self.top_level)
+        claim_by_hash: dict[str, str] = {}
+        pending_claims: list[str] = []
+        for claim_id in history.verified_claims:
+            claim = self.result_claim(claim_id)
+            candidate = candidate_of(claim) if claim is not None else None
+            if claim is None or candidate is None or REMEASURE_TAG in claim.tags:
+                continue
+            else:
+                claim_by_hash.setdefault(candidate, claim_id)
+                if (
+                    candidate not in history.decided_candidates
+                    and claim_id not in history.refuted_claims
+                ):
+                    pending_claims.append(claim_id)
+                else:
+                    pass
+        records = baseline_records(self.blackboard)
+        self.guard.outcomes.update(
+            {record.k: dict(record.gates) for record in records if record.gates}
+        )
+        verified_by_hash: dict[str, VerifiedCandidate] = {}
+        for added in (record.added for record in records if record.added is not None):
+            claim_id = claim_by_hash.get(added)
+            verified = (
+                self.verified_candidate(claim_id, added)
+                if claim_id is not None
+                else None
+            )
+            if verified is None:
+                raise RuntimeError(
+                    f"a baseline merged {added}, which has no result verified at "
+                    f"{self.top_level} on the blackboard"
+                )
+            else:
+                verified_by_hash[added] = verified
+        replay_versions(self.core, records, verified_by_hash, self.clock.now_seconds())
+        restore_spot_checks(
+            self.core, history, self.calibration.audit_per_seed is not None
+        )
+        restore_guard(self.guard, self.core)
+        self.pending_claims = pending_claims
+        if self.core.k > 0 and self.map.updates_after_advances():
+            self.map.run(self.core.k, Path(self.core.current().dir))
+        else:
+            pass
+
     def on_verified(self, result_claim_id: str) -> None:
         """Queue a result claim verified at the top level, first in, first out.
 
@@ -211,52 +283,74 @@ class HerdIntegrator:
         while self.pending_claims and self.admit(self.pending_claims[0]):
             self.pending_claims.pop(0)
 
-    def admit(self, result_claim_id: str) -> bool:
-        """True once the claim is queued or dismissed; False while its result is missing."""
+    def result_claim(self, result_claim_id: str) -> Claim | None:
         claim_path = f"claims/{EVAL_SERVICE}/{result_claim_id}.md"
         if not self.blackboard.list_paths(claim_path, None):
+            return None
+        else:
+            return parse_claim(self.blackboard.read(claim_path, None).decode("utf-8"))
+
+    def verified_candidate(
+        self, result_claim_id: str, candidate: str
+    ) -> VerifiedCandidate | None:
+        """The core's view of a candidate verified at the top level, remembered for
+        the records and the measurer; None without a verified top-level result."""
+        claim = self.result_claim(result_claim_id)
+        result = self.result_of(candidate)
+        level = result.at(self.top_level) if result is not None else None
+        if (
+            claim is None
+            or result is None
+            or level is None
+            or level.score is None
+            or not level.is_verified
+        ):
+            return None
+        else:
+            manifest_data: object = yaml.safe_load(
+                self.blackboard.read(f"candidates/{candidate}/manifest.yaml", None)
+            )
+            manifest = CandidateManifest.model_validate(manifest_data)
+            self.records.remember(
+                candidate,
+                result_claim_id,
+                manifest.approach,
+                is_compose=COMPOSE_TAG in claim.tags,
+            )
+            self.eval_measurer.approach_by_hash[candidate] = manifest.approach
+            return VerifiedCandidate(
+                result_claim_id,
+                candidate,
+                manifest.target,
+                list(level.per_seed),
+                level.score,
+                self.materialize(candidate),
+                result.submitter,
+            )
+
+    def admit(self, result_claim_id: str) -> bool:
+        """True once the claim is queued or dismissed; False while its result is missing."""
+        claim = self.result_claim(result_claim_id)
+        candidate = candidate_of(claim) if claim is not None else None
+        verified = (
+            self.verified_candidate(result_claim_id, candidate)
+            if candidate is not None
+            else None
+        )
+        if claim is None:
             logger.warning(f"{result_claim_id} is not a result claim on the blackboard")
             return True
+        elif candidate is None:
+            logger.warning(f"{result_claim_id} points at no candidate")
+            return True
+        elif self.result_of(candidate) is None:
+            return False
+        elif verified is None:
+            logger.info(f"{result_claim_id} has no verified {self.top_level} result")
+            return True
         else:
-            claim = parse_claim(self.blackboard.read(claim_path, None).decode("utf-8"))
-            pointers = [item.candidate for item in claim.evidence if item.candidate]
-            candidate = pointers[0].split("/")[1] if pointers else None
-            result = self.result_of(candidate) if candidate is not None else None
-            level = result.at(self.top_level) if result is not None else None
-            if candidate is None:
-                logger.warning(f"{result_claim_id} points at no candidate")
-                return True
-            elif result is None:
-                return False
-            elif level is None or level.score is None or not level.is_verified:
-                logger.info(
-                    f"{result_claim_id} has no verified {self.top_level} result"
-                )
-                return True
-            else:
-                manifest_data: object = yaml.safe_load(
-                    self.blackboard.read(f"candidates/{candidate}/manifest.yaml", None)
-                )
-                manifest = CandidateManifest.model_validate(manifest_data)
-                self.records.remember(
-                    candidate,
-                    result_claim_id,
-                    manifest.approach,
-                    is_compose=COMPOSE_TAG in claim.tags,
-                )
-                self.eval_measurer.approach_by_hash[candidate] = manifest.approach
-                self.core.add(
-                    VerifiedCandidate(
-                        result_claim_id,
-                        candidate,
-                        manifest.target,
-                        list(level.per_seed),
-                        level.score,
-                        self.materialize(candidate),
-                        result.submitter,
-                    )
-                )
-                return True
+            self.core.add(verified)
+            return True
 
     # Measurements coming back
 
@@ -274,20 +368,48 @@ class HerdIntegrator:
 
     def answer(self, ready: RemeasureReady) -> None:
         """The event's own per-seed scores; result.json is written once per hash,
-        so an event without them (written before #98) falls back to the record."""
+        so an event without them (written before #98) falls back to the record.
+
+        A void answer is asked again. If the judge still cannot score it, a dev
+        measurement fails its candidate as before, but an audit measurement
+        answers with the version's own daily scores: the spot check then finds no
+        gap and passes with an error in the log, because a judge failure must
+        never revert a merge (D72).
+        """
+        if ready.score is None and self.eval_measurer.resubmit(ready.request_id):
+            return
+        else:
+            pass
         if ready.per_seed:
             per_seed = list(ready.per_seed)
         else:
             result = self.result_of(ready.candidate)
             level = result.at(ready.level) if result is not None else None
             per_seed = list(level.per_seed) if level is not None else []
+        submitted = self.eval_measurer.submission(ready.request_id)
+        if (
+            ready.score is None
+            and submitted is not None
+            and submitted.dataset == "audit"
+        ):
+            version = self.core.versions[submitted.baseline]
+            logger.error(
+                f"the judge could not score baseline@{version.k} on the audit set; "
+                "its spot check is skipped, not flagged"
+            )
+            per_seed = list(version.per_seed)
+            score = version.score
+            constraint_ok = True
+        else:
+            score = ready.score
+            constraint_ok = score is not None and ready.constraint_ok is not False
         self.eval_measurer.answer(
             Measurement(
                 ready.request_id,
                 ready.candidate,
                 per_seed,
-                ready.score,
-                ready.score is not None and ready.constraint_ok is not False,
+                score,
+                constraint_ok,
             )
         )
 

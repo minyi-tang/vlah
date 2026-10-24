@@ -11,7 +11,6 @@ from tests.fixtures.integrator import WORKER_ONE, WORKER_TWO, make_integrator
 from vlah.arms.config import PRESETS
 from vlah.core.integrator.core_adapter import config_from_params
 from vlah.core.integrator.opportunity_map import run_script
-from vlah.core.integrator.service import HerdIntegrator
 from vlah.core.types.events import BaselineAdvanced, MapUpdated, RemeasureReady
 from vlah.core.types.params import Params
 
@@ -126,28 +125,7 @@ def test_a_restarted_integrator_does_not_measure_the_map_again(tmp_path: Path) -
         tmp_path, map_scripts={SCRIPT_PATH: b""}, script_runner=naming_runner
     )
     gap_before = harness.blackboard.read("map/gap.md", None)
-    restarted = HerdIntegrator(
-        **{
-            name: getattr(harness.integrator, name)
-            for name in (
-                "blackboard",
-                "eval_service",
-                "task_queue",
-                "compose_queue",
-                "gates",
-                "gate_runner",
-                "arm",
-                "params",
-                "clock",
-                "top_level",
-                "work_directory",
-                "baseline_directory",
-                "calibration",
-                "measurer",
-                "script_runner",
-            )
-        }
-    )
+    restarted = harness.restart()
     assert restarted.records.events_written == []
     assert restarted.records.event_count == 1, "numbering continues after the first"
     assert harness.blackboard.read("map/gap.md", None) == gap_before

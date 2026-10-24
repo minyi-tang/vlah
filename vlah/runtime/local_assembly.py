@@ -1,12 +1,19 @@
 """The composition root for a run on one machine (D58, D61, D67): the real adapters.
 
 LocalAssembly builds every component from herd.yaml and the problem folder: a git
-blackboard under the run root, an in-process key-value store, the ladder over
-command judges, the MCP tool server on a local port, local worker processes under
-the egress sandbox, the Copilot harness, the Integrator over the shared merger with
-baseline@0 measured by the top judge, and the budget, stop rules and metrics.
+blackboard under the run root, a key-value store, the ladder over command judges,
+the MCP tool server on a local port, local worker processes under the egress
+sandbox, the Copilot harness, the Integrator over the shared merger with baseline@0
+measured by the top judge, the Critic's holdout checks with the top judge scoring
+the sealed verdict, and the budget, stop rules and metrics.
 
-Second real adapters (Kubernetes, Redis, S3, a second harness) come after H1 (D61).
+The key-value store holds the queue, leases, budget meter, router and stop-rule
+state. herd.yaml's stores.key_value picks it: sqlite (the default) keeps it in
+<run root>/state.sqlite, and redis takes settings.url. Either survives the process,
+so a run can be resumed. baseline@0's calibration is measured once per run and kept
+in <run root>/calibration.json, so a resumed run spends no judge run on it.
+
+Second real adapters (Kubernetes, S3, a second harness) come after H1 (D61).
 """
 
 import logging
@@ -20,19 +27,23 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
+import redis
 import uvicorn
-from pydantic import JsonValue
+from pydantic import JsonValue, TypeAdapter
 
 from vlah.adapters.executor.local.executor import LocalExecutor
 from vlah.adapters.executor.sandbox.sandbox import ProcessSandbox
+from vlah.adapters.harness.claude_code.harness import (
+    DEFAULT_MODEL_API_URLS,
+    ClaudeCodeConfig,
+    ClaudeCodeHarness,
+)
 from vlah.adapters.harness.copilot.harness import CopilotConfig, CopilotHarness
 from vlah.adapters.memory.model import MemoryModel
-from vlah.adapters.memory.store import (
-    MemoryKeyValueStore,
-    MemoryObjectStore,
-    MemoryVectorIndex,
-)
+from vlah.adapters.memory.store import MemoryObjectStore, MemoryVectorIndex
 from vlah.adapters.signal.command.judge import CommandBaselineScores, CommandJudge
+from vlah.adapters.store.redis.store import RedisKeyValueStore
+from vlah.adapters.store.sqlite.store import SqliteKeyValueStore
 from vlah.core.blackboard.api import PublicProblemFiles
 from vlah.core.blackboard.layout import PROBLEM_AUTHOR, init_layout, open_blackboard
 from vlah.core.budget.meter import KeyValueBudgetMeter
@@ -47,12 +58,17 @@ from vlah.core.problem.api import HerdConfig
 from vlah.core.queue.queue import KeyValueLeases, KeyValueTaskQueue
 from vlah.core.router.router import KeyValueRouter
 from vlah.core.stop.rules import BudgetStopRules, EscalationPolicy
+from vlah.core.types.baseline import BaselineRecord
 from vlah.core.types.params import GateSpec, Params
 from vlah.core.types.paths import may_create
 from vlah.ports.errors import NotSupportedError
+from vlah.ports.harness import Harness
+from vlah.ports.store import KeyValueStore
+from vlah.roles.critic.holdout import HoldoutCritic, SealedVerdict, integrator_params
 from vlah.runtime.assembly import RunComponents, RunContext
 from vlah.runtime.compose import compose_arm
 from vlah.runtime.herd import top_level_source
+from vlah.runtime.status import KeyValueQueueCounts
 from vlah.tools.herd_tools import HerdTools
 from vlah.tools.server import McpToolServer
 
@@ -70,8 +86,15 @@ DEFAULT_TARGET_REF = "HEAD"
 SERVER_START_TIMEOUT_SECONDS = 10.0
 GATE_TIMEOUT_SECONDS = 1800.0
 OUTPUT_TAIL_CHARACTERS = 2000
-SUPPORTED_HARNESSES = ("copilot",)
+SUPPORTED_HARNESSES = ("copilot", "claude_code")
+# Used when herd.yaml does not say the model's window; Claude models have at least this.
+DEFAULT_CONTEXT_WINDOW_TOKENS = 200_000
 SUPPORTED_EXECUTORS = ("local",)
+KEY_VALUE_STORE = "key_value"
+SUPPORTED_KEY_VALUE_STORES = ("sqlite", "redis")
+STATE_FILE_NAME = "state.sqlite"
+CALIBRATION_FILE_NAME = "calibration.json"
+CALIBRATION_ADAPTER = TypeAdapter(CoreCalibration)
 
 
 def free_port() -> int:
@@ -193,34 +216,115 @@ def target_of(herd_config: HerdConfig) -> tuple[Path, str]:
         )
 
 
-def copilot_harness(herd_config: HerdConfig, params: Params) -> CopilotHarness:
-    kind = herd_config.harness.kind
-    if kind not in SUPPORTED_HARNESSES:
-        raise NotSupportedError(
-            f"harness {kind!r} is not available; use copilot (#48); claude_code is #41"
-        )
+def setting_number(settings: dict[str, JsonValue], key: str) -> int | None:
+    value = settings.get(key)
+    if value is None:
+        return None
+    elif isinstance(value, int) and not isinstance(value, bool):
+        return value
     else:
-        pass
-    settings = herd_config.harness.settings
+        raise ValueError(f"herd.yaml: {key} must be a whole number, not {value!r}")
+
+
+def setting_mapping(settings: dict[str, JsonValue], key: str) -> dict[str, str]:
+    value = settings.get(key)
+    if value is None:
+        return {}
+    elif isinstance(value, dict) and all(
+        isinstance(item, str) for item in value.values()
+    ):
+        return {str(name): str(item) for name, item in value.items()}
+    else:
+        raise ValueError(f"herd.yaml: {key} must map names to strings, not {value!r}")
+
+
+def key_value_store(herd_config: HerdConfig, context: RunContext) -> KeyValueStore:
+    """The store herd.yaml names under stores.key_value; SQLite in the run root by default."""
+    choice = herd_config.stores.get(KEY_VALUE_STORE)
+    if choice is None or choice.kind == "sqlite":
+        return SqliteKeyValueStore(
+            path=context.run_root / STATE_FILE_NAME,
+            clock=context.clock,
+            namespace=context.run_id,
+        )
+    elif choice.kind == "redis":
+        url = setting_text(choice.settings, "url")
+        if url is None:
+            raise ValueError(
+                f"herd.yaml: stores.{KEY_VALUE_STORE}.settings.url is required for redis"
+            )
+        else:
+            return RedisKeyValueStore(
+                client=redis.Redis.from_url(url),
+                clock=context.clock,
+                namespace=context.run_id,
+            )
+    else:
+        raise NotSupportedError(
+            f"herd.yaml: stores.{KEY_VALUE_STORE}.kind {choice.kind!r} is not "
+            f"available; use one of {SUPPORTED_KEY_VALUE_STORES}"
+        )
+
+
+def worker_model(herd_config: HerdConfig) -> str:
     model = (
-        setting_text(settings, "model")
+        setting_text(herd_config.harness.settings, "model")
         or herd_config.models.get("worker")
         or herd_config.models.get("default")
     )
     if model is None:
         raise ValueError("herd.yaml: set models.worker (the one model for every role)")
     else:
-        pass
+        return model
+
+
+def copilot_harness(herd_config: HerdConfig, params: Params) -> CopilotHarness:
+    settings = herd_config.harness.settings
     command = setting_texts(settings, "command")
     return CopilotHarness(
         config=CopilotConfig(
-            model=model,
+            model=worker_model(herd_config),
             reasoning_effort=setting_text(settings, "reasoning_effort"),
             allowed_urls=setting_texts(settings, "allowed_urls"),
             copilot_command=command if command else ("copilot",),
+            environment=setting_mapping(settings, "environment"),
         ),
         params=params,
     )
+
+
+def claude_code_harness(herd_config: HerdConfig, params: Params) -> ClaudeCodeHarness:
+    settings = herd_config.harness.settings
+    command = setting_texts(settings, "command")
+    model_api_urls = setting_texts(settings, "model_api_urls")
+    return ClaudeCodeHarness(
+        config=ClaudeCodeConfig(
+            model=worker_model(herd_config),
+            context_window_tokens=(
+                setting_number(settings, "context_window_tokens")
+                or DEFAULT_CONTEXT_WINDOW_TOKENS
+            ),
+            effort=setting_text(settings, "effort"),
+            claude_command=command if command else ("claude",),
+            allowed_urls=setting_texts(settings, "allowed_urls"),
+            model_api_urls=model_api_urls if model_api_urls else DEFAULT_MODEL_API_URLS,
+            environment=setting_mapping(settings, "environment"),
+        ),
+        params=params,
+    )
+
+
+def worker_harness(herd_config: HerdConfig, params: Params) -> Harness:
+    """The harness herd.yaml names: copilot (#48) or claude_code (#18)."""
+    kind = herd_config.harness.kind
+    if kind == "copilot":
+        return copilot_harness(herd_config, params)
+    elif kind == "claude_code":
+        return claude_code_harness(herd_config, params)
+    else:
+        raise NotSupportedError(
+            f"harness {kind!r} is not available; use one of {SUPPORTED_HARNESSES}"
+        )
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -298,6 +402,20 @@ class SleepingWaiter:
         self.eval_service.tick()
 
 
+@dataclass(frozen=True, kw_only=True)
+class DeliverableFiles:
+    """The deliverable's directory in the Integrator's merger, for the sealed verdict.
+
+    IntegratorService hands over only the deliverable's record, so the composition
+    root, which built the Integrator, reads the version's directory from its core.
+    """
+
+    integrator: HerdIntegrator
+
+    def __call__(self, deliverable: BaselineRecord) -> Path:
+        return Path(self.integrator.core.versions[deliverable.k].dir)
+
+
 def calibrate(
     judge: CommandJudge, baseline_directory: Path, sigma: float | None
 ) -> CoreCalibration:
@@ -326,6 +444,18 @@ def calibrate(
     )
 
 
+def run_calibration(
+    judge: CommandJudge, baseline_directory: Path, sigma: float | None, path: Path
+) -> CoreCalibration:
+    """baseline@0's calibration, measured on the run's first start and read back after."""
+    if path.exists():
+        return CALIBRATION_ADAPTER.validate_json(path.read_bytes())
+    else:
+        calibration = calibrate(judge, baseline_directory, sigma)
+        path.write_bytes(CALIBRATION_ADAPTER.dump_json(calibration, indent=2))
+        return calibration
+
+
 @dataclass(kw_only=True)
 class LocalRunParts:
     """What a run owns besides its components: the things close() must stop."""
@@ -333,6 +463,7 @@ class LocalRunParts:
     tool_servers: tuple[ServedToolServer, ...]
     executor: LocalExecutor
     integrator: HerdIntegrator
+    key_value_store: KeyValueStore
 
 
 @dataclass(kw_only=True)
@@ -383,7 +514,7 @@ class LocalAssembly:
         else:
             pass
         objects = MemoryObjectStore()
-        store = MemoryKeyValueStore(clock=context.clock, namespace=context.run_id)
+        store = key_value_store(problem.herd_config, context)
         task_queue = KeyValueTaskQueue(store=store)
         compose_queue = KeyValueTaskQueue(store=store, pool="external")
         leases = KeyValueLeases(
@@ -475,7 +606,7 @@ class LocalAssembly:
             inherited_environment=os.environ,
             poll_seconds=self.executor_poll_seconds,
         )
-        harness = copilot_harness(problem.herd_config, context.params)
+        harness = worker_harness(problem.herd_config, context.params)
         integrator = HerdIntegrator(
             blackboard=blackboard,
             eval_service=eval_service,
@@ -484,21 +615,51 @@ class LocalAssembly:
             gates=problem.gates,
             gate_runner=gate_runner,
             arm=context.arm,
-            params=context.params,
+            # The spot checks get holdout_run_cap less the Critic's rechecks (D66).
+            params=integrator_params(context.params, context.arm),
             clock=context.clock,
             top_level=top_level,
             work_directory=run_root / "integrator",
             baseline_directory=baseline_directory,
-            calibration=calibrate(
-                judges[top_level], baseline_directory, self.integrator_sigma
+            calibration=run_calibration(
+                judges[top_level],
+                baseline_directory,
+                self.integrator_sigma,
+                run_root / CALIBRATION_FILE_NAME,
             ),
             waiter=SleepingWaiter(
                 eval_service=eval_service, seconds=self.waiter_seconds
             ),
         )
+        metrics = HerdMetrics(
+            blackboard=blackboard,
+            indexer=indexer,
+            budget=meter,
+            router=router,
+            top_level=top_level,
+        )
+        critic = HoldoutCritic(
+            blackboard=blackboard,
+            eval_service=eval_service,
+            integrator=integrator,
+            arm=context.arm,
+            params=context.params,
+            clock=context.clock,
+            top_level=top_level,
+            work_directory=run_root / "critic",
+            verdict=SealedVerdict(
+                judge=judges[top_level],
+                repeat_count=context.params.verdict_repeat_count,
+                deliverable_directory=DeliverableFiles(integrator=integrator),
+                metrics=metrics,
+            ),
+        )
         self.parts.append(
             LocalRunParts(
-                tool_servers=tool_servers, executor=executor, integrator=integrator
+                tool_servers=tool_servers,
+                executor=executor,
+                integrator=integrator,
+                key_value_store=store,
             )
         )
         return RunComponents(
@@ -520,26 +681,31 @@ class LocalAssembly:
                 target=problem.target,
                 policy=EscalationPolicy(),
             ),
-            metrics=HerdMetrics(
-                blackboard=blackboard,
-                indexer=indexer,
-                budget=meter,
-                router=router,
-                top_level=top_level,
-            ),
+            metrics=metrics,
             executor=executor,
             harness=harness,
             tool_server=tool_servers[0].server,
             compose_tool_server=tool_servers[1].server,
             target_repository=str(target_repository),
             target_ref=target_ref,
+            count_queued_tasks=KeyValueQueueCounts(
+                task_queue=task_queue, compose_queue=compose_queue
+            ),
+            critic=critic,
         )
 
     def close(self) -> None:
-        """Stop what the runs own: worker processes, then the tool servers."""
+        """Stop what the runs own: worker processes, the tool servers, then the store."""
         for parts in self.parts:
             parts.executor.close()
             parts.integrator.close()
             for served in parts.tool_servers:
                 served.close()
+            store = parts.key_value_store
+            if isinstance(store, SqliteKeyValueStore):
+                store.close()
+            elif isinstance(store, RedisKeyValueStore):
+                store.client.close()
+            else:
+                pass
         self.parts.clear()

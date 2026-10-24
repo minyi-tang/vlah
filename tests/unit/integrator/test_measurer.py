@@ -15,7 +15,7 @@ from tests.fixtures.herd import (
     passing_gate,
     zero_baseline_scores,
 )
-from tests.fixtures.integrator import RecordingEval, ScriptedGates
+from tests.fixtures.integrator import RecordingEval, ScriptedGates, make_integrator
 from tests.fixtures.worker import RecordingTaskQueue
 from vlah.adapters.memory.signal_source import FAKE_SCORE_FILE_NAME, FakeSlowSource
 from vlah.arms.config import PRESETS
@@ -223,3 +223,59 @@ def test_a_remeasure_round_trips_through_the_eval_client(tmp_path: Path) -> None
     assert isinstance(remeasured_manifest, dict)
     assert remeasured_manifest["author"] == "integrator"
     assert remeasured_manifest["target"] == "baseline@1"
+
+
+def void_ready(request_id: str, dataset: str) -> RemeasureReady:
+    return RemeasureReady.model_validate(
+        {
+            "request_id": request_id,
+            "candidate": "cd" * 32,
+            "parent_candidate": "baseline@0",
+            "claim_id": "c-eval_service-00009",
+            "baseline": "baseline@0",
+            "paired": None,
+            "score": None,
+            "level": "slow",
+            "constraint_ok": False,
+            "dataset": dataset,
+        }
+    )
+
+
+def test_a_void_audit_is_asked_again_and_never_reverts_a_merge(tmp_path: Path) -> None:
+    """The judge failed on the closing audit; the core read the empty scores as no
+    gain on the audit set and reverted a good merge (first Claude Code run)."""
+    harness = make_integrator(tmp_path)
+    integrator = harness.integrator
+    measurer = integrator.eval_measurer
+    candidate = tmp_path / "baseline-copy"
+    candidate.mkdir()
+    ticket = measurer.submit(
+        candidate, 0, "audit", "audit of baseline@0", [], False, 0.0
+    )
+    integrator.answer(void_ready(ticket, "audit"))
+    integrator.answer(void_ready("request-00002", "audit"))
+    assert len(harness.eval_service.requests) == 3, "asked again twice"
+    assert measurer.result(ticket) is None
+    integrator.answer(void_ready("request-00003", "audit"))
+    skipped = measurer.result(ticket)
+    assert skipped is not None, "after the retries the core gets an answer"
+    assert skipped.per_seed == list(integrator.core.versions[0].per_seed)
+    assert skipped.constraint_ok is True, "the check passes rather than flags"
+
+
+def test_a_void_dev_remeasure_still_fails_its_candidate_after_the_retries(
+    tmp_path: Path,
+) -> None:
+    harness = make_integrator(tmp_path)
+    integrator = harness.integrator
+    candidate = tmp_path / "rebased"
+    candidate.mkdir()
+    ticket = integrator.eval_measurer.submit(
+        candidate, 0, "dev", "remeasure", [PARENT], False, 0.0
+    )
+    for request_id in (ticket, "request-00002", "request-00003"):
+        integrator.answer(void_ready(request_id, "dev"))
+    failed = integrator.eval_measurer.result(ticket)
+    assert failed is not None and failed.constraint_ok is False
+    assert len(harness.eval_service.requests) == 3

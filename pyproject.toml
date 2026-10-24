@@ -9,17 +9,13 @@ dependencies = [
     "mcp>=2.3",
     "pydantic>=2.11",
     "pyyaml>=6.0",
+    "redis>=5.0",
     "starlette>=1.9",
     "uvicorn>=0.54",
 ]
 
 [project.scripts]
 vlah = "vlah.cli:main"
-
-[project.optional-dependencies]
-redis = [
-    "redis>=5.0",
-]
 
 [dependency-groups]
 dev = [
@@ -67,6 +63,7 @@ markers = [
     "runtime: W1-11 #21",
     "egress: W1-12 #22",
     "cli: W1-13 #23",
+    "critic: W2-05 #121",
 ]
 
 # Formatting is black + isort and linting is ruff with its default rules, all via pre-commit
