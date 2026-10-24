@@ -25,6 +25,11 @@ from pydantic import JsonValue
 
 from vlah.adapters.executor.local.executor import LocalExecutor
 from vlah.adapters.executor.sandbox.sandbox import ProcessSandbox
+from vlah.adapters.harness.claude_code.harness import (
+    DEFAULT_MODEL_API_URLS,
+    ClaudeCodeConfig,
+    ClaudeCodeHarness,
+)
 from vlah.adapters.harness.copilot.harness import CopilotConfig, CopilotHarness
 from vlah.adapters.memory.model import MemoryModel
 from vlah.adapters.memory.store import (
@@ -50,6 +55,7 @@ from vlah.core.stop.rules import BudgetStopRules, EscalationPolicy
 from vlah.core.types.params import GateSpec, Params
 from vlah.core.types.paths import may_create
 from vlah.ports.errors import NotSupportedError
+from vlah.ports.harness import Harness
 from vlah.runtime.assembly import RunComponents, RunContext
 from vlah.runtime.compose import compose_arm
 from vlah.runtime.herd import top_level_source
@@ -70,7 +76,9 @@ DEFAULT_TARGET_REF = "HEAD"
 SERVER_START_TIMEOUT_SECONDS = 10.0
 GATE_TIMEOUT_SECONDS = 1800.0
 OUTPUT_TAIL_CHARACTERS = 2000
-SUPPORTED_HARNESSES = ("copilot",)
+SUPPORTED_HARNESSES = ("copilot", "claude_code")
+# Used when herd.yaml does not say the model's window; Claude models have at least this.
+DEFAULT_CONTEXT_WINDOW_TOKENS = 200_000
 SUPPORTED_EXECUTORS = ("local",)
 
 
@@ -193,34 +201,87 @@ def target_of(herd_config: HerdConfig) -> tuple[Path, str]:
         )
 
 
-def copilot_harness(herd_config: HerdConfig, params: Params) -> CopilotHarness:
-    kind = herd_config.harness.kind
-    if kind not in SUPPORTED_HARNESSES:
-        raise NotSupportedError(
-            f"harness {kind!r} is not available; use copilot (#48); claude_code is #41"
-        )
+def setting_number(settings: dict[str, JsonValue], key: str) -> int | None:
+    value = settings.get(key)
+    if value is None:
+        return None
+    elif isinstance(value, int) and not isinstance(value, bool):
+        return value
     else:
-        pass
-    settings = herd_config.harness.settings
+        raise ValueError(f"herd.yaml: {key} must be a whole number, not {value!r}")
+
+
+def setting_mapping(settings: dict[str, JsonValue], key: str) -> dict[str, str]:
+    value = settings.get(key)
+    if value is None:
+        return {}
+    elif isinstance(value, dict) and all(
+        isinstance(item, str) for item in value.values()
+    ):
+        return {str(name): str(item) for name, item in value.items()}
+    else:
+        raise ValueError(f"herd.yaml: {key} must map names to strings, not {value!r}")
+
+
+def worker_model(herd_config: HerdConfig) -> str:
     model = (
-        setting_text(settings, "model")
+        setting_text(herd_config.harness.settings, "model")
         or herd_config.models.get("worker")
         or herd_config.models.get("default")
     )
     if model is None:
         raise ValueError("herd.yaml: set models.worker (the one model for every role)")
     else:
-        pass
+        return model
+
+
+def copilot_harness(herd_config: HerdConfig, params: Params) -> CopilotHarness:
+    settings = herd_config.harness.settings
     command = setting_texts(settings, "command")
     return CopilotHarness(
         config=CopilotConfig(
-            model=model,
+            model=worker_model(herd_config),
             reasoning_effort=setting_text(settings, "reasoning_effort"),
             allowed_urls=setting_texts(settings, "allowed_urls"),
             copilot_command=command if command else ("copilot",),
+            environment=setting_mapping(settings, "environment"),
         ),
         params=params,
     )
+
+
+def claude_code_harness(herd_config: HerdConfig, params: Params) -> ClaudeCodeHarness:
+    settings = herd_config.harness.settings
+    command = setting_texts(settings, "command")
+    model_api_urls = setting_texts(settings, "model_api_urls")
+    return ClaudeCodeHarness(
+        config=ClaudeCodeConfig(
+            model=worker_model(herd_config),
+            context_window_tokens=(
+                setting_number(settings, "context_window_tokens")
+                or DEFAULT_CONTEXT_WINDOW_TOKENS
+            ),
+            effort=setting_text(settings, "effort"),
+            claude_command=command if command else ("claude",),
+            allowed_urls=setting_texts(settings, "allowed_urls"),
+            model_api_urls=model_api_urls if model_api_urls else DEFAULT_MODEL_API_URLS,
+            environment=setting_mapping(settings, "environment"),
+        ),
+        params=params,
+    )
+
+
+def worker_harness(herd_config: HerdConfig, params: Params) -> Harness:
+    """The harness herd.yaml names: copilot (#48) or claude_code (#18)."""
+    kind = herd_config.harness.kind
+    if kind == "copilot":
+        return copilot_harness(herd_config, params)
+    elif kind == "claude_code":
+        return claude_code_harness(herd_config, params)
+    else:
+        raise NotSupportedError(
+            f"harness {kind!r} is not available; use one of {SUPPORTED_HARNESSES}"
+        )
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -475,7 +536,7 @@ class LocalAssembly:
             inherited_environment=os.environ,
             poll_seconds=self.executor_poll_seconds,
         )
-        harness = copilot_harness(problem.herd_config, context.params)
+        harness = worker_harness(problem.herd_config, context.params)
         integrator = HerdIntegrator(
             blackboard=blackboard,
             eval_service=eval_service,

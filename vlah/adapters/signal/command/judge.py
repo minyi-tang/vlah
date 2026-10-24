@@ -18,7 +18,7 @@ comparison and the Integrator's remeasure need them), "n", "ci",
 Each run happens on its own thread, so submit returns at once and poll answers
 when the command has finished. A repeat of a candidate on the same dataset is
 answered from the first run and marked is_cached (TB section 11.3), so the eval
-client charges nothing for it.
+client charges nothing for it; after a void run, a repeat runs the command again.
 """
 
 import logging
@@ -114,12 +114,12 @@ class CommandJudge:
     timeout_seconds: float = DEFAULT_TIMEOUT_SECONDS
     log_directory: Path | None = None
     results: dict[str, ScoreResult] = field(default_factory=dict[str, ScoreResult])
+    # The job that ran each candidate on each dataset; a void run does not count.
     first_job_by_key: dict[tuple[str, Dataset], str] = field(
         default_factory=dict[tuple[str, Dataset], str]
     )
-    threads: dict[str, threading.Thread] = field(
-        default_factory=dict[str, threading.Thread]
-    )
+    # A repeat's job, to the first job whose result answers it.
+    repeat_of: dict[str, str] = field(default_factory=dict[str, str])
     lock: threading.Lock = field(default_factory=threading.Lock)
     job_count: int = 0
 
@@ -202,16 +202,23 @@ class CommandJudge:
     def submit(
         self, candidate: CandidateRef, actor: ActorId, baseline: str, dataset: Dataset
     ) -> str:
+        """Run the command; a repeat waits for the first run, unless that one was void."""
         with self.lock:
             self.job_count += 1
             job_id = f"{self.source_declaration.id}-{self.job_count:05d}"
             key = (candidate.candidate_hash, dataset)
-            first_job_id = self.first_job_by_key.setdefault(key, job_id)
-        if first_job_id != job_id:
-            # A repeat: the first run's result, marked cached, once it is in.
-            self.threads[job_id] = self.threads[first_job_id]
-            with self.lock:
-                self.first_job_by_key[(job_id, dataset)] = first_job_id
+            first_job_id = self.first_job_by_key.get(key)
+            first_result = (
+                self.results.get(first_job_id) if first_job_id is not None else None
+            )
+            is_repeat = first_job_id is not None and (
+                first_result is None or first_result.value is not None
+            )
+            if is_repeat and first_job_id is not None:
+                self.repeat_of[job_id] = first_job_id
+            else:
+                self.first_job_by_key[key] = job_id
+        if is_repeat:
             return job_id
         else:
             run = JudgeRun(
@@ -224,7 +231,6 @@ class CommandJudge:
             thread = threading.Thread(
                 target=self.run_job, args=(job_id, run), name=job_id, daemon=True
             )
-            self.threads[job_id] = thread
             thread.start()
             return job_id
 
@@ -239,24 +245,15 @@ class CommandJudge:
 
     def poll(self, job_id: str) -> ScoreResult | None:
         with self.lock:
-            if job_id in self.results:
-                return self.results[job_id]
-            else:
-                first_job_id = next(
-                    (
-                        first
-                        for (job, dataset), first in self.first_job_by_key.items()
-                        if job == job_id and first != job_id
-                    ),
-                    None,
-                )
-                first_result = (
-                    self.results.get(first_job_id) if first_job_id is not None else None
-                )
-        if first_result is None:
-            return None
+            own = self.results.get(job_id)
+            first_job_id = self.repeat_of.get(job_id)
+            first = self.results.get(first_job_id) if first_job_id is not None else None
+        if own is not None:
+            return own
+        elif first is not None:
+            return first.model_copy(update={"is_cached": True})
         else:
-            return first_result.model_copy(update={"is_cached": True})
+            return None
 
 
 @dataclass(kw_only=True)

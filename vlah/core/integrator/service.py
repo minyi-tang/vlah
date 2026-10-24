@@ -274,20 +274,48 @@ class HerdIntegrator:
 
     def answer(self, ready: RemeasureReady) -> None:
         """The event's own per-seed scores; result.json is written once per hash,
-        so an event without them (written before #98) falls back to the record."""
+        so an event without them (written before #98) falls back to the record.
+
+        A void answer is asked again. If the judge still cannot score it, a dev
+        measurement fails its candidate as before, but an audit measurement
+        answers with the version's own daily scores: the spot check then finds no
+        gap and passes with an error in the log, because a judge failure must
+        never revert a merge (D72).
+        """
+        if ready.score is None and self.eval_measurer.resubmit(ready.request_id):
+            return
+        else:
+            pass
         if ready.per_seed:
             per_seed = list(ready.per_seed)
         else:
             result = self.result_of(ready.candidate)
             level = result.at(ready.level) if result is not None else None
             per_seed = list(level.per_seed) if level is not None else []
+        submitted = self.eval_measurer.submission(ready.request_id)
+        if (
+            ready.score is None
+            and submitted is not None
+            and submitted.dataset == "audit"
+        ):
+            version = self.core.versions[submitted.baseline]
+            logger.error(
+                f"the judge could not score baseline@{version.k} on the audit set; "
+                "its spot check is skipped, not flagged"
+            )
+            per_seed = list(version.per_seed)
+            score = version.score
+            constraint_ok = True
+        else:
+            score = ready.score
+            constraint_ok = score is not None and ready.constraint_ok is not False
         self.eval_measurer.answer(
             Measurement(
                 ready.request_id,
                 ready.candidate,
                 per_seed,
-                ready.score,
-                ready.score is not None and ready.constraint_ok is not False,
+                score,
+                constraint_ok,
             )
         )
 
