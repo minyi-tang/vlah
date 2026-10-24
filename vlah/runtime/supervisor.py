@@ -7,13 +7,16 @@ tick does whatever is due at the injected clock's time, so tests call it directl
 4. Router.overdue -> the InterruptInbox; each worker loop then calls
    Executor.interrupt itself, because the loop owns its session's handle;
 5. EvalService.tick and IntegratorService.tick;
-6. StopRules.evaluate, and the run's time limit.
+6. StopRules.evaluate, the run's time limit, and a stop request from vlah stop.
 
 Stopping is idempotent: the first request sets the workers' stop signal and kills
 their sessions; finish then joins the workers and runs the Integrator's closeout
-exactly once. A stop rule writes its own stopped event (D52); the time limit and a
-stop() call write stopped(reason="time") and stopped(reason="human") here, as the
-actor ci.
+exactly once. A stop rule writes its own stopped event (D52); the time limit writes
+stopped(reason="time"), and a stop() call or a stop request stopped(reason="human"),
+here, as the actor ci.
+
+vlah stop runs in another process, so it asks by writing STOP_REQUEST_FILE_NAME in
+the run root; the tick that finds it removes it and stops the run.
 """
 
 import logging
@@ -35,6 +38,7 @@ STOP_ACTOR = ActorId("ci")
 # The stop rules number ci events from the key-value store; a number they took
 # is skipped.
 STOP_EVENT_ATTEMPTS = 5
+STOP_REQUEST_FILE_NAME = "stop-request.json"
 
 StoppedReason = Literal["human", "time"]
 
@@ -80,6 +84,7 @@ class Supervisor:
         self.inbox = inbox
         self.runner = runner
         self.stop_signal = stop_signal
+        self.started_seconds = started_seconds
         self.deadline_seconds = started_seconds + context.duration_seconds
         self.stop_state = StopState()
         self.events: list[Event] = []
@@ -130,10 +135,14 @@ class Supervisor:
         except Exception:
             logger.exception("the stop rules failed; the time limit still applies")
             stop_event = None
+        stop_request = self.context.run_root / STOP_REQUEST_FILE_NAME
         if stop_event is not None and stop_event.type == "stopped":
             self.request_stop(f"stop rule: {stop_event.data}", None)
         elif now_seconds >= self.deadline_seconds:
             self.request_stop("the run's time limit", "time")
+        elif stop_request.is_file():
+            stop_request.unlink(missing_ok=True)
+            self.request_stop("vlah stop", "human")
         else:
             pass
         return [stop_event] if stop_event is not None else []

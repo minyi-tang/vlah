@@ -4,6 +4,8 @@ The router, the indexer, the budget meter, the stop rules and the metrics are th
 real ones over memory stores. The eval client and the Integrator are fakes unless
 use_real_eval and use_real_integrator ask for the real ones: the ladder over a fake
 slow judge, and the Integrator over the shared merger with an empty baseline@0.
+use_git_blackboard puts the blackboard in a git repository under the run root, as
+a real run does, so the CLI can read the run's directory afterwards.
 """
 
 import json
@@ -30,7 +32,8 @@ from vlah.adapters.memory.model import MemoryModel
 from vlah.adapters.memory.signal_source import FAKE_SCORE_FILE_NAME, FakeSlowSource
 from vlah.adapters.memory.store import MemoryKeyValueStore, MemoryVectorIndex
 from vlah.arms.config import ArmConfig
-from vlah.core.blackboard.api import MergedCommit, PublicProblemFiles
+from vlah.core.blackboard.api import Blackboard, MergedCommit, PublicProblemFiles
+from vlah.core.blackboard.layout import open_blackboard
 from vlah.core.budget.meter import KeyValueBudgetMeter
 from vlah.core.eval.api import EvalService
 from vlah.core.eval.service import LadderEvalService
@@ -53,7 +56,7 @@ from vlah.core.types.interrupts import Interrupt
 from vlah.core.types.params import EgressPolicy, Limits, Params
 from vlah.core.types.sources import SourceDecl
 from vlah.core.worker.loop import WorkerDeps
-from vlah.runtime.assembly import RunComponents, RunContext
+from vlah.runtime.assembly import QueuedTaskCounts, RunComponents, RunContext
 from vlah.runtime.compose import compose_arm
 from vlah.runtime.herd import top_level_source
 from vlah.tools.herd_tools import HerdTools
@@ -183,6 +186,17 @@ class FakeIntegrator:
             return BASELINE_ZERO
 
 
+@dataclass(frozen=True, kw_only=True)
+class FakeQueueCounts:
+    task_queue: RecordingTaskQueue
+    compose_queue: RecordingTaskQueue
+
+    def __call__(self) -> QueuedTaskCounts:
+        return QueuedTaskCounts(
+            arm=len(self.task_queue.tasks), compose=len(self.compose_queue.tasks)
+        )
+
+
 @dataclass(kw_only=True)
 class MemoryAssembly:
     """Builds every component from fakes and in-memory stores; remembers what it built.
@@ -196,13 +210,18 @@ class MemoryAssembly:
     use_real_router: bool = True
     use_real_eval: bool = False
     use_real_integrator: bool = False
+    use_git_blackboard: bool = False
     root: Path
     contexts: list[RunContext] = field(default_factory=list[RunContext])
     built: list[RunComponents] = field(default_factory=list[RunComponents])
 
     def build(self, context: RunContext) -> RunComponents:
         self.contexts.append(context)
-        blackboard = make_store_blackboard(self.clock, name=context.run_id)
+        blackboard: Blackboard = (
+            open_blackboard(context.run_root.parent, context.run_id, "blackboard")
+            if self.use_git_blackboard
+            else make_store_blackboard(self.clock, name=context.run_id)
+        )
         blackboard.write(ActorId("human"), {"spec.md": b"# Toy\n"}, "spec")
         leases = FakeLeases(clock=self.clock)
         indexer = StoreIndexer(
@@ -340,6 +359,9 @@ class MemoryAssembly:
             compose_tool_server=FakeToolServer(tools=compose_tools),
             target_repository="memory://target",
             target_ref="main",
+            count_queued_tasks=FakeQueueCounts(
+                task_queue=task_queue, compose_queue=compose_queue
+            ),
         )
         self.built.append(components)
         return components
