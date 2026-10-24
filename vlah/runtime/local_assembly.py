@@ -4,7 +4,8 @@ LocalAssembly builds every component from herd.yaml and the problem folder: a gi
 blackboard under the run root, an in-process key-value store, the ladder over
 command judges, the MCP tool server on a local port, local worker processes under
 the egress sandbox, the Copilot harness, the Integrator over the shared merger with
-baseline@0 measured by the top judge, and the budget, stop rules and metrics.
+baseline@0 measured by the top judge, the Critic's holdout checks with the top
+judge scoring the sealed verdict, and the budget, stop rules and metrics.
 
 Second real adapters (Kubernetes, Redis, S3, a second harness) come after H1 (D61).
 """
@@ -52,10 +53,12 @@ from vlah.core.problem.api import HerdConfig
 from vlah.core.queue.queue import KeyValueLeases, KeyValueTaskQueue
 from vlah.core.router.router import KeyValueRouter
 from vlah.core.stop.rules import BudgetStopRules, EscalationPolicy
+from vlah.core.types.baseline import BaselineRecord
 from vlah.core.types.params import GateSpec, Params
 from vlah.core.types.paths import may_create
 from vlah.ports.errors import NotSupportedError
 from vlah.ports.harness import Harness
+from vlah.roles.critic.holdout import HoldoutCritic, SealedVerdict, integrator_params
 from vlah.runtime.assembly import RunComponents, RunContext
 from vlah.runtime.compose import compose_arm
 from vlah.runtime.herd import top_level_source
@@ -360,6 +363,20 @@ class SleepingWaiter:
         self.eval_service.tick()
 
 
+@dataclass(frozen=True, kw_only=True)
+class DeliverableFiles:
+    """The deliverable's directory in the Integrator's merger, for the sealed verdict.
+
+    IntegratorService hands over only the deliverable's record, so the composition
+    root, which built the Integrator, reads the version's directory from its core.
+    """
+
+    integrator: HerdIntegrator
+
+    def __call__(self, deliverable: BaselineRecord) -> Path:
+        return Path(self.integrator.core.versions[deliverable.k].dir)
+
+
 def calibrate(
     judge: CommandJudge, baseline_directory: Path, sigma: float | None
 ) -> CoreCalibration:
@@ -546,7 +563,8 @@ class LocalAssembly:
             gates=problem.gates,
             gate_runner=gate_runner,
             arm=context.arm,
-            params=context.params,
+            # The spot checks get holdout_run_cap less the Critic's rechecks (D66).
+            params=integrator_params(context.params, context.arm),
             clock=context.clock,
             top_level=top_level,
             work_directory=run_root / "integrator",
@@ -556,6 +574,29 @@ class LocalAssembly:
             ),
             waiter=SleepingWaiter(
                 eval_service=eval_service, seconds=self.waiter_seconds
+            ),
+        )
+        metrics = HerdMetrics(
+            blackboard=blackboard,
+            indexer=indexer,
+            budget=meter,
+            router=router,
+            top_level=top_level,
+        )
+        critic = HoldoutCritic(
+            blackboard=blackboard,
+            eval_service=eval_service,
+            integrator=integrator,
+            arm=context.arm,
+            params=context.params,
+            clock=context.clock,
+            top_level=top_level,
+            work_directory=run_root / "critic",
+            verdict=SealedVerdict(
+                judge=judges[top_level],
+                repeat_count=context.params.verdict_repeat_count,
+                deliverable_directory=DeliverableFiles(integrator=integrator),
+                metrics=metrics,
             ),
         )
         self.parts.append(
@@ -582,13 +623,7 @@ class LocalAssembly:
                 target=problem.target,
                 policy=EscalationPolicy(),
             ),
-            metrics=HerdMetrics(
-                blackboard=blackboard,
-                indexer=indexer,
-                budget=meter,
-                router=router,
-                top_level=top_level,
-            ),
+            metrics=metrics,
             executor=executor,
             harness=harness,
             tool_server=tool_servers[0].server,
@@ -598,6 +633,7 @@ class LocalAssembly:
             count_queued_tasks=KeyValueQueueCounts(
                 task_queue=task_queue, compose_queue=compose_queue
             ),
+            critic=critic,
         )
 
     def close(self) -> None:

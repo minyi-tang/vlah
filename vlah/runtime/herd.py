@@ -12,9 +12,10 @@ The merge fan-out, on every merged commit:
 - turns result_ready, and only result_ready, into the submitter's follow-up task
   (remeasure_ready belongs to the Integrator), in the compose queue when the
   submitter is the compose slot and in the arm queue otherwise (D74);
-- hands a result claim to the Integrator when a claim_status event moves it to
-  verified at the top level of the judge ladder, unless the claim is one of the
-  Integrator's own remeasures, which the eval service tags "remeasure";
+- hands a result claim to the Critic, which passes it on to the Integrator
+  (directly to the Integrator in a run without one), when a claim_status event
+  moves it to verified at the top level of the judge ladder, unless the claim is
+  one of the Integrator's own remeasures, which the eval service tags "remeasure";
 - counts judge runs from each finished candidate's result.json, each candidate
   hash once: one per level the judge ran itself, so a cache hit (a repeat of a
   hash already counted) and a dead-end confirmation do not count.
@@ -165,7 +166,10 @@ class RunFanout:
                 and event.to == f"{VERIFIED_PREFIX}{self.top_level}"
                 and not is_remeasure_claim(self.components.blackboard, event.target)
             ):
-                self.components.integrator.on_verified(event.target)
+                if self.components.critic is not None:
+                    self.components.critic.on_verified(event.target)
+                else:
+                    self.components.integrator.on_verified(event.target)
             else:
                 pass
 

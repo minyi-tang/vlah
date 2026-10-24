@@ -67,6 +67,7 @@ markers = [
     "runtime: W1-11 #21",
     "egress: W1-12 #22",
     "cli: W1-13 #23",
+    "critic: W2-05 #121",
 ]
 
 # Formatting is black + isort and linting is ruff with its default rules, all via pre-commit

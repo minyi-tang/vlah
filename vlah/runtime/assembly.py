@@ -27,6 +27,7 @@ from vlah.core.types.clock import Clock
 from vlah.core.types.params import Params
 from vlah.ports.executor import Executor
 from vlah.ports.harness import Harness
+from vlah.roles.critic.holdout import HoldoutCritic
 from vlah.tools.api import ToolServer
 
 
@@ -85,6 +86,9 @@ class RunComponents:
     target_repository: str
     target_ref: str
     count_queued_tasks: CountQueuedTasks
+    # None: verified claims go straight to the Integrator and nothing in the run
+    # scores the verdict split (D66).
+    critic: HoldoutCritic | None = None
 
 
 class Assembly(Protocol):

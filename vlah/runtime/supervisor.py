@@ -6,14 +6,16 @@ tick does whatever is due at the injected clock's time, so tests call it directl
 3. Leases.reclaim_stale, asking the executor whether each handle still runs;
 4. Router.overdue -> the InterruptInbox; each worker loop then calls
    Executor.interrupt itself, because the loop owns its session's handle;
-5. EvalService.tick and IntegratorService.tick;
+5. EvalService.tick, the Critic's tick (which passes verified claims on to the
+   Integrator) and IntegratorService.tick;
 6. StopRules.evaluate, the run's time limit, and a stop request from vlah stop.
 
 Stopping is idempotent: the first request sets the workers' stop signal and kills
-their sessions; finish then joins the workers and runs the Integrator's closeout
-exactly once. A stop rule writes its own stopped event (D52); the time limit writes
-stopped(reason="time"), and a stop() call or a stop request stopped(reason="human"),
-here, as the actor ci.
+their sessions; finish then joins the workers, stops the Critic, runs the
+Integrator's closeout exactly once and has the Critic score the sealed verdict on
+the deliverable (D66, D79). A stop rule writes its own stopped event (D52); the
+time limit writes stopped(reason="time"), and a stop() call or a stop request
+stopped(reason="human"), here, as the actor ci.
 
 vlah stop runs in another process, so it asks by writing STOP_REQUEST_FILE_NAME in
 the run root; the tick that finds it removes it and stops the run.
@@ -29,6 +31,7 @@ from vlah.core.types.events import Event, event_to_json
 from vlah.core.types.ids import ActorId, format_event_local_id
 from vlah.core.worker.loop import InterruptInbox, WorkerDeps
 from vlah.ports.executor import Handle
+from vlah.roles.critic.holdout import HoldoutCritic
 from vlah.runtime.assembly import RunComponents, RunContext
 
 logger = logging.getLogger(__name__)
@@ -167,6 +170,13 @@ class Supervisor:
     def tick_eval(self, now_seconds: float) -> list[Event]:
         return list(self.components.eval_service.tick())
 
+    def tick_critic(self, now_seconds: float) -> list[Event]:
+        critic = self.components.critic
+        if critic is not None:
+            return list(critic.tick())
+        else:
+            return []
+
     def tick_integrator(self, now_seconds: float) -> list[Event]:
         return list(self.components.integrator.tick())
 
@@ -179,6 +189,7 @@ class Supervisor:
             self.reclaim_leases,
             self.deliver_overdue,
             self.tick_eval,
+            self.tick_critic,
             self.tick_integrator,
         ):
             try:
@@ -268,11 +279,28 @@ class Supervisor:
         self.kill_leased_sessions()
         with self.stop_state.lock:
             if self.stop_state.deliverable is None:
+                critic = self.components.critic
+                if critic is not None:
+                    critic.stop()
+                else:
+                    pass
                 try:
                     self.stop_state.deliverable = self.components.integrator.closeout()
                 except Exception as error:
                     self.stop_state.error = f"closeout failed: {error!r}"
                     raise
+                if critic is not None:
+                    self.score_verdict(critic, self.stop_state.deliverable)
+                else:
+                    pass
             else:
                 pass
             return self.stop_state.deliverable
+
+    def score_verdict(self, critic: HoldoutCritic, deliverable: BaselineRecord) -> None:
+        """A failed verdict leaves the run without a holdout score, never without
+        its deliverable."""
+        try:
+            critic.score_verdict(deliverable)
+        except Exception:
+            logger.exception("the sealed verdict failed; the deliverable stands")

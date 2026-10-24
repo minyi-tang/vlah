@@ -6,9 +6,12 @@ use_real_eval and use_real_integrator ask for the real ones: the ladder over a f
 slow judge, and the Integrator over the shared merger with an empty baseline@0.
 use_git_blackboard puts the blackboard in a git repository under the run root, as
 a real run does, so the CLI can read the run's directory afterwards.
+use_critic adds the Critic between them, wired as the local assembly wires it, with
+a fake verdict judge.
 """
 
 import json
+import statistics
 import threading
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -29,7 +32,11 @@ from tests.fixtures.tools import RecordingRecorder, ScriptedEval
 from tests.fixtures.worker import FakeToolServer, RecordingTaskQueue, TranscriptHarness
 from vlah.adapters.memory.executor import MemoryExecutor, ScriptedHarness
 from vlah.adapters.memory.model import MemoryModel
-from vlah.adapters.memory.signal_source import FAKE_SCORE_FILE_NAME, FakeSlowSource
+from vlah.adapters.memory.signal_source import (
+    FAKE_SCORE_FILE_NAME,
+    FakeScore,
+    FakeSlowSource,
+)
 from vlah.adapters.memory.store import MemoryKeyValueStore, MemoryVectorIndex
 from vlah.arms.config import ArmConfig
 from vlah.core.blackboard.api import Blackboard, MergedCommit, PublicProblemFiles
@@ -54,11 +61,14 @@ from vlah.core.types.events import Event
 from vlah.core.types.ids import ActorId
 from vlah.core.types.interrupts import Interrupt
 from vlah.core.types.params import EgressPolicy, Limits, Params
-from vlah.core.types.sources import SourceDecl
+from vlah.core.types.sources import ScoreResult, SourceDecl
 from vlah.core.worker.loop import WorkerDeps
+from vlah.ports.signal_source import Dataset
+from vlah.roles.critic.holdout import HoldoutCritic, SealedVerdict, integrator_params
 from vlah.runtime.assembly import QueuedTaskCounts, RunComponents, RunContext
 from vlah.runtime.compose import compose_arm
 from vlah.runtime.herd import top_level_source
+from vlah.runtime.local_assembly import DeliverableFiles
 from vlah.tools.herd_tools import HerdTools
 
 BASELINE_ZERO = BaselineRecord(k=0, parent=None, candidates=(), created_ts=0.0)
@@ -197,6 +207,39 @@ class FakeQueueCounts:
         )
 
 
+@dataclass(frozen=True, kw_only=True)
+class VerdictRun:
+    directory: Path
+    dataset: Dataset
+    baseline: str
+
+
+@dataclass(kw_only=True)
+class FakeVerdictJudge:
+    """Scores a directory by its fake_score.json, as the fake slow judge does, and
+    remembers every run."""
+
+    runs: list[VerdictRun] = field(default_factory=list[VerdictRun])
+
+    def measure_directory(
+        self, directory: Path, dataset: Dataset, baseline: str
+    ) -> ScoreResult:
+        self.runs.append(
+            VerdictRun(directory=directory, dataset=dataset, baseline=baseline)
+        )
+        score_path = directory / FAKE_SCORE_FILE_NAME
+        per_seed = (
+            FakeScore.model_validate_json(
+                score_path.read_text(encoding="utf-8")
+            ).per_seed
+            if score_path.is_file()
+            else (0.0,) * TOY_SEED_COUNT
+        )
+        return ScoreResult(
+            value=statistics.fmean(per_seed), n=len(per_seed), per_seed=per_seed
+        )
+
+
 @dataclass(kw_only=True)
 class MemoryAssembly:
     """Builds every component from fakes and in-memory stores; remembers what it built.
@@ -211,6 +254,9 @@ class MemoryAssembly:
     use_real_eval: bool = False
     use_real_integrator: bool = False
     use_git_blackboard: bool = False
+    # Needs use_real_eval and use_real_integrator.
+    use_critic: bool = False
+    verdict_judge: FakeVerdictJudge = field(default_factory=FakeVerdictJudge)
     root: Path
     contexts: list[RunContext] = field(default_factory=list[RunContext])
     built: list[RunComponents] = field(default_factory=list[RunComponents])
@@ -307,7 +353,11 @@ class MemoryAssembly:
                 gates=context.problem.gates,
                 gate_runner=passing_gate,
                 arm=context.arm,
-                params=context.params,
+                params=(
+                    integrator_params(context.params, context.arm)
+                    if self.use_critic
+                    else context.params
+                ),
                 clock=self.clock,
                 top_level=top_level,
                 work_directory=context.run_root / "integrator",
@@ -327,6 +377,34 @@ class MemoryAssembly:
             )
         else:
             integrator = FakeIntegrator(params=context.params)
+        metrics = HerdMetrics(
+            blackboard=blackboard,
+            indexer=indexer,
+            budget=meter,
+            router=router if isinstance(router, KeyValueRouter) else None,
+            top_level=top_level_source(context.problem.sources),
+        )
+        critic: HoldoutCritic | None = None
+        if self.use_critic:
+            assert isinstance(integrator, HerdIntegrator) and top_level is not None
+            critic = HoldoutCritic(
+                blackboard=blackboard,
+                eval_service=eval_service,
+                integrator=integrator,
+                arm=context.arm,
+                params=context.params,
+                clock=self.clock,
+                top_level=top_level,
+                work_directory=context.run_root / "critic",
+                verdict=SealedVerdict(
+                    judge=self.verdict_judge,
+                    repeat_count=context.params.verdict_repeat_count,
+                    deliverable_directory=DeliverableFiles(integrator=integrator),
+                    metrics=metrics,
+                ),
+            )
+        else:
+            pass
         components = RunComponents(
             blackboard=blackboard,
             indexer=indexer,
@@ -346,13 +424,7 @@ class MemoryAssembly:
                 target=context.problem.target,
                 policy=EscalationPolicy(),
             ),
-            metrics=HerdMetrics(
-                blackboard=blackboard,
-                indexer=indexer,
-                budget=meter,
-                router=router if isinstance(router, KeyValueRouter) else None,
-                top_level=top_level_source(context.problem.sources),
-            ),
+            metrics=metrics,
             executor=executor,
             harness=TranscriptHarness(scripted=ScriptedHarness(default_program="none")),
             tool_server=FakeToolServer(tools=tools),
@@ -362,6 +434,7 @@ class MemoryAssembly:
             count_queued_tasks=FakeQueueCounts(
                 task_queue=task_queue, compose_queue=compose_queue
             ),
+            critic=critic,
         )
         self.built.append(components)
         return components
