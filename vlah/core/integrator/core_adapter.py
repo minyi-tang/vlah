@@ -76,11 +76,20 @@ class AdvanceListener(Protocol):
 
 
 class CoreAdapter(Protocol):
-    """What the wrapper uses of the core; the core satisfies it as it is."""
+    """What the wrapper uses of the core; the core satisfies it as it is.
+
+    The measurer, the spot-check counters and the pending decisions are what a
+    restart's replay (resume.py) sets, since the core has no load function yet.
+    """
 
     versions: list[Version]
     queue: deque[VerifiedCandidate]
     closed: bool
+    measurer: Measurer
+    pending_decisions: list[Decision]
+    merges_since_audit: int
+    last_audited_k: int
+    audits_used: int
 
     @property
     def k(self) -> int: ...
@@ -88,6 +97,10 @@ class CoreAdapter(Protocol):
     def current(self) -> Version: ...
 
     def add(self, candidate: VerifiedCandidate) -> None: ...
+
+    def integrate(self, candidate: VerifiedCandidate) -> None:
+        """Rebase one candidate onto the head and decide it, or start its remeasure."""
+        ...
 
     def due(self, now: float) -> str | float | None:
         """'now', 'wait' while a measurement is pending, a time, or None."""
