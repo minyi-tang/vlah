@@ -7,11 +7,16 @@ version becomes baseline/<k>.json, written once. A failed integration gives its
 author a follow-up task in the arm's queue, a conflict gives the compose pool a
 task in the compose queue, and a reverted candidate's result claim is quarantined
 with a claim_status event.
+
+Both tasks are queued after the integration_failed event and named by its number,
+which never repeats: a restarted Integrator never reuses a task id, and a crash
+between the event and the task loses the task instead of queueing it twice.
 """
 
 import json
 import logging
 from dataclasses import dataclass, field
+from pathlib import PurePosixPath
 
 from vlah.core.blackboard.api import Blackboard
 from vlah.core.integrator.core_adapter import Decision, Version
@@ -81,12 +86,19 @@ class IntegratorRecords:
     guard_pending_on_advance: bool
     facts: dict[str, CandidateFacts] = field(default_factory=dict[str, CandidateFacts])
     event_count: int = 0
-    task_count: int = 0
+    # A conflict's compose_task decision, by candidate, until its integration_failed.
+    compose_decisions: dict[str, Decision] = field(default_factory=dict[str, Decision])
     events_written: list[Event] = field(default_factory=list[Event])
 
     def start(self) -> None:
-        """Continue the event numbering after a restart."""
-        self.event_count = len(self.sink.list_paths(f"events/{INTEGRATOR}/", None))
+        """Continue the event numbering after a restart, from the highest number."""
+        self.event_count = max(
+            (
+                int(PurePosixPath(path).stem)
+                for path in self.sink.list_paths(f"events/{INTEGRATOR}/", None)
+            ),
+            default=0,
+        )
 
     def remember(
         self, candidate: str, claim_id: str, approach: str, is_compose: bool
@@ -155,10 +167,6 @@ class IntegratorRecords:
             else:
                 pass
 
-    def next_task_id(self) -> str:
-        self.task_count += 1
-        return f"{TASK_ID_PREFIX}-{self.task_count:05d}"
-
     def payload(self, decision: Decision, kind: str) -> dict[str, object]:
         fields = {name: decision.get(name) for name in PAYLOAD_FIELDS[kind]}
         if kind == "baseline_advanced":
@@ -168,7 +176,8 @@ class IntegratorRecords:
         return fields
 
     def on_failed(self, decision: Decision, is_closing: bool) -> None:
-        """integration_failed, and a follow-up task for the author while the run goes on."""
+        """integration_failed, a conflict's compose task, and a follow-up task for the
+        author while the run goes on."""
         candidate = str(decision["candidate"])
         reason = str(decision["reason"])
         self.write_event(
@@ -177,6 +186,12 @@ class IntegratorRecords:
             reason=reason,
             data=self.payload(decision, "integration_failed"),
         )
+        task_id = f"{TASK_ID_PREFIX}-{self.event_count:05d}"
+        compose_decision = self.compose_decisions.pop(candidate, None)
+        if compose_decision is not None:
+            self.queue_compose(compose_decision, f"{task_id}-compose")
+        else:
+            pass
         facts = self.facts[candidate]
         actor = decision.get("actor")
         if is_closing or reason == RUN_ENDED or not isinstance(actor, str):
@@ -190,7 +205,7 @@ class IntegratorRecords:
             note = str(decision.get("note") or "")
             self.task_queue.put(
                 Task(
-                    id=self.next_task_id(),
+                    id=task_id,
                     approach=facts.approach,
                     kind="integration_failed_followup",
                     goal=(
@@ -207,12 +222,16 @@ class IntegratorRecords:
             )
 
     def on_compose(self, decision: Decision) -> None:
-        """A rebase conflict: a task for the compose pool outside every arm (D74)."""
+        """A rebase conflict; its task waits for the integration_failed that follows."""
+        self.compose_decisions[strings_of(decision.get("candidates"))[0]] = decision
+
+    def queue_compose(self, decision: Decision, task_id: str) -> None:
+        """A task for the compose pool outside every arm (D74)."""
         candidates = strings_of(decision.get("candidates"))
         conflicting = candidates[0]
         self.compose_queue.put(
             Task(
-                id=self.next_task_id(),
+                id=task_id,
                 approach=self.facts[conflicting].approach,
                 kind="rebase_compose",
                 goal=(

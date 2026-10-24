@@ -64,7 +64,16 @@ def main(argv: list[str] | None = None) -> int:
     run_parser.add_argument("--arm", choices=sorted(PRESETS), default="S2")
     run_parser.add_argument("--workers", type=int, default=2, help="Worker count.")
     run_parser.add_argument("--hours", type=float, default=1.0, help="Run length.")
-    run_parser.add_argument("--run-id", help="Defaults to a timestamp and the arm.")
+    run_identity = run_parser.add_mutually_exclusive_group()
+    run_identity.add_argument("--run-id", help="Defaults to a timestamp and the arm.")
+    run_identity.add_argument(
+        "--resume",
+        metavar="RUN_ID",
+        help=(
+            "Continue a stopped or crashed run with its own arm, workers and seed, "
+            "until its original deadline."
+        ),
+    )
     run_parser.add_argument("--seed", type=int, default=0)
     run_parser.add_argument(
         "--unsafe-no-sandbox",
@@ -175,9 +184,10 @@ def main(argv: list[str] | None = None) -> int:
                     arm=arguments.arm,
                     worker_count=arguments.workers,
                     duration_hours=arguments.hours,
-                    run_id=arguments.run_id,
+                    run_id=arguments.resume or arguments.run_id,
                     seed=arguments.seed,
                     allow_unenforced_egress=arguments.unsafe_no_sandbox,
+                    is_resume=arguments.resume is not None,
                 )
             )
     except (OSError, ValueError, NotSupportedError) as error:
