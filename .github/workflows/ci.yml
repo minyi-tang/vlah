@@ -59,7 +59,8 @@ jobs:
       - run: uv sync --locked
       - name: Build the worker image
         run: docker build -t vlah-worker:dev -f deploy/worker/Dockerfile .
-      - run: uv run pytest -m infra
+      # Only tests/infra: the testbed's modules need its packages (--all-packages).
+      - run: uv run pytest -m infra tests/infra
 
   # Guardrail for issue #10: hidden testbed material must never be committed.
   no-hidden-material:
