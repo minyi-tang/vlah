@@ -113,7 +113,7 @@ runner uses the herd's last baseline.
 ```
 PROMPT.md   the PI prompt (spec §3), with hours/quota filled in and the "no one online" line
 TOOLS.md    how to use tb fast / submit / status / history / final (identical in all arms)
-problem/    the worker copy of the problem: sim/, sites/, policy/, map/, baseline_scores.json
+problem/    the worker copy of the problem: sim/, sites/ (plant, symptoms, public traces; A19), policy/, map/, baseline_scores.json
 work/       a copy of the baseline policy to start from
 baseline/   the current baseline; in single and herd it changes as the integrator merges
 BASELINE_CHANGELOG.md, BASELINE_TARGET   what changed and its id
@@ -175,7 +175,7 @@ Each writes `private/testbed/var/extras/<name>.md`. `--seeds N` sets how many de
 
 ```mermaid
 flowchart LR
-  A[Agent] -->|tb fast: local, free| P[problem copy]
+  A[Agent] -->|tb fast: free, served on the public tier| S
   A -->|tb submit: scarce| S[slow eval]
   S --> H[hidden seeds + probes]
   S --> R[(events.jsonl)]
