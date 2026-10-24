@@ -1,0 +1,1063 @@
+{
+  "$defs": {
+    "AuditChecked": {
+      "additionalProperties": false,
+      "properties": {
+        "segment": {
+          "maxItems": 2,
+          "minItems": 2,
+          "prefixItems": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "integer"
+            }
+          ],
+          "title": "Segment",
+          "type": "array"
+        },
+        "daily": {
+          "$ref": "#/$defs/Paired"
+        },
+        "audit": {
+          "$ref": "#/$defs/Paired"
+        },
+        "threshold": {
+          "title": "Threshold",
+          "type": "number"
+        },
+        "flagged": {
+          "title": "Flagged",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "segment",
+        "daily",
+        "audit",
+        "threshold",
+        "flagged"
+      ],
+      "title": "AuditChecked",
+      "type": "object"
+    },
+    "BaselineAdvanced": {
+      "additionalProperties": false,
+      "properties": {
+        "baseline": {
+          "title": "Baseline",
+          "type": "integer"
+        },
+        "parent_baseline": {
+          "title": "Parent Baseline",
+          "type": "integer"
+        },
+        "candidate": {
+          "title": "Candidate",
+          "type": "string"
+        },
+        "files_changed": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Files Changed",
+          "type": "array"
+        },
+        "paired": {
+          "$ref": "#/$defs/Paired"
+        },
+        "guard_pending": {
+          "title": "Guard Pending",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "baseline",
+        "parent_baseline",
+        "candidate",
+        "files_changed",
+        "paired",
+        "guard_pending"
+      ],
+      "title": "BaselineAdvanced",
+      "type": "object"
+    },
+    "BaselineReverted": {
+      "additionalProperties": false,
+      "properties": {
+        "from_baseline": {
+          "title": "From Baseline",
+          "type": "integer"
+        },
+        "new_baseline": {
+          "title": "New Baseline",
+          "type": "integer"
+        },
+        "removed": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Removed",
+          "type": "array"
+        },
+        "reason": {
+          "title": "Reason",
+          "type": "string"
+        }
+      },
+      "required": [
+        "from_baseline",
+        "new_baseline",
+        "removed",
+        "reason"
+      ],
+      "title": "BaselineReverted",
+      "type": "object"
+    },
+    "BaselineStatus": {
+      "additionalProperties": false,
+      "description": "The Integrator's current baseline; score is the mean of its per-seed scores.",
+      "properties": {
+        "k": {
+          "title": "K",
+          "type": "integer"
+        },
+        "score": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Score"
+        },
+        "candidate_count": {
+          "title": "Candidate Count",
+          "type": "integer"
+        },
+        "guard_pending": {
+          "title": "Guard Pending",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "k",
+        "score",
+        "candidate_count",
+        "guard_pending"
+      ],
+      "title": "BaselineStatus",
+      "type": "object"
+    },
+    "DedupHit": {
+      "additionalProperties": false,
+      "properties": {
+        "candidate": {
+          "title": "Candidate",
+          "type": "string"
+        },
+        "original_claim": {
+          "title": "Original Claim",
+          "type": "string"
+        }
+      },
+      "required": [
+        "candidate",
+        "original_claim"
+      ],
+      "title": "DedupHit",
+      "type": "object"
+    },
+    "Event": {
+      "additionalProperties": false,
+      "description": "One state change, stored at events/<actor>/<local_id>.json and never modified.",
+      "properties": {
+        "seq": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Seq"
+        },
+        "local_id": {
+          "title": "Local Id",
+          "type": "string"
+        },
+        "ts": {
+          "title": "Ts",
+          "type": "number"
+        },
+        "actor": {
+          "title": "Actor",
+          "type": "string"
+        },
+        "role": {
+          "enum": [
+            "human",
+            "critic",
+            "eval_service",
+            "ci",
+            "indexer",
+            "planner",
+            "scout",
+            "librarian",
+            "integrator",
+            "worker",
+            "merge_queue",
+            "pi"
+          ],
+          "title": "Role",
+          "type": "string"
+        },
+        "type": {
+          "enum": [
+            "claim_status",
+            "approach_status",
+            "result_ready",
+            "surge_start",
+            "surge_end",
+            "plateau",
+            "escalation",
+            "lease_stale",
+            "allocation",
+            "reinstated",
+            "baseline_advanced",
+            "baseline_reverted",
+            "integration_failed",
+            "interaction_found",
+            "map_updated",
+            "audit_checked",
+            "dedup_hit",
+            "stopped",
+            "remeasure_ready"
+          ],
+          "title": "Type",
+          "type": "string"
+        },
+        "target": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Target"
+        },
+        "from": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "From"
+        },
+        "to": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "To"
+        },
+        "source": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Source"
+        },
+        "reason": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Reason"
+        },
+        "evidence": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Evidence",
+          "type": "array"
+        },
+        "data": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ResultReady"
+            },
+            {
+              "$ref": "#/$defs/BaselineAdvanced"
+            },
+            {
+              "$ref": "#/$defs/BaselineReverted"
+            },
+            {
+              "$ref": "#/$defs/IntegrationFailed"
+            },
+            {
+              "$ref": "#/$defs/InteractionFound"
+            },
+            {
+              "$ref": "#/$defs/AuditChecked"
+            },
+            {
+              "$ref": "#/$defs/MapUpdated"
+            },
+            {
+              "$ref": "#/$defs/DedupHit"
+            },
+            {
+              "$ref": "#/$defs/Stopped"
+            },
+            {
+              "$ref": "#/$defs/RemeasureReady"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Data"
+        }
+      },
+      "required": [
+        "local_id",
+        "ts",
+        "actor",
+        "role",
+        "type"
+      ],
+      "title": "Event",
+      "type": "object"
+    },
+    "IntegrationFailed": {
+      "additionalProperties": false,
+      "properties": {
+        "candidate": {
+          "title": "Candidate",
+          "type": "string"
+        },
+        "baseline": {
+          "title": "Baseline",
+          "type": "integer"
+        },
+        "paired": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Paired"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "reason": {
+          "title": "Reason",
+          "type": "string"
+        }
+      },
+      "required": [
+        "candidate",
+        "baseline",
+        "paired",
+        "reason"
+      ],
+      "title": "IntegrationFailed",
+      "type": "object"
+    },
+    "InteractionFound": {
+      "additionalProperties": false,
+      "properties": {
+        "candidate": {
+          "title": "Candidate",
+          "type": "string"
+        },
+        "baseline": {
+          "title": "Baseline",
+          "type": "integer"
+        },
+        "earlier": {
+          "$ref": "#/$defs/Paired"
+        },
+        "remeasured": {
+          "$ref": "#/$defs/Paired"
+        },
+        "overlaps_with": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Overlaps With",
+          "type": "array"
+        }
+      },
+      "required": [
+        "candidate",
+        "baseline",
+        "earlier",
+        "remeasured",
+        "overlaps_with"
+      ],
+      "title": "InteractionFound",
+      "type": "object"
+    },
+    "JudgeStatus": {
+      "additionalProperties": false,
+      "properties": {
+        "runs_used": {
+          "title": "Runs Used",
+          "type": "integer"
+        },
+        "machine_hours_used": {
+          "title": "Machine Hours Used",
+          "type": "number"
+        },
+        "machine_hours_limit": {
+          "title": "Machine Hours Limit",
+          "type": "number"
+        },
+        "sources": {
+          "items": {
+            "$ref": "#/$defs/SourceStatus"
+          },
+          "title": "Sources",
+          "type": "array"
+        }
+      },
+      "required": [
+        "runs_used",
+        "machine_hours_used",
+        "machine_hours_limit",
+        "sources"
+      ],
+      "title": "JudgeStatus",
+      "type": "object"
+    },
+    "MapUpdated": {
+      "additionalProperties": false,
+      "properties": {
+        "baseline": {
+          "title": "Baseline",
+          "type": "integer"
+        },
+        "measurements": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Measurements",
+          "type": "array"
+        },
+        "output": {
+          "title": "Output",
+          "type": "string"
+        }
+      },
+      "required": [
+        "baseline",
+        "measurements",
+        "output"
+      ],
+      "title": "MapUpdated",
+      "type": "object"
+    },
+    "Paired": {
+      "additionalProperties": false,
+      "description": "Paired difference between a candidate and the baseline it was built on (D73).\n\nn_reps counts only remeasures the eval service ran itself; cache hits do not count.",
+      "properties": {
+        "mean": {
+          "title": "Mean",
+          "type": "number"
+        },
+        "se": {
+          "minimum": 0,
+          "title": "Se",
+          "type": "number"
+        },
+        "n_items": {
+          "minimum": 0,
+          "title": "N Items",
+          "type": "integer"
+        },
+        "n_reps": {
+          "minimum": 0,
+          "title": "N Reps",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "mean",
+        "se",
+        "n_items",
+        "n_reps"
+      ],
+      "title": "Paired",
+      "type": "object"
+    },
+    "QueueStatus": {
+      "additionalProperties": false,
+      "properties": {
+        "arm_waiting": {
+          "title": "Arm Waiting",
+          "type": "integer"
+        },
+        "compose_waiting": {
+          "title": "Compose Waiting",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "arm_waiting",
+        "compose_waiting"
+      ],
+      "title": "QueueStatus",
+      "type": "object"
+    },
+    "RemeasureReady": {
+      "additionalProperties": false,
+      "description": "The Integrator's paired remeasure of a rebased candidate on baseline@k (D74).\n\nIt goes to the Integrator only; it never creates a follow-up task for a worker.\nAs in ResultReady, score and paired are None when the run was void, and\nconstraint_ok False means the remeasure was refuted. per_seed is the run's own\nper-seed scores: result.json is written once per hash, so a second measurement\nof the same content and target (a reverted baseline measured on the daily set\nand then on the audit set) has no record of its own there. dataset says which\nset the judge ran it on (D72).",
+      "properties": {
+        "request_id": {
+          "title": "Request Id",
+          "type": "string"
+        },
+        "candidate": {
+          "title": "Candidate",
+          "type": "string"
+        },
+        "parent_candidate": {
+          "title": "Parent Candidate",
+          "type": "string"
+        },
+        "claim_id": {
+          "title": "Claim Id",
+          "type": "string"
+        },
+        "baseline": {
+          "title": "Baseline",
+          "type": "string"
+        },
+        "paired": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Paired"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "score": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Score"
+        },
+        "level": {
+          "title": "Level",
+          "type": "string"
+        },
+        "constraint_ok": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Constraint Ok"
+        },
+        "per_seed": {
+          "default": [],
+          "items": {
+            "type": "number"
+          },
+          "title": "Per Seed",
+          "type": "array"
+        },
+        "dataset": {
+          "default": "dev",
+          "enum": [
+            "dev",
+            "audit"
+          ],
+          "title": "Dataset",
+          "type": "string"
+        }
+      },
+      "required": [
+        "request_id",
+        "candidate",
+        "parent_candidate",
+        "claim_id",
+        "baseline",
+        "paired",
+        "score",
+        "level"
+      ],
+      "title": "RemeasureReady",
+      "type": "object"
+    },
+    "ResultReady": {
+      "additionalProperties": false,
+      "description": "approach is the candidate's approach, so the follow-up task can name it (D28).\n\nconstraint_ok False means the result was refuted by a constraint or a\npost-result gate (D54): paired is then a measurement, never a gain. score and\npaired are None when the run was void, for example a candidate that crashed or\ntimed out on a seed; constraint_ok is then False too.",
+      "properties": {
+        "candidate": {
+          "title": "Candidate",
+          "type": "string"
+        },
+        "claim_id": {
+          "title": "Claim Id",
+          "type": "string"
+        },
+        "approach": {
+          "title": "Approach",
+          "type": "string"
+        },
+        "submitter": {
+          "title": "Submitter",
+          "type": "string"
+        },
+        "submitter_checkpoint": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Submitter Checkpoint"
+        },
+        "baseline": {
+          "title": "Baseline",
+          "type": "string"
+        },
+        "paired": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Paired"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "per_item": {
+          "title": "Per Item",
+          "type": "string"
+        },
+        "score": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Score"
+        },
+        "level": {
+          "title": "Level",
+          "type": "string"
+        },
+        "constraint_ok": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Constraint Ok"
+        }
+      },
+      "required": [
+        "candidate",
+        "claim_id",
+        "approach",
+        "submitter",
+        "submitter_checkpoint",
+        "baseline",
+        "paired",
+        "per_item",
+        "score",
+        "level"
+      ],
+      "title": "ResultReady",
+      "type": "object"
+    },
+    "SourceStatus": {
+      "additionalProperties": false,
+      "description": "One judge: runs_used counts the runs it made, never cache hits.",
+      "properties": {
+        "source": {
+          "title": "Source",
+          "type": "string"
+        },
+        "runs_used": {
+          "title": "Runs Used",
+          "type": "integer"
+        },
+        "run_cap": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Run Cap"
+        },
+        "per_day_cap": {
+          "title": "Per Day Cap",
+          "type": "integer"
+        },
+        "machine_hours_used": {
+          "title": "Machine Hours Used",
+          "type": "number"
+        }
+      },
+      "required": [
+        "source",
+        "runs_used",
+        "run_cap",
+        "per_day_cap",
+        "machine_hours_used"
+      ],
+      "title": "SourceStatus",
+      "type": "object"
+    },
+    "Stopped": {
+      "additionalProperties": false,
+      "properties": {
+        "reason": {
+          "enum": [
+            "budget",
+            "target",
+            "all_frozen",
+            "plateau",
+            "human",
+            "time"
+          ],
+          "title": "Reason",
+          "type": "string"
+        }
+      },
+      "required": [
+        "reason"
+      ],
+      "title": "Stopped",
+      "type": "object"
+    },
+    "TaskStatus": {
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "title": "Id",
+          "type": "string"
+        },
+        "kind": {
+          "enum": [
+            "advance",
+            "result_followup",
+            "counterexample",
+            "compose_pair",
+            "rebase_compose",
+            "integration_failed_followup",
+            "exploration"
+          ],
+          "title": "Kind",
+          "type": "string"
+        },
+        "approach": {
+          "title": "Approach",
+          "type": "string"
+        },
+        "goal": {
+          "title": "Goal",
+          "type": "string"
+        },
+        "priority": {
+          "enum": [
+            0,
+            1,
+            2
+          ],
+          "title": "Priority",
+          "type": "integer"
+        },
+        "refs": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Refs",
+          "type": "array"
+        }
+      },
+      "required": [
+        "id",
+        "kind",
+        "approach",
+        "goal",
+        "priority",
+        "refs"
+      ],
+      "title": "TaskStatus",
+      "type": "object"
+    },
+    "WorkerStatus": {
+      "additionalProperties": false,
+      "description": "One worker slot; task is None while the slot holds no lease.",
+      "properties": {
+        "agent": {
+          "title": "Agent",
+          "type": "string"
+        },
+        "is_compose": {
+          "title": "Is Compose",
+          "type": "boolean"
+        },
+        "task": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TaskStatus"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "lease_age_seconds": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Lease Age Seconds"
+        },
+        "last_heartbeat_ts": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Last Heartbeat Ts"
+        },
+        "files_touched": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Files Touched",
+          "type": "array"
+        },
+        "session_count": {
+          "title": "Session Count",
+          "type": "integer"
+        },
+        "crash_count": {
+          "title": "Crash Count",
+          "type": "integer"
+        },
+        "last_write_ts": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Last Write Ts"
+        }
+      },
+      "required": [
+        "agent",
+        "is_compose",
+        "task",
+        "lease_age_seconds",
+        "last_heartbeat_ts",
+        "files_touched",
+        "session_count",
+        "crash_count",
+        "last_write_ts"
+      ],
+      "title": "WorkerStatus",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {
+      "const": 1,
+      "title": "Schema Version",
+      "type": "integer"
+    },
+    "run_id": {
+      "title": "Run Id",
+      "type": "string"
+    },
+    "arm": {
+      "enum": [
+        "B0",
+        "B1",
+        "S1",
+        "S2",
+        "S2P"
+      ],
+      "title": "Arm",
+      "type": "string"
+    },
+    "phase": {
+      "enum": [
+        "running",
+        "closing",
+        "finished"
+      ],
+      "title": "Phase",
+      "type": "string"
+    },
+    "written_ts": {
+      "title": "Written Ts",
+      "type": "number"
+    },
+    "started_ts": {
+      "title": "Started Ts",
+      "type": "number"
+    },
+    "deadline_ts": {
+      "title": "Deadline Ts",
+      "type": "number"
+    },
+    "poll_seconds": {
+      "title": "Poll Seconds",
+      "type": "number"
+    },
+    "stop_reason": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "title": "Stop Reason"
+    },
+    "closeout_error": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "title": "Closeout Error"
+    },
+    "deliverable_baseline": {
+      "anyOf": [
+        {
+          "type": "integer"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "title": "Deliverable Baseline"
+    },
+    "head_sequence": {
+      "title": "Head Sequence",
+      "type": "integer"
+    },
+    "workers": {
+      "items": {
+        "$ref": "#/$defs/WorkerStatus"
+      },
+      "title": "Workers",
+      "type": "array"
+    },
+    "queues": {
+      "$ref": "#/$defs/QueueStatus"
+    },
+    "judge": {
+      "$ref": "#/$defs/JudgeStatus"
+    },
+    "baseline": {
+      "$ref": "#/$defs/BaselineStatus"
+    },
+    "recent_events": {
+      "items": {
+        "$ref": "#/$defs/Event"
+      },
+      "title": "Recent Events",
+      "type": "array"
+    }
+  },
+  "required": [
+    "schema_version",
+    "run_id",
+    "arm",
+    "phase",
+    "written_ts",
+    "started_ts",
+    "deadline_ts",
+    "poll_seconds",
+    "stop_reason",
+    "closeout_error",
+    "deliverable_baseline",
+    "head_sequence",
+    "workers",
+    "queues",
+    "judge",
+    "baseline",
+    "recent_events"
+  ],
+  "title": "RunStatusFile",
+  "type": "object"
+}

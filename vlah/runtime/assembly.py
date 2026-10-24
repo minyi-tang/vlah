@@ -45,6 +45,22 @@ class RunContext:
 
 
 @dataclass(frozen=True, kw_only=True)
+class QueuedTaskCounts:
+    arm: int
+    compose: int
+
+
+class CountQueuedTasks(Protocol):
+    def __call__(self) -> QueuedTaskCounts:
+        """Tasks waiting in the arm and compose queues, for the status file.
+
+        The TaskQueue contract has no count, so the assembly that built the queues
+        supplies it.
+        """
+        ...
+
+
+@dataclass(frozen=True, kw_only=True)
 class RunComponents:
     """Every component of one run, built for one RunContext."""
 
@@ -68,6 +84,7 @@ class RunComponents:
     compose_tool_server: ToolServer
     target_repository: str
     target_ref: str
+    count_queued_tasks: CountQueuedTasks
 
 
 class Assembly(Protocol):

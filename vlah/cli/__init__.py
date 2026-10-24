@@ -1,21 +1,52 @@
 """The vlah command line."""
 
 import argparse
+import logging
 import sys
 from pathlib import Path
+from typing import get_args
 
 from vlah import __version__
+from vlah.adapters.human.cli.human import CliHuman
 from vlah.arms.config import PRESETS
 from vlah.cli.charter import init_problem, sign_problem
+from vlah.cli.views import (
+    show_demo,
+    show_events,
+    show_inbox,
+    show_report,
+    show_search,
+    show_status,
+    stop_run,
+)
+from vlah.core.types.clock import SystemClock
+from vlah.core.types.events import EventType
 from vlah.ports.errors import NotSupportedError
 from vlah.runtime.command import RunRequest, run_problem
 
+DEFAULT_SEARCH_LIMIT = 20
+
+
+def add_run_arguments(
+    view_parser: argparse.ArgumentParser, has_json: bool
+) -> argparse.ArgumentParser:
+    """A command about one run of a problem: the latest, or the one --run-id names."""
+    view_parser.add_argument("name", type=Path, help="Problem folder.")
+    view_parser.add_argument("--run-id", help="Defaults to the run that changed last.")
+    if has_json:
+        view_parser.add_argument(
+            "--json", action="store_true", help="Print JSON instead of text."
+        )
+    else:
+        pass
+    return view_parser
+
 
 def main(argv: list[str] | None = None) -> int:
-    """Create, validate and run a problem folder; the other commands are tracked in #23."""
+    """Create, validate, run and watch a problem folder, or run the demo."""
     parser = argparse.ArgumentParser(
         prog="vlah",
-        description="Prepare a problem folder for an agent herd and run it.",
+        description="Prepare a problem folder for an agent herd, run it and watch it.",
     )
     parser.add_argument("--version", action="version", version=f"vlah {__version__}")
     commands = parser.add_subparsers(dest="command", required=True)
@@ -40,6 +71,53 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="Development only: run workers without OS-level egress enforcement.",
     )
+    add_run_arguments(
+        commands.add_parser(
+            "status", help="Show a run's workers, judge use and baseline."
+        ),
+        True,
+    )
+    events_parser = add_run_arguments(
+        commands.add_parser("events", help="Print a run's merged events in order."),
+        True,
+    )
+    events_parser.add_argument(
+        "--follow", action="store_true", help="Keep printing until the run finishes."
+    )
+    events_parser.add_argument(
+        "--type",
+        action="append",
+        choices=get_args(EventType),
+        default=[],
+        help="Only this event type; repeat for more.",
+    )
+    search_parser = add_run_arguments(
+        commands.add_parser(
+            "search", help="Find claims and dead ends that hold every word."
+        ),
+        True,
+    )
+    search_parser.add_argument("query", help="Words to look for.")
+    search_parser.add_argument("--limit", type=int, default=DEFAULT_SEARCH_LIMIT)
+    add_run_arguments(
+        commands.add_parser(
+            "report", help="Show the deliverable, the baselines and report/."
+        ),
+        True,
+    )
+    add_run_arguments(
+        commands.add_parser("inbox", help="List the questions waiting for you."), True
+    )
+    add_run_arguments(
+        commands.add_parser(
+            "stop", help="Stop a run cleanly; everything learned is kept."
+        ),
+        False,
+    )
+    demo_parser = commands.add_parser(
+        "demo", help="Run a whole herd on a toy problem, in memory."
+    )
+    demo_parser.add_argument("--seed", type=int, default=0)
     try:
         arguments = parser.parse_args(argv)
     except SystemExit as exit_status:
@@ -55,6 +133,41 @@ def main(argv: list[str] | None = None) -> int:
         elif arguments.command == "sign":
             status_path = sign_problem(arguments.name)
             print(f"Aligned {status_path.parent.parent}. No run was started.")
+        elif arguments.command == "status":
+            show_status(arguments.name, arguments.run_id, arguments.json, sys.stdout)
+        elif arguments.command == "events":
+            show_events(
+                arguments.name,
+                arguments.run_id,
+                tuple(arguments.type),
+                arguments.follow,
+                arguments.json,
+                sys.stdout,
+            )
+        elif arguments.command == "search":
+            show_search(
+                arguments.name,
+                arguments.run_id,
+                arguments.query,
+                arguments.limit,
+                arguments.json,
+                sys.stdout,
+            )
+        elif arguments.command == "report":
+            show_report(arguments.name, arguments.run_id, arguments.json, sys.stdout)
+        elif arguments.command == "inbox":
+            show_inbox(
+                arguments.name,
+                arguments.run_id,
+                arguments.json,
+                CliHuman(output=sys.stdout, replies=sys.stdin, clock=SystemClock()),
+            )
+        elif arguments.command == "stop":
+            stop_run(arguments.name, arguments.run_id, SystemClock(), sys.stdout)
+        elif arguments.command == "demo":
+            # The demo's story is its output; the components' progress logs are not.
+            logging.basicConfig(level=logging.WARNING, format="%(message)s")
+            show_demo(arguments.seed, sys.stdout)
         else:
             run_problem(
                 RunRequest(

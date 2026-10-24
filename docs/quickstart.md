@@ -27,18 +27,23 @@ uv run vlah --version
 uv run vlah demo
 ```
 
-The demo runs a whole herd on a toy problem in one process, using in-memory adapters, scripted workers and a fake judge. It takes about 10 seconds and needs no API keys, and it is the same run we use as a regression test. You should see directions being explored, duplicates skipped, and wins stacking onto the baseline:
+The demo runs a whole herd on a toy problem in one process, using in-memory adapters, scripted workers and a fake judge on a simulated clock. It takes about a second and needs no API keys, and the same seed always gives the same run, which a regression test checks (`--seed` picks another). You should see directions being explored, a duplicate skipped, an idea that does not help, and wins stacking onto the baseline:
 
 ```console
-demo  toy-scheduler · 4 workers · 3 directions · judge quota 6
+demo  toy-scheduler · 4 workers · 3 directions · seed 0
 
-  [00:01] w1  candidate c-3f2  queued for judge (predicted +2.0)
-  [00:02] w3  candidate c-9a0  dedup_hit (same as c-3f2)
-  [00:04] judge c-3f2  +2.4 ± 0.3
-  [00:04] baseline_advanced  b1 = b0 + c-3f2
-  [00:06] w2  dead_end  "batching by deadline": no gain
+  [00:30] result_ready       c-eval_service-00001 c4f3dc6a48a8 by worker-01 at toy_judge: score 102.3, gain +2.3 ± 0.12
+  [00:30] result_ready       c-eval_service-00002 929a18ea8d60 by worker-02 at toy_judge: score 99.28, gain -0.725 ± 0.1
   ...
-  baseline 100.0 -> 108.1 · judge 6 of 6 used · 2 duplicates skipped
+  [00:30] baseline_advanced  baseline@1 = baseline@0 + c4f3dc6a48a8, gain +2.3 ± 0.12
+  [00:30] dedup_hit          01d12d63a27c repeats c-eval_service-00003
+  [00:50] integration_failed 929a18ea8d60 on baseline@1: below_1se
+  ...
+  [03:50] baseline_advanced  baseline@4 = baseline@3 + 726be375291b, gain +1.49 ± 0.071
+  [04:00] escalation         spend_over_fraction  10.00 of 12.00 eval machine-hours spent (83%). ...
+  [08:00] stopped            time: the run's time limit
+
+  baseline 100 -> 108.7 (baseline@4) · 11 judge runs · 1 duplicate(s) skipped · 1 dead end(s)
 ```
 
 ## 3. Create a problem folder
@@ -135,9 +140,12 @@ While it runs:
 
 ```bash
 uv run vlah status cache-hit     # directions, judge quota used, current baseline
+uv run vlah events cache-hit --follow   # every event as it merges
 uv run vlah inbox cache-hit      # questions waiting for you; answer with: vlah answer <id> <choice>
 uv run vlah stop cache-hit       # stop cleanly; everything learned so far is kept
 ```
+
+Each command takes `--run-id` (by default, the run that changed last), and all but `stop` take `--json`. The run writes its live state to `cache-hit/.herd/runs/<run id>/status.json`, which [the status file](status-file.md) describes.
 
 The herd sends you a question only for big decisions, such as dropping a direction that holds a large share of the budget. Each question comes with options and a default that is applied if you don't answer in time (8 hours unless you change it). The default is always the safe choice: pause the affected direction rather than kill or continue it.
 

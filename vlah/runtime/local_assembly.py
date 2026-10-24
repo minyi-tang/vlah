@@ -59,6 +59,7 @@ from vlah.ports.harness import Harness
 from vlah.runtime.assembly import RunComponents, RunContext
 from vlah.runtime.compose import compose_arm
 from vlah.runtime.herd import top_level_source
+from vlah.runtime.status import KeyValueQueueCounts
 from vlah.tools.herd_tools import HerdTools
 from vlah.tools.server import McpToolServer
 
@@ -594,6 +595,9 @@ class LocalAssembly:
             compose_tool_server=tool_servers[1].server,
             target_repository=str(target_repository),
             target_ref=target_ref,
+            count_queued_tasks=KeyValueQueueCounts(
+                task_queue=task_queue, compose_queue=compose_queue
+            ),
         )
 
     def close(self) -> None:
