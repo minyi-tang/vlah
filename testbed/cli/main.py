@@ -63,7 +63,12 @@ def _problem_for_dir(d: Path):
 
 
 def cmd_fast(a):
-    from testbed.cli.client import SlowClient
+    """Fast tier on one public seed. Inside a run (TB_SLOW_URL and TB_RUN_ID set) the slow-eval
+    service evaluates and records the fast_run; elsewhere the local copy of the problem does.
+    """
+    import httpx
+
+    from testbed.cli.client import ServiceError, SlowClient, zip_candidate
     from testbed.problem_api import candidate_hash
 
     d = Path(a.dir)
@@ -73,49 +78,55 @@ def cmd_fast(a):
     err = prob.validate_candidate(d)
     if err:
         sys.exit(f"tb fast: invalid candidate: {err}")
-    t0 = time.time()
-    res = prob.evaluate(d, "fast", a.seed)
-    base = _baseline_fast(prob, a.seed)
     target = a.target or current_target(d)
-    h = candidate_hash(d, target)
-    printable = {k: v for k, v in res["extra"].items() if k not in ("waits",)}
-    out = {
-        "hash": h,
-        "seed": a.seed,
-        "score": res["score"],
-        "baseline_score": base,
-        "per_item": res["per_item"],
-        "extra": printable,
-        "elapsed_s": round(time.time() - t0, 1),
-    }
-    if a.out:
-        Path(a.out).write_text(json.dumps(out, indent=1))
-    print(
-        f"score {res['score']}   baseline {base}   (seed {a.seed}, {out['elapsed_s']}s)   hash {h[:12]}"
-    )
-    if res["score"] is None:
-        print(f"  void: {res['extra'].get('reason')}")
-    for it in res["per_item"]:
-        print(f"  {it['id']:12s} {it['value']}")
-    ev = {
-        "type": "fast_run",
-        "actor": _env("TB_ACTOR", "anon"),
-        "data": {
+    if _env("TB_SLOW_URL") and _env("TB_RUN_ID"):
+        # No local fallback: a worker must never read a different simulator's numbers as the
+        # service's (issue #113).
+        try:
+            out = SlowClient.from_env().fast(zip_candidate(d), a.seed, target)
+        except (ServiceError, httpx.HTTPError) as error:
+            sys.exit(f"tb fast: the slow-eval service did not evaluate: {error}")
+    else:
+        t0 = time.time()
+        res = prob.evaluate(d, "fast", a.seed)
+        base = _baseline_fast(prob, a.seed)
+        h = candidate_hash(d, target)
+        printable = {k: v for k, v in res["extra"].items() if k not in ("waits",)}
+        out = {
             "hash": h,
             "seed": a.seed,
             "score": res["score"],
             "baseline_score": base,
-        },
-    }
-    backup = Path.home() / ".tb" / "events.jsonl"
-    backup.parent.mkdir(parents=True, exist_ok=True)
-    with backup.open("a") as f:
-        f.write(json.dumps(dict(ev, ts=time.time(), run_id=_env("TB_RUN_ID"))) + "\n")
-    if _env("TB_SLOW_URL") and _env("TB_RUN_ID"):
-        try:
-            SlowClient.from_env().post_events([ev])
-        except Exception as e:  # the local run still counts for the worker
-            print(f"  (could not record fast_run: {e})", file=sys.stderr)
+            "per_item": res["per_item"],
+            "extra": printable,
+            "elapsed_s": round(time.time() - t0, 1),
+        }
+        ev = {
+            "type": "fast_run",
+            "actor": _env("TB_ACTOR", "anon"),
+            "data": {
+                "hash": h,
+                "seed": a.seed,
+                "score": res["score"],
+                "baseline_score": base,
+            },
+        }
+        backup = Path.home() / ".tb" / "events.jsonl"
+        backup.parent.mkdir(parents=True, exist_ok=True)
+        with backup.open("a") as f:
+            f.write(
+                json.dumps(dict(ev, ts=time.time(), run_id=_env("TB_RUN_ID"))) + "\n"
+            )
+    if a.out:
+        Path(a.out).write_text(json.dumps(out, indent=1))
+    print(
+        f"score {out['score']}   baseline {out['baseline_score']}   (seed {out['seed']}, "
+        f"{out['elapsed_s']}s)   hash {out['hash'][:12]}"
+    )
+    if out["score"] is None:
+        print(f"  void: {out['extra'].get('reason')}")
+    for it in out["per_item"]:
+        print(f"  {it['id']:12s} {it['value']}")
 
 
 def _baseline_fast(prob, seed):
@@ -285,7 +296,10 @@ def main(argv=None):
     )
     sub = ap.add_subparsers(dest="cmd", required=True)
 
-    s = sub.add_parser("fast", help="run the fast tier locally on a public seed")
+    s = sub.add_parser(
+        "fast",
+        help="run the fast tier on a public seed (served by the slow-eval service inside a run)",
+    )
     s.add_argument("dir")
     s.add_argument("--seed", type=int, default=1)
     s.add_argument("--target", default=None)
