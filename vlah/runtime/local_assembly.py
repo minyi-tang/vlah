@@ -14,6 +14,7 @@ import os
 import socket
 import statistics
 import subprocess
+import sys
 import tarfile
 import threading
 import time
@@ -31,6 +32,10 @@ from vlah.adapters.harness.claude_code.harness import (
     ClaudeCodeHarness,
 )
 from vlah.adapters.harness.copilot.harness import CopilotConfig, CopilotHarness
+from vlah.adapters.harness.scripted.harness import (
+    ScriptedWorkerConfig,
+    ScriptedWorkerHarness,
+)
 from vlah.adapters.memory.model import MemoryModel
 from vlah.adapters.memory.store import (
     MemoryKeyValueStore,
@@ -59,6 +64,7 @@ from vlah.ports.harness import Harness
 from vlah.runtime.assembly import RunComponents, RunContext
 from vlah.runtime.compose import compose_arm
 from vlah.runtime.herd import top_level_source
+from vlah.testing.scripted_worker import SCRIPTS
 from vlah.tools.herd_tools import HerdTools
 from vlah.tools.server import McpToolServer
 
@@ -76,7 +82,7 @@ DEFAULT_TARGET_REF = "HEAD"
 SERVER_START_TIMEOUT_SECONDS = 10.0
 GATE_TIMEOUT_SECONDS = 1800.0
 OUTPUT_TAIL_CHARACTERS = 2000
-SUPPORTED_HARNESSES = ("copilot", "claude_code")
+SUPPORTED_HARNESSES = ("copilot", "claude_code", "scripted")
 # Used when herd.yaml does not say the model's window; Claude models have at least this.
 DEFAULT_CONTEXT_WINDOW_TOKENS = 200_000
 SUPPORTED_EXECUTORS = ("local",)
@@ -271,13 +277,42 @@ def claude_code_harness(herd_config: HerdConfig, params: Params) -> ClaudeCodeHa
     )
 
 
-def worker_harness(herd_config: HerdConfig, params: Params) -> Harness:
-    """The harness herd.yaml names: copilot (#48) or claude_code (#18)."""
+def scripted_harness(
+    herd_config: HerdConfig, source_ids: tuple[str, ...]
+) -> ScriptedWorkerHarness:
+    """The model-free worker (#127); settings: script, python_executable, window_tokens."""
+    settings = herd_config.harness.settings
+    script = setting_text(settings, "script") or "submit_one"
+    if script not in SCRIPTS:
+        raise ValueError(f"herd.yaml: harness.settings.script must be one of {SCRIPTS}")
+    else:
+        return ScriptedWorkerHarness(
+            config=ScriptedWorkerConfig(
+                source_ids=source_ids,
+                script=script,
+                python_executable=(
+                    setting_text(settings, "python_executable") or sys.executable
+                ),
+                window_tokens=(
+                    setting_number(settings, "window_tokens")
+                    or DEFAULT_CONTEXT_WINDOW_TOKENS
+                ),
+                environment=setting_mapping(settings, "environment"),
+            )
+        )
+
+
+def worker_harness(
+    herd_config: HerdConfig, params: Params, source_ids: tuple[str, ...]
+) -> Harness:
+    """The harness herd.yaml names: copilot (#48), claude_code (#18) or scripted (#127)."""
     kind = herd_config.harness.kind
     if kind == "copilot":
         return copilot_harness(herd_config, params)
     elif kind == "claude_code":
         return claude_code_harness(herd_config, params)
+    elif kind == "scripted":
+        return scripted_harness(herd_config, source_ids)
     else:
         raise NotSupportedError(
             f"harness {kind!r} is not available; use one of {SUPPORTED_HARNESSES}"
@@ -536,7 +571,11 @@ class LocalAssembly:
             inherited_environment=os.environ,
             poll_seconds=self.executor_poll_seconds,
         )
-        harness = worker_harness(problem.herd_config, context.params)
+        harness = worker_harness(
+            problem.herd_config,
+            context.params,
+            tuple(source.id for source in problem.sources),
+        )
         integrator = HerdIntegrator(
             blackboard=blackboard,
             eval_service=eval_service,

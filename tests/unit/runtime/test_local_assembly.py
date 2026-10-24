@@ -142,7 +142,7 @@ def test_the_example_can_run_claude_code_workers_and_a_model_graded_judge(
     judge = problem.herd_config.judges["rubric"].command
     assert judge is not None and "private/llm_judge.py" in judge
     assert (destination / "private" / "llm_judge.py").is_file()
-    harness = worker_harness(problem.herd_config, problem.params)
+    harness = worker_harness(problem.herd_config, problem.params, ("rubric",))
     assert isinstance(harness, ClaudeCodeHarness)
     assert harness.config.claude_command == ("/opt/gateway/claude-ghcp",)
     assert harness.config.environment == {"CLAUDE_BIN": "/opt/claude"}
