@@ -25,6 +25,7 @@ from vlah.core.types.params import EgressPolicy, HostRule, Params
 from vlah.ports.errors import NotSupportedError
 from vlah.ports.executor import Handle, StartPack
 from vlah.ports.harness import HookConfig, ToolEndpoint, Workspace
+from vlah.prompts.worker import render_worker_prompt
 from vlah.testing.conformance import HarnessCheckInputs, check_harness
 
 pytestmark = pytest.mark.harness
@@ -125,6 +126,7 @@ def test_build_runs_claude_code_through_the_wrapper_with_the_herd_server_and_hoo
     assert "mcp__herd__*" in flags["--allowedTools"].split(",")
     assert "--strict-mcp-config" in command
     assert TASK.goal in command[command.index("-p") + 1]
+    assert command[command.index("-p") + 1] == render_worker_prompt(WORKER, TASK)
     server = json.loads(spec.files[MCP_CONFIG_PATH])["mcpServers"]["herd"]
     assert server == {
         "type": "http",
