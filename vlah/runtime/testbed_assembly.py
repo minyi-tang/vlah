@@ -39,7 +39,6 @@ from vlah.runtime.local_assembly import (
     sandbox_root_for,
     setting_mapping,
     setting_texts,
-    worker_harness,
 )
 from vlah.runtime.testbed_problem import (
     PACKED_DIRECTORY,
@@ -316,7 +315,7 @@ class TestbedAssembly(LocalAssembly):
     def make_harness(self, context: RunContext) -> Harness:
         assert self.worker_runtime is not None
         return TestbedHarness(
-            harness=worker_harness(context.problem.herd_config, context.params),
+            harness=super().make_harness(context),
             slow_eval_url=self.client.base_url,
             run_id=context.run_id,
             tokens=self.tokens,
