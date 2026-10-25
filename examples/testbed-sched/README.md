@@ -16,6 +16,10 @@ Leave the checked-in `charter/status.md` unchanged; review and configure a separ
 operator copy before signing it. A local UI-feedback session is not a pilot or an
 arm comparison and does not confer that approval.
 
+`uv run pytest tests/unit/cli` also works with the core-only `uv sync --locked`
+installation used by CI. Its quota check reads the public settings as a literal
+without importing the scheduler simulator or requiring testbed dependencies.
+
 ## Public inputs
 
 The brief uses only the public [PI prompt](../../problems/sched/pi_prompt.md),

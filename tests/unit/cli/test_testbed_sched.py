@@ -1,11 +1,12 @@
-"""The scheduler template agrees with public testbed settings and stays unsigned."""
+"""The scheduler template loads without simulator dependencies and stays unsigned."""
 
+import ast
 import shutil
 from pathlib import Path
 
 import pytest
+from pydantic import TypeAdapter
 
-from problems.sched.problem import DEFAULT_KNOBS
 from testbed.integrator.core import IntegratorConfig
 from vlah.core.problem.loader import load_problem
 
@@ -17,18 +18,33 @@ HOURS_PER_DAY = 24
 
 
 def test_scheduler_quota_and_integrator_match_the_public_testbed() -> None:
+    public_module = ast.parse(
+        (REPOSITORY_ROOT / "problems/sched/problem.py").read_text(encoding="utf-8")
+    )
+    knob_assignment = next(
+        statement
+        for statement in public_module.body
+        if isinstance(statement, ast.Assign)
+        and any(
+            isinstance(target, ast.Name) and target.id == "DEFAULT_KNOBS"
+            for target in statement.targets
+        )
+    )
+    public_knobs = TypeAdapter(dict[str, int]).validate_python(
+        ast.literal_eval(knob_assignment.value)
+    )
     problem = load_problem(SCHEDULER_FOLDER)
     assert len(problem.sources) == 1
     source = problem.sources[0]
     assert source.id == "slow"
     assert source.mode == "pull"
-    assert source.latency_seconds == DEFAULT_KNOBS["visible_delay_s"]
-    assert source.noise.n_for_ci == DEFAULT_KNOBS["slow_seeds"]
-    assert source.budget.per_day == DEFAULT_KNOBS["quota_per_hour"] * HOURS_PER_DAY
+    assert source.latency_seconds == public_knobs["visible_delay_s"]
+    assert source.noise.n_for_ci == public_knobs["slow_seeds"]
+    assert source.budget.per_day == public_knobs["quota_per_hour"] * HOURS_PER_DAY
     assert source.budget.allocated_by == "human"
-    assert problem.limits.runs == {"slow": DEFAULT_KNOBS["quota_total"]}
-    assert problem.limits.days == DEFAULT_KNOBS["quota_total"] / (
-        DEFAULT_KNOBS["quota_per_hour"] * HOURS_PER_DAY
+    assert problem.limits.runs == {"slow": public_knobs["quota_total"]}
+    assert problem.limits.days == public_knobs["quota_total"] / (
+        public_knobs["quota_per_hour"] * HOURS_PER_DAY
     )
     assert problem.herd_config.judges["slow"].adapter_class == (
         "vlah.adapters.signal.testbed_http.client:SlowTierSource"
@@ -43,14 +59,10 @@ def test_scheduler_quota_and_integrator_match_the_public_testbed() -> None:
     assert params.spot_check_every_merges == integrator.audit_every
     assert params.spot_check_sigma_multiple == integrator.audit_k
     assert params.spot_check_reserved_for_bisection == integrator.audit_reserve
-    assert (
-        params.holdout_run_cap == integrator.audit_max == DEFAULT_KNOBS["audit_total"]
-    )
-    assert params.verdict_repeat_count == DEFAULT_KNOBS["judge_total"]
-    assert params.quota_integrator_total == DEFAULT_KNOBS["quota_integrator_total"]
-    assert (
-        params.quota_integrator_per_hour == DEFAULT_KNOBS["quota_integrator_per_hour"]
-    )
+    assert params.holdout_run_cap == integrator.audit_max == public_knobs["audit_total"]
+    assert params.verdict_repeat_count == public_knobs["judge_total"]
+    assert params.quota_integrator_total == public_knobs["quota_integrator_total"]
+    assert params.quota_integrator_per_hour == public_knobs["quota_integrator_per_hour"]
     assert problem.gates == ()
 
 
