@@ -4,6 +4,9 @@
 runner creates the service run, packs the problem, supplies the shared
 `IntegratorConfig`, and keeps `TB_SYSTEM_KEY` in the operator process.
 
+Install both workspace packages first with `uv sync --locked --all-packages`.
+This supplies the `vlah` and `tb` commands and the slow-eval app's dependencies.
+
 ```bash
 VLAH_TESTBED_TEMPLATE=/path/to/approved-scheduler-template \
   tb run --arm herd --problem sched --workers 2 --hours 0.1
