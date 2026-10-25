@@ -1,0 +1,9 @@
+# An allowlist: only the package reaches an image build. Problem folders, private/
+# and run state never do (D63, #127).
+*
+!pyproject.toml
+!README.md
+!LICENSE
+!vlah/
+vlah/**/__pycache__
+vlah/**/*.pyc

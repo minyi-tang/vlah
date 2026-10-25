@@ -39,12 +39,14 @@ from vlah.adapters.executor.local.workspace import (
     BASE_REF,
     GitCommandError,
     SandboxPaths,
+    ViewSettings,
     check_out_target,
     clone_blackboard,
     files_touched,
     refresh_blackboard,
     refuse_sandbox_inside_run_directory,
     sandbox_paths,
+    view_environment,
     worker_environment,
     write_start_files,
 )
@@ -80,6 +82,7 @@ class LocalExecutor:
         params: Params,
         clock: Clock,
         inherited_environment: Mapping[str, str],
+        view_settings: ViewSettings | None = None,
         grace_seconds: float = DEFAULT_GRACE_SECONDS,
         clone_refresh_seconds: float = DEFAULT_CLONE_REFRESH_SECONDS,
         poll_seconds: float | None = DEFAULT_POLL_SECONDS,
@@ -94,6 +97,7 @@ class LocalExecutor:
         self.params = params
         self.clock = clock
         self.inherited_environment = dict(inherited_environment)
+        self.view_settings = view_settings
         self.grace_seconds = grace_seconds
         self.clone_refresh_seconds = clone_refresh_seconds
         self.sessions: dict[str, Session] = {}
@@ -139,7 +143,9 @@ class LocalExecutor:
                 agent=spec.agent,
                 task_id=task.id,
             )
-        clone_blackboard(paths, spec.blackboard_clone_url)
+        clone_blackboard(
+            paths, spec.blackboard_clone_url, view_environment(spec, self.view_settings)
+        )
         process = self.launch(
             handle, spec, paths, {**spec.files, **start_pack.files}, attempt=1
         )
@@ -265,7 +271,11 @@ class LocalExecutor:
 
     def refresh(self, session: Session, now_seconds: float) -> None:
         try:
-            refresh_blackboard(session.paths, session.spec.blackboard_clone_url)
+            refresh_blackboard(
+                session.paths,
+                session.spec.blackboard_clone_url,
+                view_environment(session.spec, self.view_settings),
+            )
         except SIDECAR_FAILURES:
             logger.exception(f"blackboard refresh failed for {session.handle.agent}")
         session.next_refresh_seconds = now_seconds + self.clone_refresh_seconds

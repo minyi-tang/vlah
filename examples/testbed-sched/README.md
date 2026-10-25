@@ -16,9 +16,10 @@ Leave the checked-in `charter/status.md` unchanged; review and configure a separ
 operator copy before signing it. A local UI-feedback session is not a pilot or an
 arm comparison and does not confer that approval.
 
-`uv run pytest tests/unit/cli` also works with the core-only `uv sync --locked`
-installation used by CI. Its quota check reads the public settings as a literal
-without importing the scheduler simulator or requiring testbed dependencies.
+`uv run pytest tests/unit/cli` also works with a core-only `uv sync --locked`
+installation. Its quota check reads the public settings as a literal without
+importing the scheduler simulator or requiring testbed dependencies. CI installs
+the full workspace with `uv sync --locked --all-packages`.
 
 ## Public inputs
 

@@ -43,13 +43,14 @@ members = ["testbed"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["."]
-addopts = ["--strict-markers", "--import-mode=importlib", "-ra", "-m", "not slow"]
+addopts = ["--strict-markers", "--import-mode=importlib", "-ra", "-m", "not slow and not infra"]
 timeout = 60
 markers = [
     "l0: one of the 20 L0 plumbing assertions (v2.2 section 14.1)",
     "smoke: the seeded in-memory toy loop; must stay green on every PR",
     "contract: cross-package contract tests (for example the candidate hash vs the testbed)",
     "slow: long or real-time tests; excluded by default, run with -m slow",
+    "infra: needs Docker (kind for Kubernetes); the local track's stack tests, excluded by default, run with -m infra",
     "blackboard: W1-01 #11",
     "indexer: W1-02 #12",
     "queue: W1-03 #13",
@@ -63,6 +64,8 @@ markers = [
     "runtime: W1-11 #21",
     "egress: W1-12 #22",
     "cli: W1-13 #23",
+    "docker: L-01 #128",
+    "kubernetes: L-04 #131",
     "critic: W2-05 #121",
 ]
 
