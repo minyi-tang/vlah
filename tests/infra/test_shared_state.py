@@ -134,7 +134,12 @@ def stack_problem(tmp_path: Path, image: str) -> Path:
 
 def vlah(*arguments: str) -> subprocess.Popen[str]:
     return subprocess.Popen(
-        [sys.executable, "-m", "vlah.cli", *arguments],
+        [
+            sys.executable,
+            "-c",
+            "from vlah.cli import main; raise SystemExit(main())",
+            *arguments,
+        ],
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         text=True,

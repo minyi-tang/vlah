@@ -10,8 +10,10 @@ import pytest
 from vlah.runtime.stack import (
     COMPOSE_PROJECT,
     CommandResult,
+    check_kind,
     check_stack,
     compose_yaml,
+    kind_up,
     memory_bytes,
     print_checks,
     stack_down,
@@ -167,3 +169,71 @@ def test_memory_sizes_read_as_docker_writes_them(text: str, expected: int) -> No
 def test_a_malformed_memory_size_is_refused() -> None:
     with pytest.raises(ValueError, match="2g or 512m"):
         memory_bytes("two gigs")
+
+
+def test_kind_up_creates_installs_calico_waits_and_loads_the_image() -> None:
+    docker = ScriptedDocker(
+        answers={
+            "get clusters": CommandResult(exit_code=0, stdout="other\n", stderr="")
+        }
+    )
+    stream = io.StringIO()
+    assert kind_up(docker, stream, "/Users/me", "vlah-worker:dev") == 0
+    commands = [" ".join(call[:4]) for call in docker.calls]
+    assert commands[0] == "kind get clusters"
+    assert docker.calls[1][:5] == ("kind", "create", "cluster", "--config", "-")
+    assert "disableDefaultCNI: true" in (docker.stdin_texts[1] or "")
+    assert "hostPath: /Users/me" in (docker.stdin_texts[1] or "")
+    assert any("calico" in " ".join(call) for call in docker.calls), "Calico is applied"
+    assert docker.calls[-1] == (
+        "kind",
+        "load",
+        "docker-image",
+        "vlah-worker:dev",
+        "--name",
+        "vlah",
+    )
+    assert "ready with Calico" in stream.getvalue()
+
+    existing = ScriptedDocker(
+        answers={"get clusters": CommandResult(exit_code=0, stdout="vlah\n", stderr="")}
+    )
+    assert kind_up(existing, io.StringIO(), "/Users/me", "vlah-worker:dev") == 0
+    assert not any(call[:3] == ("kind", "create", "cluster") for call in existing.calls)
+
+
+def test_check_kind_names_the_missing_cluster_and_the_pod_probe() -> None:
+    no_cluster = ScriptedDocker(
+        answers={
+            "cluster-info": CommandResult(
+                exit_code=1, stdout="", stderr="connection refused"
+            )
+        }
+    )
+    checks = check_kind(no_cluster)
+    assert [(check.name, check.passed) for check in checks] == [
+        ("kind", True),
+        ("kubectl", True),
+        ("cluster", False),
+    ]
+    assert "vlah stack --kind up" in checks[-1].detail
+
+    ready = ScriptedDocker(
+        answers={
+            "jsonpath={.items[*].status.phase}": CommandResult(
+                exit_code=0, stdout="Running", stderr=""
+            ),
+            "crictl images": CommandResult(
+                exit_code=0, stdout="sha256:abc\n", stderr=""
+            ),
+            "vlah-stack-probe": CommandResult(
+                exit_code=0, stdout="resolved 192.168.65.254\nreached\n", stderr=""
+            ),
+        }
+    )
+    checks = check_kind(ready, gateway_url="http://host.docker.internal:4000")
+    assert all(check.passed for check in checks), [check.detail for check in checks]
+    assert [check.name for check in checks][-2:] == [
+        "host from a pod",
+        "model gateway from a pod",
+    ]
