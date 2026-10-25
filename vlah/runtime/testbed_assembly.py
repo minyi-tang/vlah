@@ -3,7 +3,6 @@
 import hmac
 import math
 import shutil
-import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal
@@ -40,8 +39,8 @@ from vlah.runtime.local_assembly import (
     protected_directories,
     sandbox_root_for,
     setting_mapping,
-    setting_text,
     setting_texts,
+    worker_python,
 )
 from vlah.runtime.testbed_problem import (
     PACKED_DIRECTORY,
@@ -292,10 +291,7 @@ class TestbedAssembly(LocalAssembly):
         herd_config = context.problem.herd_config
         command = setting_texts(herd_config.harness.settings, "command")
         if herd_config.harness.kind == "scripted":
-            executable_name = (
-                setting_text(herd_config.harness.settings, "python_executable")
-                or sys.executable
-            )
+            executable_name = worker_python(herd_config)
         elif command:
             executable_name = command[0]
         else:
