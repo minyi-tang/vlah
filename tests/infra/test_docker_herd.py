@@ -1,10 +1,12 @@
-"""The LLM-free herd in containers (#127, #128): two scripted workers, each in its
-own container, the real tool server and git blackboard on the host, the arm S2;
-the smoke test's assertions hold."""
+"""Two scripted Docker workers complete one follow-up per result in S2.
+
+Tasks retain submitter attribution even when a peer claims them during a lease gap.
+"""
 
 import subprocess
 import sys
 import time
+from collections import Counter
 from pathlib import Path
 from random import Random
 
@@ -19,6 +21,7 @@ from vlah.core.types.claims import Claim, parse_claim
 from vlah.core.types.clock import SystemClock
 from vlah.core.types.events import Event, ResultReady, event_from_json
 from vlah.core.types.ids import ActorId
+from vlah.core.worker.loop import run_task
 from vlah.runtime.herd import build_herd
 from vlah.runtime.local_assembly import LocalAssembly
 
@@ -80,11 +83,29 @@ def claims_by(blackboard: Blackboard, agent: ActorId) -> list[Claim]:
     ]
 
 
+def completed_follow_ups(blackboard: Blackboard) -> list[Claim]:
+    return [
+        claim
+        for agent in WORKERS
+        for claim in claims_by(blackboard, agent)
+        if claim.type == "dead_end" and "stub" not in claim.tags
+    ]
+
+
 def follow_ups_done(blackboard: Blackboard) -> bool:
-    """Each worker has recorded the dead end that answers its own result (D28)."""
-    return all(
-        any(claim.type == "dead_end" and "stub" not in claim.tags for claim in claims)
-        for claims in (claims_by(blackboard, agent) for agent in WORKERS)
+    """Each distinct result has exactly one non-stub answer, by any worker (D28, D55)."""
+    result_claim_ids = [
+        event.data.claim_id
+        for event in merged_events(blackboard)
+        if event.type == "result_ready" and isinstance(event.data, ResultReady)
+    ]
+    return (
+        len(result_claim_ids) == len(WORKERS)
+        and len(set(result_claim_ids)) == len(result_claim_ids)
+        and Counter(
+            claim.evidence[0].claim for claim in completed_follow_ups(blackboard)
+        )
+        == Counter(result_claim_ids)
     )
 
 
@@ -108,39 +129,93 @@ def leftovers(run_id: str) -> list[str]:
     ).stdout.split()
 
 
+@pytest.mark.parametrize("lease_gap", [False, True], ids=["supervised", "lease-gap"])
 def test_two_scripted_workers_in_containers_run_the_herd(
-    tmp_path: Path, worker_image: str
+    tmp_path: Path, worker_image: str, lease_gap: bool
 ) -> None:
+    """A submitter's lease gap must not make its peer's valid follow-up look missing."""
     root = containerized_problem(tmp_path, worker_image)
     problem = load_problem(root)
     assembly = LocalAssembly(
         docker=DockerCli(), executor_poll_seconds=0.5, waiter_seconds=1.0
     )
-    run = build_herd(
+    run_id = f"{RUN_ID}-lease-gap" if lease_gap else RUN_ID
+    herd = build_herd(
         problem,
         "S2",
         assembly,
-        RUN_ID,
+        run_id,
         root=root / ".herd" / "runs",
         worker_count=2,
         duration_seconds=HERD_TIMEOUT_SECONDS,
         clock=SystemClock(),
         random=Random(0),
         poll_seconds=1.0,
-    ).start()
+    )
+    run = herd.prepare() if lease_gap else herd.start()
     blackboard = run.components.blackboard
     try:
         deadline = time.monotonic() + HERD_TIMEOUT_SECONDS
-        while time.monotonic() < deadline and not follow_ups_done(blackboard):
-            time.sleep(1.0)
-        run.stop()
+        if lease_gap:
+            slots = {slot.agent: slot for slot in run.supervisor.slots}
+            cursors = {agent: 0 for agent in WORKERS}
+            queue = run.components.task_queue
+            claimant = WORKERS[1]
+            for submitter in WORKERS:
+                queue.maintain({"a-01": 1})
+                advance = queue.claim_task(submitter)
+                assert advance is not None and advance.kind == "advance"
+                cursors[submitter] = run_task(
+                    submitter, advance, slots[submitter].deps, cursors[submitter]
+                )
+                assert run.components.leases.get(submitter) is None
+
+                ready: list[ResultReady] = []
+                while time.monotonic() < deadline and not ready:
+                    run.components.eval_service.tick()
+                    ready = [
+                        event.data
+                        for event in merged_events(blackboard)
+                        if event.type == "result_ready"
+                        and isinstance(event.data, ResultReady)
+                        and event.data.submitter == submitter
+                    ]
+                    if not ready:
+                        time.sleep(1.0)
+                    else:
+                        pass
+                assert len(ready) == 1
+                assert not follow_ups_done(blackboard), "a follow-up is still missing"
+                follow_up = queue.claim_task(claimant)
+                assert follow_up is not None and follow_up.kind == "result_followup"
+                assert follow_up.priority == 0
+                assert follow_up.for_agent == submitter
+                assert follow_up.refs == (ready[0].claim_id, ready[0].candidate)
+                cursors[claimant] = run_task(
+                    claimant, follow_up, slots[claimant].deps, cursors[claimant]
+                )
+                assert run.components.leases.get(claimant) is None
+                assert follow_ups_done(blackboard) == (submitter == WORKERS[-1])
+            assert [claim.author for claim in completed_follow_ups(blackboard)] == [
+                claimant,
+                claimant,
+            ]
+        else:
+            while time.monotonic() < deadline and not follow_ups_done(blackboard):
+                time.sleep(1.0)
     finally:
-        assembly.close()
-    assert leftovers(RUN_ID) == [], "no container outlives the run"
+        try:
+            run.stop()
+        finally:
+            assembly.close()
+    assert leftovers(run_id) == [], "no container outlives the run"
+    assert follow_ups_done(blackboard), "every result has one completed follow-up"
 
     events = merged_events(blackboard)
     results = [event for event in events if event.type == "result_ready"]
     assert len(results) == 2
+    follow_ups = completed_follow_ups(blackboard)
+    assert len(follow_ups) == len(results)
     submitters: list[ActorId] = []
     for event in results:
         assert isinstance(event.data, ResultReady)
@@ -149,9 +224,8 @@ def test_two_scripted_workers_in_containers_run_the_herd(
         submitters.append(event.data.submitter)
         follow_up = [
             claim
-            for claim in claims_by(blackboard, event.data.submitter)
-            if claim.type == "dead_end"
-            and claim.evidence[0].claim == event.data.claim_id
+            for claim in follow_ups
+            if claim.evidence[0].claim == event.data.claim_id
         ]
-        assert len(follow_up) == 1, "the result went back to its submitter (D28)"
+        assert len(follow_up) == 1, "each result has exactly one evidence-linked answer"
     assert sorted(submitters) == sorted(WORKERS)
