@@ -34,6 +34,7 @@ from vlah.adapters.executor.docker.egress import (
     TASK_LABEL,
     RunEgress,
     docker_name,
+    run_label,
 )
 from vlah.adapters.executor.local.sessions import ClaimLedger
 from vlah.adapters.executor.local.traces import (
@@ -215,6 +216,7 @@ class DockerExecutor:
             docker=docker,
             allow_unenforced=allow_unenforced,
         )
+        self.remove_leftovers()
         self.sessions: dict[str, ContainerSession] = {}
         self.base_commits: dict[Path, str] = {}
         self.started_count = 0
@@ -659,6 +661,20 @@ class DockerExecutor:
     def denied(self) -> tuple[DeniedConnection, ...]:
         """Every connection the run's proxy refused, from its per-agent logs."""
         return self.egress.denied()
+
+    def remove_leftovers(self) -> None:
+        """Remove the run's containers and networks an earlier process left (#130).
+
+        This executor started none of them and holds no session for them, so a
+        resumed run cannot adopt them; their leases are released at prepare and
+        their tasks requeued once, and the containers must not keep writing.
+        """
+        label = run_label(self.run_id)
+        for container in self.docker.containers_with_label(label):
+            logger.warning(f"removing container {container} left by an earlier process")
+            self.docker.remove_container(container)
+        for network in self.docker.networks_with_label(label):
+            self.docker.remove_network(network)
 
     def close(self) -> None:
         """Stop the sidecar, kill every session, then remove everything with the run's label."""

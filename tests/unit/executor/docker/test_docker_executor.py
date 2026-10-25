@@ -364,3 +364,17 @@ def test_a_dead_proxy_container_fails_the_start_instead_of_waiting(
                 START_PACK,
                 harness.sink,
             )
+
+
+def test_a_crashed_runs_containers_are_removed_before_the_executor_starts(
+    tmp_path: Path,
+) -> None:
+    """A resumed run's executor never started the containers an earlier process left
+    and cannot adopt them; they go before it starts any of its own (#130)."""
+    docker = FakeDockerClient()
+    orphan = docker.add_orphan("vlah-run-1-worker-01-old", RUN_ID)
+    other_run = docker.add_orphan("vlah-run-2-worker-01", "run-2")
+    with running_docker_executor(tmp_path, FakeClock(), docker=docker) as harness:
+        assert orphan in docker.removed, "the crashed run's container is gone"
+        assert other_run not in docker.removed, "another run's container stays"
+        assert harness.executor.sessions == {}, "nothing was adopted"

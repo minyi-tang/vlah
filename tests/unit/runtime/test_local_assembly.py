@@ -27,6 +27,7 @@ from vlah.core.types.ids import ActorId
 from vlah.core.types.tasks import Task
 from vlah.runtime.assembly import RunContext
 from vlah.runtime.command import RunRequest, run_problem
+from vlah.runtime.driver import RunHeldError
 from vlah.runtime.local_assembly import (
     LocalAssembly,
     export_baseline,
@@ -339,3 +340,37 @@ def test_the_assembly_builds_a_docker_executor_from_herd_yaml(tmp_path: Path) ->
         assert harness.config.python_executable == "python", "the image's"
     finally:
         assembly.close()
+
+
+def test_a_second_driver_of_the_same_run_is_refused_until_the_first_closes(
+    tmp_path: Path,
+) -> None:
+    """With a TTL the assembly takes the run's driver lock before anything else, so
+    two control planes cannot assign sequence numbers to one run (D56, #130)."""
+    root = example_problem(tmp_path)
+    problem = load_problem(root)
+    context = RunContext(
+        run_id="r-locked",
+        run_root=root / ".herd" / "runs" / "r-locked",
+        arm=PRESETS["S2"],
+        params=problem.params,
+        problem=problem,
+        clock=FakeClock(),
+        random=Random(0),
+        duration_seconds=60.0,
+    )
+    first = LocalAssembly(driver_lock_ttl_seconds=100.0, executor_poll_seconds=0.5)
+    first.build(context)
+    second = LocalAssembly(driver_lock_ttl_seconds=100.0, executor_poll_seconds=0.5)
+    try:
+        with pytest.raises(RunHeldError, match="r-locked is driven by"):
+            second.build(context)
+        assert second.parts == [], "a refused build starts nothing"
+    finally:
+        first.close()
+    second.build(context)
+    try:
+        assert second.parts[0].driver_lock is not None
+        assert second.parts[0].driver_lock.is_held
+    finally:
+        second.close()
