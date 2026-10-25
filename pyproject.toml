@@ -9,17 +9,13 @@ dependencies = [
     "mcp>=2.3",
     "pydantic>=2.11",
     "pyyaml>=6.0",
+    "redis>=5.0",
     "starlette>=1.9",
     "uvicorn>=0.54",
 ]
 
 [project.scripts]
 vlah = "vlah.cli:main"
-
-[project.optional-dependencies]
-redis = [
-    "redis>=5.0",
-]
 
 [dependency-groups]
 dev = [

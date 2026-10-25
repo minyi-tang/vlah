@@ -4,8 +4,13 @@ build_herd fixes everything a run is made of: one RunContext (run id and root,
 ArmConfig, the problem's Params, clock), the components the assembly builds from it,
 and one worker slot per worker plus the compose slot. prepare rebuilds the Indexer
 from the blackboard once, so a restarted process knows every earlier claim (D13),
-then subscribes the merge fan-out; start starts the supervisor thread and returns
-the Run.
+replays the earlier events' judge runs and follow-ups, and subscribes the merge
+fan-out; start starts the supervisor thread and returns the Run.
+
+A resumed run (vlah run --resume) is the same run in a new process: the same
+blackboard and key-value store, and the deadline from its original start. Every
+lease the store holds at prepare belongs to the earlier process, whose sessions
+this executor never started, so each is released and its task requeued once.
 
 The merge fan-out, on every merged commit:
 - feeds the Indexer and the Router;
@@ -93,6 +98,27 @@ def top_level_source(sources: tuple[SourceDecl, ...]) -> str | None:
         return ladder[-1].id
 
 
+def reclaim_earlier_leases(components: RunComponents) -> None:
+    """Release every lease an earlier process left, and requeue its task once (D32).
+
+    The queue refuses to requeue a task that is done, queued or still leased, so a
+    second resume requeues nothing twice.
+    """
+    for lease in components.leases.active():
+        components.leases.release(lease.agent)
+        queue = (
+            components.compose_queue
+            if lease.agent == COMPOSE_AGENT
+            else components.task_queue
+        )
+        logger.warning(
+            f"{lease.agent} held {lease.task_id} in an earlier process; requeueing it"
+        )
+        queue.requeue(
+            lease.task_id, f"{lease.agent}'s session ended with an earlier process"
+        )
+
+
 def judge_runs_in(blackboard: Blackboard, candidate_hash: str) -> list[str]:
     """The levels of candidates/<hash>/result.json the judge ran itself, by source
     id: a level answered from the judge's cache is not a run (DECISIONS: judge cache
@@ -135,32 +161,8 @@ class RunFanout:
         self.components.indexer.apply(merged_commit)
         self.components.router.on_commit(merged_commit)
         for event in merged_commit.events:
-            finished = event.data
+            self.count_and_follow_up(event)
             if (
-                isinstance(finished, (ResultReady, RemeasureReady))
-                and finished.candidate not in self.counted_hashes
-            ):
-                self.counted_hashes.add(finished.candidate)
-                for source in judge_runs_in(
-                    self.components.blackboard, finished.candidate
-                ):
-                    self.judge_runs_by_source[source] = (
-                        self.judge_runs_by_source.get(source, 0) + 1
-                    )
-            else:
-                pass
-            if event.type == "result_ready":
-                is_compose_result = (
-                    isinstance(event.data, ResultReady)
-                    and event.data.submitter == COMPOSE_AGENT
-                )
-                queue = (
-                    self.components.compose_queue
-                    if is_compose_result
-                    else self.components.task_queue
-                )
-                queue.on_result_ready(event)
-            elif (
                 event.type == "claim_status"
                 and event.target is not None
                 and event.to == f"{VERIFIED_PREFIX}{self.top_level}"
@@ -172,6 +174,34 @@ class RunFanout:
                     self.components.integrator.on_verified(event.target)
             else:
                 pass
+
+    def count_and_follow_up(self, event: Event) -> None:
+        """Both steps are idempotent, so a restart replays every earlier event here."""
+        finished = event.data
+        if (
+            isinstance(finished, (ResultReady, RemeasureReady))
+            and finished.candidate not in self.counted_hashes
+        ):
+            self.counted_hashes.add(finished.candidate)
+            for source in judge_runs_in(self.components.blackboard, finished.candidate):
+                self.judge_runs_by_source[source] = (
+                    self.judge_runs_by_source.get(source, 0) + 1
+                )
+        else:
+            pass
+        if event.type == "result_ready":
+            is_compose_result = (
+                isinstance(event.data, ResultReady)
+                and event.data.submitter == COMPOSE_AGENT
+            )
+            queue = (
+                self.components.compose_queue
+                if is_compose_result
+                else self.components.task_queue
+            )
+            queue.on_result_ready(event)
+        else:
+            pass
 
 
 def events_on(blackboard: Blackboard) -> Iterator[Event]:
@@ -323,6 +353,8 @@ class LocalHerd:
     worker_count: int
     runner: WorkerRunner
     poll_seconds: float
+    # When the run first started; None starts it now. A resumed run keeps its deadline.
+    started_seconds: float | None = None
 
     def worker_deps(
         self,
@@ -381,6 +413,8 @@ class LocalHerd:
         activity = RunActivity(clock=context.clock)
         # A fresh Indexer knows nothing merged before this process started.
         components.indexer.rebuild()
+        for event in events_on(components.blackboard):
+            fanout.count_and_follow_up(event)
         components.blackboard.subscribe(fanout)
         components.blackboard.subscribe(activity)
         stale_request = context.run_root / STOP_REQUEST_FILE_NAME
@@ -389,6 +423,7 @@ class LocalHerd:
             stale_request.unlink()
         else:
             pass
+        reclaim_earlier_leases(components)
         ledger = SessionLedger()
         leases = LedgerLeases(leases=components.leases, ledger=ledger)
         inbox = InterruptInbox()
@@ -416,7 +451,11 @@ class LocalHerd:
             inbox=inbox,
             runner=self.runner,
             stop_signal=stop_signal,
-            started_seconds=context.clock.now_seconds(),
+            started_seconds=(
+                context.clock.now_seconds()
+                if self.started_seconds is None
+                else self.started_seconds
+            ),
         )
         run = HerdRun(
             context=context,
@@ -449,6 +488,7 @@ def build_herd(
     random: Random,
     runner: WorkerRunner = run_worker,
     poll_seconds: float = DEFAULT_SUPERVISOR_POLL_SECONDS,
+    started_seconds: float | None = None,
 ) -> LocalHerd:
     """Every arm gets the problem's Params unchanged, so the Integrator and every
     other component are configured identically across arms (D58, L0-19)."""
@@ -471,6 +511,7 @@ def build_herd(
         worker_count=worker_count,
         runner=runner,
         poll_seconds=poll_seconds,
+        started_seconds=started_seconds,
     )
 
 

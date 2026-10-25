@@ -5,9 +5,11 @@ real ones over memory stores. The eval client and the Integrator are fakes unles
 use_real_eval and use_real_integrator ask for the real ones: the ladder over a fake
 slow judge, and the Integrator over the shared merger with an empty baseline@0.
 use_git_blackboard puts the blackboard in a git repository under the run root, as
-a real run does, so the CLI can read the run's directory afterwards.
-use_critic adds the Critic between them, wired as the local assembly wires it, with
-a fake verdict judge.
+a real run does, so the CLI can read the run's directory afterwards. durable keeps
+the whole run on disk: the git blackboard and a SQLite store under the run root,
+with the real queue and leases, so building the same run id again is a restarted
+process. use_critic adds the Critic between them, wired as the local assembly wires
+it, with a fake verdict judge.
 """
 
 import json
@@ -38,6 +40,7 @@ from vlah.adapters.memory.signal_source import (
     FakeSlowSource,
 )
 from vlah.adapters.memory.store import MemoryKeyValueStore, MemoryVectorIndex
+from vlah.adapters.store.sqlite.store import SqliteKeyValueStore
 from vlah.arms.config import ArmConfig
 from vlah.core.blackboard.api import Blackboard, MergedCommit, PublicProblemFiles
 from vlah.core.blackboard.layout import open_blackboard
@@ -50,7 +53,8 @@ from vlah.core.integrator.core_adapter import CoreCalibration
 from vlah.core.integrator.service import HerdIntegrator
 from vlah.core.metrics.standing import HerdMetrics
 from vlah.core.problem.api import AdapterChoice, HerdConfig, Problem
-from vlah.core.queue.api import Leases
+from vlah.core.queue.api import Leases, TaskQueue
+from vlah.core.queue.queue import KeyValueLeases, KeyValueTaskQueue
 from vlah.core.router.api import Router
 from vlah.core.router.router import KeyValueRouter
 from vlah.core.stop.rules import BudgetStopRules, EscalationPolicy
@@ -64,11 +68,18 @@ from vlah.core.types.params import EgressPolicy, Limits, Params
 from vlah.core.types.sources import ScoreResult, SourceDecl
 from vlah.core.worker.loop import WorkerDeps
 from vlah.ports.signal_source import Dataset
+from vlah.ports.store import KeyValueStore
 from vlah.roles.critic.holdout import HoldoutCritic, SealedVerdict, integrator_params
-from vlah.runtime.assembly import QueuedTaskCounts, RunComponents, RunContext
+from vlah.runtime.assembly import (
+    CountQueuedTasks,
+    QueuedTaskCounts,
+    RunComponents,
+    RunContext,
+)
 from vlah.runtime.compose import compose_arm
 from vlah.runtime.herd import top_level_source
 from vlah.runtime.local_assembly import DeliverableFiles
+from vlah.runtime.status import KeyValueQueueCounts
 from vlah.tools.herd_tools import HerdTools
 
 BASELINE_ZERO = BaselineRecord(k=0, parent=None, candidates=(), created_ts=0.0)
@@ -254,6 +265,7 @@ class MemoryAssembly:
     use_real_eval: bool = False
     use_real_integrator: bool = False
     use_git_blackboard: bool = False
+    durable: bool = False
     # Needs use_real_eval and use_real_integrator.
     use_critic: bool = False
     verdict_judge: FakeVerdictJudge = field(default_factory=FakeVerdictJudge)
@@ -265,11 +277,46 @@ class MemoryAssembly:
         self.contexts.append(context)
         blackboard: Blackboard = (
             open_blackboard(context.run_root.parent, context.run_id, "blackboard")
-            if self.use_git_blackboard
+            if self.use_git_blackboard or self.durable
             else make_store_blackboard(self.clock, name=context.run_id)
         )
-        blackboard.write(ActorId("human"), {"spec.md": b"# Toy\n"}, "spec")
-        leases = FakeLeases(clock=self.clock)
+        if not blackboard.list_paths("spec.md", None):
+            blackboard.write(ActorId("human"), {"spec.md": b"# Toy\n"}, "spec")
+        else:
+            pass
+        run_store: KeyValueStore
+        task_queue: TaskQueue
+        compose_queue: TaskQueue
+        leases: Leases
+        count_queued_tasks: CountQueuedTasks
+        if self.durable:
+            run_store = SqliteKeyValueStore(
+                path=context.run_root / "state.sqlite",
+                clock=self.clock,
+                namespace=context.run_id,
+            )
+            durable_queue = KeyValueTaskQueue(store=run_store)
+            durable_compose_queue = KeyValueTaskQueue(store=run_store, pool="external")
+            task_queue, compose_queue = durable_queue, durable_compose_queue
+            leases = KeyValueLeases(
+                store=run_store,
+                task_queue=task_queue,
+                blackboard=blackboard,
+                clock=self.clock,
+                lease_ttl_seconds=context.params.lease_ttl_seconds,
+            )
+            count_queued_tasks = KeyValueQueueCounts(
+                task_queue=durable_queue, compose_queue=durable_compose_queue
+            )
+        else:
+            run_store = MemoryKeyValueStore(clock=self.clock, namespace=context.run_id)
+            recording_queue = RecordingTaskQueue()
+            recording_compose_queue = RecordingTaskQueue()
+            task_queue, compose_queue = recording_queue, recording_compose_queue
+            leases = FakeLeases(clock=self.clock)
+            count_queued_tasks = FakeQueueCounts(
+                task_queue=recording_queue, compose_queue=recording_compose_queue
+            )
         indexer = StoreIndexer(
             blackboard=blackboard,
             vectors=MemoryVectorIndex(),
@@ -278,7 +325,6 @@ class MemoryAssembly:
             clock=self.clock,
             top_level=top_level_source(context.problem.sources),
         )
-        run_store = MemoryKeyValueStore(clock=self.clock, namespace=context.run_id)
         router: Router
         if self.use_real_router:
             router = KeyValueRouter(
@@ -339,8 +385,6 @@ class MemoryAssembly:
                 (compose_arm(context.arm), True),
             )
         )
-        task_queue = RecordingTaskQueue()
-        compose_queue = RecordingTaskQueue()
         integrator: IntegratorService
         if self.use_real_integrator and top_level is not None:
             baseline_directory = context.run_root / "baseline0"
@@ -431,9 +475,7 @@ class MemoryAssembly:
             compose_tool_server=FakeToolServer(tools=compose_tools),
             target_repository="memory://target",
             target_ref="main",
-            count_queued_tasks=FakeQueueCounts(
-                task_queue=task_queue, compose_queue=compose_queue
-            ),
+            count_queued_tasks=count_queued_tasks,
             critic=critic,
         )
         self.built.append(components)

@@ -1,13 +1,19 @@
 """The composition root for a run on one machine (D58, D61, D67): the real adapters.
 
 LocalAssembly builds every component from herd.yaml and the problem folder: a git
-blackboard under the run root, an in-process key-value store, the ladder over
-command judges, the MCP tool server on a local port, local worker processes under
-the egress sandbox, the Copilot harness, the Integrator over the shared merger with
-baseline@0 measured by the top judge, the Critic's holdout checks with the top
-judge scoring the sealed verdict, and the budget, stop rules and metrics.
+blackboard under the run root, a key-value store, the ladder over command judges,
+the MCP tool server on a local port, local worker processes under the egress
+sandbox, the Copilot harness, the Integrator over the shared merger with baseline@0
+measured by the top judge, the Critic's holdout checks with the top judge scoring
+the sealed verdict, and the budget, stop rules and metrics.
 
-Second real adapters (Kubernetes, Redis, S3, a second harness) come after H1 (D61).
+The key-value store holds the queue, leases, budget meter, router and stop-rule
+state. herd.yaml's stores.key_value picks it: sqlite (the default) keeps it in
+<run root>/state.sqlite, and redis takes settings.url. Either survives the process,
+so a run can be resumed. baseline@0's calibration is measured once per run and kept
+in <run root>/calibration.json, so a resumed run spends no judge run on it.
+
+Second real adapters (Kubernetes, S3, a second harness) come after H1 (D61).
 """
 
 import logging
@@ -22,8 +28,9 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
+import redis
 import uvicorn
-from pydantic import JsonValue
+from pydantic import JsonValue, TypeAdapter
 
 from vlah.adapters.executor.local.executor import LocalExecutor
 from vlah.adapters.executor.sandbox.sandbox import ProcessSandbox
@@ -38,12 +45,10 @@ from vlah.adapters.harness.scripted.harness import (
     ScriptedWorkerHarness,
 )
 from vlah.adapters.memory.model import MemoryModel
-from vlah.adapters.memory.store import (
-    MemoryKeyValueStore,
-    MemoryObjectStore,
-    MemoryVectorIndex,
-)
+from vlah.adapters.memory.store import MemoryObjectStore, MemoryVectorIndex
 from vlah.adapters.signal.command.judge import CommandBaselineScores, CommandJudge
+from vlah.adapters.store.redis.store import RedisKeyValueStore
+from vlah.adapters.store.sqlite.store import SqliteKeyValueStore
 from vlah.core.blackboard.api import PublicProblemFiles
 from vlah.core.blackboard.layout import PROBLEM_AUTHOR, init_layout, open_blackboard
 from vlah.core.budget.meter import KeyValueBudgetMeter
@@ -63,6 +68,7 @@ from vlah.core.types.params import GateSpec, Params
 from vlah.core.types.paths import may_create
 from vlah.ports.errors import NotSupportedError
 from vlah.ports.harness import Harness
+from vlah.ports.store import KeyValueStore
 from vlah.roles.critic.holdout import HoldoutCritic, SealedVerdict, integrator_params
 from vlah.runtime.assembly import RunComponents, RunContext
 from vlah.runtime.compose import compose_arm
@@ -90,6 +96,11 @@ SUPPORTED_HARNESSES = ("copilot", "claude_code", "scripted")
 # Used when herd.yaml does not say the model's window; Claude models have at least this.
 DEFAULT_CONTEXT_WINDOW_TOKENS = 200_000
 SUPPORTED_EXECUTORS = ("local",)
+KEY_VALUE_STORE = "key_value"
+SUPPORTED_KEY_VALUE_STORES = ("sqlite", "redis")
+STATE_FILE_NAME = "state.sqlite"
+CALIBRATION_FILE_NAME = "calibration.json"
+CALIBRATION_ADAPTER = TypeAdapter(CoreCalibration)
 
 
 def free_port() -> int:
@@ -231,6 +242,34 @@ def setting_mapping(settings: dict[str, JsonValue], key: str) -> dict[str, str]:
         return {str(name): str(item) for name, item in value.items()}
     else:
         raise ValueError(f"herd.yaml: {key} must map names to strings, not {value!r}")
+
+
+def key_value_store(herd_config: HerdConfig, context: RunContext) -> KeyValueStore:
+    """The store herd.yaml names under stores.key_value; SQLite in the run root by default."""
+    choice = herd_config.stores.get(KEY_VALUE_STORE)
+    if choice is None or choice.kind == "sqlite":
+        return SqliteKeyValueStore(
+            path=context.run_root / STATE_FILE_NAME,
+            clock=context.clock,
+            namespace=context.run_id,
+        )
+    elif choice.kind == "redis":
+        url = setting_text(choice.settings, "url")
+        if url is None:
+            raise ValueError(
+                f"herd.yaml: stores.{KEY_VALUE_STORE}.settings.url is required for redis"
+            )
+        else:
+            return RedisKeyValueStore(
+                client=redis.Redis.from_url(url),
+                clock=context.clock,
+                namespace=context.run_id,
+            )
+    else:
+        raise NotSupportedError(
+            f"herd.yaml: stores.{KEY_VALUE_STORE}.kind {choice.kind!r} is not "
+            f"available; use one of {SUPPORTED_KEY_VALUE_STORES}"
+        )
 
 
 def worker_model(herd_config: HerdConfig) -> str:
@@ -440,6 +479,18 @@ def calibrate(
     )
 
 
+def run_calibration(
+    judge: CommandJudge, baseline_directory: Path, sigma: float | None, path: Path
+) -> CoreCalibration:
+    """baseline@0's calibration, measured on the run's first start and read back after."""
+    if path.exists():
+        return CALIBRATION_ADAPTER.validate_json(path.read_bytes())
+    else:
+        calibration = calibrate(judge, baseline_directory, sigma)
+        path.write_bytes(CALIBRATION_ADAPTER.dump_json(calibration, indent=2))
+        return calibration
+
+
 @dataclass(kw_only=True)
 class LocalRunParts:
     """What a run owns besides its components: the things close() must stop."""
@@ -447,6 +498,7 @@ class LocalRunParts:
     tool_servers: tuple[ServedToolServer, ...]
     executor: LocalExecutor
     integrator: HerdIntegrator
+    key_value_store: KeyValueStore
 
 
 @dataclass(kw_only=True)
@@ -497,7 +549,7 @@ class LocalAssembly:
         else:
             pass
         objects = MemoryObjectStore()
-        store = MemoryKeyValueStore(clock=context.clock, namespace=context.run_id)
+        store = key_value_store(problem.herd_config, context)
         task_queue = KeyValueTaskQueue(store=store)
         compose_queue = KeyValueTaskQueue(store=store, pool="external")
         leases = KeyValueLeases(
@@ -608,8 +660,11 @@ class LocalAssembly:
             top_level=top_level,
             work_directory=run_root / "integrator",
             baseline_directory=baseline_directory,
-            calibration=calibrate(
-                judges[top_level], baseline_directory, self.integrator_sigma
+            calibration=run_calibration(
+                judges[top_level],
+                baseline_directory,
+                self.integrator_sigma,
+                run_root / CALIBRATION_FILE_NAME,
             ),
             waiter=SleepingWaiter(
                 eval_service=eval_service, seconds=self.waiter_seconds
@@ -640,7 +695,10 @@ class LocalAssembly:
         )
         self.parts.append(
             LocalRunParts(
-                tool_servers=tool_servers, executor=executor, integrator=integrator
+                tool_servers=tool_servers,
+                executor=executor,
+                integrator=integrator,
+                key_value_store=store,
             )
         )
         return RunComponents(
@@ -676,10 +734,17 @@ class LocalAssembly:
         )
 
     def close(self) -> None:
-        """Stop what the runs own: worker processes, then the tool servers."""
+        """Stop what the runs own: worker processes, the tool servers, then the store."""
         for parts in self.parts:
             parts.executor.close()
             parts.integrator.close()
             for served in parts.tool_servers:
                 served.close()
+            store = parts.key_value_store
+            if isinstance(store, SqliteKeyValueStore):
+                store.close()
+            elif isinstance(store, RedisKeyValueStore):
+                store.client.close()
+            else:
+                pass
         self.parts.clear()

@@ -276,11 +276,25 @@ class IntegratorHarness:
             evidence=(EvidenceRef(candidate=f"candidates/{candidate}/result.json"),),
             body=f"Result of {candidate[:12]}.",
         )
+        verified_event = {
+            "local_id": f"eval_service/{self.claim_count:05d}",
+            "ts": self.clock.now_seconds(),
+            "actor": EVAL,
+            "role": "eval_service",
+            "type": "claim_status",
+            "target": claim_id,
+            "from": "proposed",
+            "to": f"verified:{TOP_LEVEL}",
+            "evidence": [f"candidates/{candidate}/result.json"],
+        }
         receipt = self.blackboard.write(
             EVAL,
             {
                 f"candidates/{candidate}/result.json": json.dumps(result).encode(),
                 f"claims/eval_service/{claim_id}.md": render_claim(claim).encode(),
+                f"events/eval_service/{self.claim_count:05d}.json": json.dumps(
+                    verified_event
+                ).encode(),
             },
             "result",
         )
@@ -288,6 +302,29 @@ class IntegratorHarness:
         self.claim_by_candidate[candidate] = claim_id
         self.integrator.on_verified(claim_id)
         return candidate
+
+    def restart(self) -> HerdIntegrator:
+        """A new wrapper over what the old one left on the blackboard and on disk, as
+        a restarted process builds it; the old wrapper is dropped without a closeout."""
+        old = self.integrator
+        self.integrator = HerdIntegrator(
+            blackboard=old.blackboard,
+            eval_service=old.eval_service,
+            task_queue=old.task_queue,
+            compose_queue=old.compose_queue,
+            gates=old.gates,
+            gate_runner=old.gate_runner,
+            arm=old.arm,
+            params=old.params,
+            clock=old.clock,
+            top_level=old.top_level,
+            work_directory=old.work_directory,
+            baseline_directory=old.baseline_directory,
+            calibration=old.calibration,
+            measurer=old.measurer,
+            script_runner=old.script_runner,
+        )
+        return self.integrator
 
     def run(self, ticks: int = 6) -> list[Event]:
         written: list[Event] = []
