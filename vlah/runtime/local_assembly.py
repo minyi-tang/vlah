@@ -32,6 +32,9 @@ import redis
 import uvicorn
 from pydantic import JsonValue, TypeAdapter
 
+from vlah.adapters.executor.docker.client import DockerCli, DockerClient
+from vlah.adapters.executor.docker.egress import IMAGE_PYTHON
+from vlah.adapters.executor.docker.executor import ContainerResources, DockerExecutor
 from vlah.adapters.executor.local.executor import LocalExecutor
 from vlah.adapters.executor.sandbox.sandbox import ProcessSandbox
 from vlah.adapters.harness.claude_code.harness import (
@@ -49,7 +52,7 @@ from vlah.adapters.memory.store import MemoryObjectStore, MemoryVectorIndex
 from vlah.adapters.signal.command.judge import CommandBaselineScores, CommandJudge
 from vlah.adapters.store.redis.store import RedisKeyValueStore
 from vlah.adapters.store.sqlite.store import SqliteKeyValueStore
-from vlah.core.blackboard.api import PublicProblemFiles
+from vlah.core.blackboard.api import Blackboard, PublicProblemFiles
 from vlah.core.blackboard.layout import PROBLEM_AUTHOR, init_layout, open_blackboard
 from vlah.core.budget.meter import KeyValueBudgetMeter
 from vlah.core.eval.api import EvalService
@@ -95,7 +98,13 @@ OUTPUT_TAIL_CHARACTERS = 2000
 SUPPORTED_HARNESSES = ("copilot", "claude_code", "scripted")
 # Used when herd.yaml does not say the model's window; Claude models have at least this.
 DEFAULT_CONTEXT_WINDOW_TOKENS = 200_000
-SUPPORTED_EXECUTORS = ("local",)
+SUPPORTED_EXECUTORS = ("local", "docker")
+DOCKER_EXECUTOR = "docker"
+DEFAULT_WORKER_IMAGE = "vlah-worker:dev"
+# Containers reach the machine by this name; the tool servers then listen on every
+# interface, because the name does not resolve to the host's loopback on Linux.
+CONTAINER_HOST = "host.docker.internal"
+ALL_INTERFACES = "0.0.0.0"
 KEY_VALUE_STORE = "key_value"
 SUPPORTED_KEY_VALUE_STORES = ("sqlite", "redis")
 STATE_FILE_NAME = "state.sqlite"
@@ -207,7 +216,7 @@ def target_of(herd_config: HerdConfig) -> tuple[Path, str]:
     """The target working tree and ref from herd.yaml's executor settings."""
     if herd_config.executor.kind not in SUPPORTED_EXECUTORS:
         raise NotSupportedError(
-            f"executor {herd_config.executor.kind!r} is not available before H1 (D61); "
+            f"executor {herd_config.executor.kind!r} is not available on one machine; "
             f"use one of {SUPPORTED_EXECUTORS}"
         )
     else:
@@ -272,6 +281,54 @@ def key_value_store(herd_config: HerdConfig, context: RunContext) -> KeyValueSto
         )
 
 
+def is_docker(herd_config: HerdConfig) -> bool:
+    return herd_config.executor.kind == DOCKER_EXECUTOR
+
+
+def tool_server_hosts(herd_config: HerdConfig, tool_host: str) -> tuple[str, str]:
+    """The host the sessions are told and the one the servers bind: the same on this
+    machine, the containers' name for the host and every interface under Docker."""
+    if is_docker(herd_config):
+        return CONTAINER_HOST, ALL_INTERFACES
+    else:
+        return tool_host, tool_host
+
+
+def worker_python(herd_config: HerdConfig) -> str:
+    """The Python the hook and the scripted worker run with: herd.yaml's, else the
+    image's under Docker, else this interpreter."""
+    return setting_text(herd_config.harness.settings, "python_executable") or (
+        IMAGE_PYTHON if is_docker(herd_config) else sys.executable
+    )
+
+
+def container_resources(settings: dict[str, JsonValue]) -> ContainerResources:
+    """executor.settings.resources: {cpus: 2, memory: 2g}, with those defaults."""
+    value = settings.get("resources")
+    if value is None:
+        return ContainerResources()
+    elif isinstance(value, dict):
+        cpus = value.get("cpus")
+        memory = value.get("memory")
+        if (cpus is not None and not isinstance(cpus, (int, float))) or (
+            memory is not None and not isinstance(memory, str)
+        ):
+            raise ValueError(
+                f"herd.yaml: executor.settings.resources needs a number of cpus and a "
+                f"memory size such as 2g, not {value!r}"
+            )
+        else:
+            defaults = ContainerResources()
+            return ContainerResources(
+                cpus=float(cpus) if cpus is not None else defaults.cpus,
+                memory=memory if memory is not None else defaults.memory,
+            )
+    else:
+        raise ValueError(
+            f"herd.yaml: executor.settings.resources must be a mapping, not {value!r}"
+        )
+
+
 def worker_model(herd_config: HerdConfig) -> str:
     model = (
         setting_text(herd_config.harness.settings, "model")
@@ -293,6 +350,7 @@ def copilot_harness(herd_config: HerdConfig, params: Params) -> CopilotHarness:
             reasoning_effort=setting_text(settings, "reasoning_effort"),
             allowed_urls=setting_texts(settings, "allowed_urls"),
             copilot_command=command if command else ("copilot",),
+            python_executable=worker_python(herd_config),
             environment=setting_mapping(settings, "environment"),
         ),
         params=params,
@@ -312,6 +370,7 @@ def claude_code_harness(herd_config: HerdConfig, params: Params) -> ClaudeCodeHa
             ),
             effort=setting_text(settings, "effort"),
             claude_command=command if command else ("claude",),
+            python_executable=worker_python(herd_config),
             allowed_urls=setting_texts(settings, "allowed_urls"),
             model_api_urls=model_api_urls if model_api_urls else DEFAULT_MODEL_API_URLS,
             environment=setting_mapping(settings, "environment"),
@@ -333,9 +392,7 @@ def scripted_harness(
             config=ScriptedWorkerConfig(
                 source_ids=source_ids,
                 script=script,
-                python_executable=(
-                    setting_text(settings, "python_executable") or sys.executable
-                ),
+                python_executable=worker_python(herd_config),
                 window_tokens=(
                     setting_number(settings, "window_tokens")
                     or DEFAULT_CONTEXT_WINDOW_TOKENS
@@ -401,11 +458,12 @@ class ServedToolServer:
     thread: threading.Thread
 
     @classmethod
-    def start(cls, tools: HerdTools, host: str) -> "ServedToolServer":
+    def start(cls, tools: HerdTools, host: str, bind_host: str) -> "ServedToolServer":
+        """host is the one the sessions are told; bind_host is the one uvicorn listens on."""
         server = McpToolServer(tools=tools, host=host, port=free_port())
         uvicorn_server = uvicorn.Server(
             uvicorn.Config(
-                server.app(), host=server.host, port=server.port, log_level="warning"
+                server.app(), host=bind_host, port=server.port, log_level="warning"
             )
         )
         thread = threading.Thread(
@@ -496,7 +554,7 @@ class LocalRunParts:
     """What a run owns besides its components: the things close() must stop."""
 
     tool_servers: tuple[ServedToolServer, ...]
-    executor: LocalExecutor
+    executor: LocalExecutor | DockerExecutor
     integrator: HerdIntegrator
     key_value_store: KeyValueStore
 
@@ -513,6 +571,7 @@ class LocalAssembly:
     judge_timeout_seconds: float = 3600.0
     # The audit noise for spot checks; None derives it from baseline@0's seeds.
     integrator_sigma: float | None = None
+    docker: DockerClient = field(default_factory=DockerCli)
     parts: list[LocalRunParts] = field(default_factory=list[LocalRunParts])
 
     def judges(self, context: RunContext, run_root: Path) -> dict[str, CommandJudge]:
@@ -534,6 +593,62 @@ class LocalAssembly:
                     log_directory=run_root / "judges",
                 )
         return judges
+
+    def build_executor(
+        self,
+        context: RunContext,
+        blackboard: Blackboard,
+        objects: MemoryObjectStore,
+        claims: McpToolServer,
+    ) -> LocalExecutor | DockerExecutor:
+        """Worker processes under the egress sandbox, or one container per session (#128)."""
+        problem = context.problem
+        run_root = context.run_root
+        settings = problem.herd_config.executor.settings
+        sandbox_root = sandbox_root_for(run_root, context.run_id)
+        log_root = log_root_for(run_root, context.run_id)
+        if is_docker(problem.herd_config):
+            return DockerExecutor(
+                run_id=context.run_id,
+                image=setting_text(settings, "image") or DEFAULT_WORKER_IMAGE,
+                sandbox_root=sandbox_root,
+                log_root=log_root,
+                blackboard=blackboard,
+                objects=objects,
+                claims=claims,
+                params=context.params,
+                clock=context.clock,
+                docker=self.docker,
+                resources=container_resources(settings),
+                mounts_read_only={
+                    Path(host_path): container_path
+                    for host_path, container_path in setting_mapping(
+                        settings, "mounts_read_only"
+                    ).items()
+                },
+                refused_mount_roots=(problem.root, run_root),
+                allow_unenforced=self.allow_unenforced_egress,
+                poll_seconds=self.executor_poll_seconds,
+            )
+        else:
+            sandbox = ProcessSandbox(
+                clock=context.clock,
+                work_directory=run_root / "egress",
+                protected_directories=protected_directories(problem.root, run_root),
+                allow_unenforced=self.allow_unenforced_egress,
+            )
+            return LocalExecutor(
+                sandbox_root=sandbox_root,
+                log_root=log_root,
+                blackboard=blackboard,
+                objects=objects,
+                claims=claims,
+                sandbox=sandbox,
+                params=context.params,
+                clock=context.clock,
+                inherited_environment=os.environ,
+                poll_seconds=self.executor_poll_seconds,
+            )
 
     def build(self, context: RunContext) -> RunComponents:
         problem = context.problem
@@ -600,6 +715,9 @@ class LocalAssembly:
             clock=context.clock,
             random=context.random,
         )
+        tool_host, tool_bind_host = tool_server_hosts(
+            problem.herd_config, self.tool_host
+        )
         tool_servers = tuple(
             ServedToolServer.start(
                 HerdTools(
@@ -616,30 +734,16 @@ class LocalAssembly:
                     run_id=context.run_id,
                     is_compose=is_compose,
                 ),
-                self.tool_host,
+                tool_host,
+                tool_bind_host,
             )
             for arm, is_compose in (
                 (context.arm, False),
                 (compose_arm(context.arm), True),
             )
         )
-        sandbox = ProcessSandbox(
-            clock=context.clock,
-            work_directory=run_root / "egress",
-            protected_directories=protected_directories(problem.root, run_root),
-            allow_unenforced=self.allow_unenforced_egress,
-        )
-        executor = LocalExecutor(
-            sandbox_root=sandbox_root_for(run_root, context.run_id),
-            log_root=log_root_for(run_root, context.run_id),
-            blackboard=blackboard,
-            objects=objects,
-            claims=tool_servers[0].server,
-            sandbox=sandbox,
-            params=context.params,
-            clock=context.clock,
-            inherited_environment=os.environ,
-            poll_seconds=self.executor_poll_seconds,
+        executor = self.build_executor(
+            context, blackboard, objects, tool_servers[0].server
         )
         harness = worker_harness(
             problem.herd_config,
