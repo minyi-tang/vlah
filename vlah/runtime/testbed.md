@@ -43,6 +43,8 @@ runtimes and explicitly configured executable dependencies. `HOME` and `TMPDIR`
 are private to the worker. Operator files, source checkout, other workers,
 service key, calibration, and testbed operator modules are not exposed.
 Unsupported platforms fail closed; there is no unsafe testbed launch flag.
+This assembly requires `executor.kind: local`; the shared local assembly's Docker
+support does not yet provide the testbed's worker paths and isolation policy.
 
 Extra runtime dependencies can be named by
 `herd.yaml` `executor.settings.sandbox_read_paths`. These are paths to installed

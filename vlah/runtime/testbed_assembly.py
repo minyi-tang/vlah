@@ -23,6 +23,7 @@ from vlah.adapters.signal.testbed_http.client import (
 from vlah.core.blackboard.api import Blackboard, MergedCommit, PublicProblemFiles
 from vlah.core.integrator.core_adapter import CoreCalibration, config_from_params
 from vlah.core.types.ids import ActorId
+from vlah.ports.errors import NotSupportedError
 from vlah.ports.harness import Harness
 from vlah.ports.signal_source import CandidateRef, Dataset
 from vlah.runtime.api import Report
@@ -180,6 +181,11 @@ class TestbedAssembly(LocalAssembly):
         require_approved_template(context.problem)
         if self.parts:
             raise ValueError("a TestbedAssembly belongs to one run")
+        elif context.problem.herd_config.executor.kind != "local":
+            raise NotSupportedError(
+                "the testbed assembly requires the local executor and its "
+                "read-allowlist sandbox; container testbed wiring is not supported"
+            )
         elif self.client.run_id != context.run_id:
             raise ValueError("the testbed client and herd must name the same run")
         elif not self.client.system_key:

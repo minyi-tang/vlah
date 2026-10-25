@@ -33,6 +33,7 @@ from vlah.core.types.candidates import candidate_hash
 from vlah.core.types.clock import FakeClock
 from vlah.core.types.events import BaselineAdvanced
 from vlah.core.types.ids import ActorId
+from vlah.ports.errors import NotSupportedError
 from vlah.ports.executor import AgentSpec
 from vlah.runtime.assembly import RunComponents, RunContext
 from vlah.runtime.testbed_assembly import TestbedAssembly as ArmAssembly
@@ -328,10 +329,20 @@ def test_conversion_refuses_hidden_material_and_links(
     assert not (tmp_path / "converted").exists()
 
 
-def test_unsigned_template_and_mismatched_merger_are_refused_before_start(
+@pytest.mark.parametrize(
+    "executor_kind,audit_max,error",
+    [
+        ("local", 6, "integrator-config differs"),
+        ("docker", 10, "requires the local executor"),
+    ],
+)
+def test_unsigned_template_and_incompatible_configuration_are_refused_before_start(
     tmp_path: Path,
     template: Path,
     packed: Path,
+    executor_kind: str,
+    audit_max: int,
+    error: str,
 ) -> None:
     status = template / "charter/status.md"
     status.write_text("draft\n")
@@ -343,11 +354,23 @@ def test_unsigned_template_and_mismatched_merger_are_refused_before_start(
     problem = convert_testbed_problem(
         packed, template, tmp_path / "converted", clock=FakeClock()
     )
+    problem = replace(
+        problem,
+        herd_config=problem.herd_config.model_copy(
+            update={
+                "executor": problem.herd_config.executor.model_copy(
+                    update={"kind": executor_kind}
+                )
+            }
+        ),
+    )
     assembly = ArmAssembly(
         client=SlowTierClient(
             base_url="http://127.0.0.1:1", run_id="r-refused", system_key="fixture"
         ),
-        integrator_config=replace(config_from_params(problem.params), audit_max=6),
+        integrator_config=replace(
+            config_from_params(problem.params), audit_max=audit_max
+        ),
         worker_count=2,
     )
     context = RunContext(
@@ -360,6 +383,6 @@ def test_unsigned_template_and_mismatched_merger_are_refused_before_start(
         random=Random(0),
         duration_seconds=1,
     )
-    with pytest.raises(ValueError, match="integrator-config differs"):
+    with pytest.raises((ValueError, NotSupportedError), match=error):
         assembly.build(context)
     assert not context.run_root.exists()
