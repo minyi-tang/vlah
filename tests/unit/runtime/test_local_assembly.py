@@ -9,8 +9,12 @@ from pathlib import Path
 from random import Random
 
 import pytest
+import yaml
 
+from tests.fixtures.docker import FakeDockerClient
 from tests.fixtures.runtime import toy_problem
+from vlah.adapters.executor.docker.executor import ContainerResources, DockerExecutor
+from vlah.adapters.executor.local.executor import LocalExecutor
 from vlah.adapters.executor.sandbox.sandbox import ProcessSandbox
 from vlah.adapters.harness.claude_code.harness import ClaudeCodeHarness
 from vlah.adapters.store.redis.store import RedisKeyValueStore
@@ -85,6 +89,7 @@ def test_the_local_assembly_builds_every_real_component(tmp_path: Path) -> None:
         assert (context.run_root / "baseline0" / "prompt.md").exists()
         assert components.target_repository == str(root / "target")
         executor = assembly.parts[0].executor
+        assert isinstance(executor, LocalExecutor)
         assert executor.sandbox_root == root / ".herd" / "sandboxes" / "r-1"
         assert not executor.sandbox_root.is_relative_to(context.run_root)
         assert isinstance(executor.sandbox, ProcessSandbox)
@@ -279,3 +284,58 @@ def test_the_model_graded_judge_fails_a_long_prompt_without_calling_a_model(
     result = json.loads(completed.stdout.splitlines()[-1])
     assert result["constraint_ok"] is False and result["score"] == 0.0
     assert result["words"] == 400 and len(result["per_seed"]) == 8
+
+
+def test_the_assembly_builds_a_docker_executor_from_herd_yaml(tmp_path: Path) -> None:
+    """executor.kind docker: one container per session, the tool servers reachable
+    from containers, and the hook's Python the image's (#128)."""
+    root = example_problem(tmp_path)
+    wrapper = tmp_path / "gateway" / "claude-ghcp"
+    wrapper.parent.mkdir()
+    wrapper.write_text("#!/bin/sh\n", encoding="utf-8")
+    herd_path = root / "herd.yaml"
+    config: object = yaml.safe_load(herd_path.read_text(encoding="utf-8"))
+    assert isinstance(config, dict)
+    config["executor"] = {
+        "kind": "docker",
+        "settings": {
+            "target_repository": str(root / "target"),
+            "target_ref": "main",
+            "image": "vlah-worker:test",
+            "resources": {"cpus": 1, "memory": "1g"},
+            "mounts_read_only": {str(wrapper): "/opt/gateway/claude-ghcp"},
+        },
+    }
+    config["harness"] = {"kind": "claude_code", "settings": {}}
+    herd_path.write_text(yaml.safe_dump(config), encoding="utf-8")
+    problem = load_problem(root)
+    context = RunContext(
+        run_id="r-2",
+        run_root=root / ".herd" / "runs" / "r-2",
+        arm=PRESETS["S2"],
+        params=problem.params,
+        problem=problem,
+        clock=FakeClock(),
+        random=Random(0),
+        duration_seconds=60.0,
+    )
+    assembly = LocalAssembly(docker=FakeDockerClient(), executor_poll_seconds=0.5)
+    components = assembly.build(context)
+    try:
+        executor = assembly.parts[0].executor
+        assert isinstance(executor, DockerExecutor)
+        assert executor.image == "vlah-worker:test"
+        assert executor.resources == ContainerResources(cpus=1.0, memory="1g")
+        assert [mount.destination for mount in executor.mounts_read_only] == [
+            "/opt/gateway/claude-ghcp"
+        ]
+        assert executor.sandbox_root == root / ".herd" / "sandboxes" / "r-2"
+        for served in assembly.parts[0].tool_servers:
+            assert served.server.host == "host.docker.internal", "the containers' name"
+            with socket.create_connection(("127.0.0.1", served.server.port), 2):
+                pass
+        harness = components.harness
+        assert isinstance(harness, ClaudeCodeHarness)
+        assert harness.config.python_executable == "python", "the image's"
+    finally:
+        assembly.close()
