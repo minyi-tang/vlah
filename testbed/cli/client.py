@@ -139,12 +139,15 @@ class SlowClient:
             )
         )
 
-    def register_actors(self, actor_tokens: dict[str, str]) -> dict:
-        """Operator call (needs the system key): add worker tokens to this run (DECISIONS I17)."""
+    def register_actors(
+        self, actor_tokens: dict[str, str], scope: str = "full"
+    ) -> dict:
+        """Operator call (needs the system key): add worker tokens to this run (DECISIONS I17).
+        scope "fast" lets those tokens call only POST /fast."""
         return self.parse_response(
             self.http.post(
                 "/actors",
-                json={"actor_tokens": actor_tokens},
+                json={"actor_tokens": actor_tokens, "scope": scope},
                 headers=self.headers(),
             )
         )

@@ -44,6 +44,9 @@ FAST_CONCURRENT_EVALUATIONS = 2
 # mechanisms fired (issue #113).
 FAST_EXTRA_HIDDEN_KEYS = ("waits", "mechanisms")
 SYSTEM_ACTORS = {"runner", "integrator", "composer", "slow_eval"}
+# Token scopes (DECISIONS I17): "full" acts on every worker route, "fast" only on POST /fast.
+TOKEN_SCOPES = ("full", "fast")
+FAST_SCOPE_ROUTES = {"/fast"}
 EXEMPT_CAP = 6
 # Event types the testbed itself writes. Over HTTP only the system key may post them.
 RESERVED_EVENTS = {
@@ -186,8 +189,13 @@ class SlowEval:
         CREATE INDEX IF NOT EXISTS t_run ON tickets(run_id);
         """
         )
-        if "tokens" not in {r[1] for r in self.db.execute("PRAGMA table_info(runs)")}:
+        run_columns = {r[1] for r in self.db.execute("PRAGMA table_info(runs)")}
+        if "tokens" not in run_columns:
             self.db.execute("ALTER TABLE runs ADD COLUMN tokens TEXT")
+        if (
+            "scopes" not in run_columns
+        ):  # actor -> token scope; an actor absent here is "full"
+            self.db.execute("ALTER TABLE runs ADD COLUMN scopes TEXT")
         self.pool = None if inline else ThreadPoolExecutor(max_workers=concurrency)
         kf = self.data / "system.key"
         if not kf.exists():
@@ -339,21 +347,39 @@ class SlowEval:
         self.recorder(run_id).write("calibration", cal, ts=t0, actor="slow_eval")
         return {"run_id": run_id, "t0": t0, "knobs": knobs}
 
-    def check_actor(self, run_id, actor, token, trusted: bool):
+    def check_actor(self, run_id, actor, token, trusted: bool, route: str):
         """When the run registered per-agent tokens, an untrusted caller may act only as the actor whose
-        token it holds (DECISIONS I14). Trusted callers (the system key) may act for anyone.
+        token it holds (DECISIONS I14), and a fast-scoped token only on POST /fast (I17). Trusted callers
+        (the system key) may act for anyone on any route.
         """
         if trusted:
             return
-        tokens = json.loads(self.run_row(run_id)["tokens"] or "{}")
+        run = self.run_row(run_id)
+        tokens = json.loads(run["tokens"] or "{}")
         if tokens and (actor not in tokens or tokens[actor] != token):
             raise ApiError(403, {"reason": "unknown actor or wrong X-TB-Token"})
+        scope = json.loads(run["scopes"] or "{}").get(actor, "full")
+        if scope == "fast" and route not in FAST_SCOPE_ROUTES:
+            raise ApiError(
+                403, {"reason": f"token scope 'fast' does not allow {route}"}
+            )
 
     def register_actors(self, run_id: str, body: dict) -> dict:
         """Adds per-agent tokens to an existing run (DECISIONS I17), for runtimes such as the herd that
-        start their workers after POST /runs. Registration only adds: re-sending an actor with the same
-        token is a no-op, and any replacement or shared token rejects the whole request unchanged.
+        start their workers after POST /runs. Every actor in one request gets the request's scope ("full"
+        by default; "fast" allows only POST /fast). Registration only adds: re-sending an actor with the
+        same token and scope is a no-op, and any replacement, scope change or shared token rejects the
+        whole request unchanged.
         """
+        scope = body.get("scope", "full")
+        if scope not in TOKEN_SCOPES:
+            raise ApiError(
+                400,
+                {
+                    "reason": "invalid_scope",
+                    "detail": f"scope must be one of {list(TOKEN_SCOPES)}",
+                },
+            )
         actor_tokens = body.get("actor_tokens")
         if not isinstance(actor_tokens, dict) or not actor_tokens:
             raise ApiError(
@@ -381,11 +407,16 @@ class SlowEval:
                     },
                 )
         with self.lock:
-            registered = json.loads(self.run_row(run_id)["tokens"] or "{}")
+            run = self.run_row(run_id)
+            registered = json.loads(run["tokens"] or "{}")
+            registered_scopes = json.loads(run["scopes"] or "{}")
             owner_by_token = {token: actor for actor, token in registered.items()}
             conflicting_actors = set()
             for actor, token in actor_tokens.items():
-                if actor in registered and registered[actor] != token:
+                if actor in registered and (
+                    registered[actor] != token
+                    or registered_scopes.get(actor, "full") != scope
+                ):
                     conflicting_actors.add(actor)
                 if owner_by_token.setdefault(token, actor) != actor:
                     conflicting_actors.add(actor)
@@ -401,15 +432,17 @@ class SlowEval:
             unchanged_actors = sorted(set(actor_tokens) & set(registered))
             if added_actors:
                 registered.update(actor_tokens)
+                registered_scopes.update({actor: scope for actor in added_actors})
                 self.db.execute(
-                    "UPDATE runs SET tokens=? WHERE run_id=?",
-                    (json.dumps(registered), run_id),
+                    "UPDATE runs SET tokens=?, scopes=? WHERE run_id=?",
+                    (json.dumps(registered), json.dumps(registered_scopes), run_id),
                 )
         return {
             "run_id": run_id,
             "added": added_actors,
             "unchanged": unchanged_actors,
             "actors": sorted(registered),
+            "scopes": {actor: scope for actor in sorted(actor_tokens)},
         }
 
     def calibration(self, run_id) -> dict:
@@ -568,7 +601,7 @@ class SlowEval:
             raise ApiError(
                 403, {"reason": f"actor {actor!r} is reserved for the testbed"}
             )
-        self.check_actor(run_id, actor, token, trusted)
+        self.check_actor(run_id, actor, token, trusted, "/submit")
         now = self.now()
         k = self.knobs(run_id)
         with self.lock:
