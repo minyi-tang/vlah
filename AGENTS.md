@@ -6,7 +6,7 @@ These rules apply to every coding agent working in this repository, including Co
 
 VLAH runs many LLM agents on one hard optimization problem, where the only trustworthy judge is slow and scarce. The bet (H1) is that agents who share as they go beat the same agents working in isolation and merged the same way, with the same time and the same judge budget.
 
-**Where we are:** the Foundation (#4) and the 13 Wave-1 components (#11–#23) are done, and real runs work end to end on one machine. Wave 2 (#117–#124) has two tracks: Track A (#117–#121) makes every component work on a real problem and comes first; Track B (#122–#124) leads to the H1 comparison on the testbed. The testbed (#10) is the herd's guardrail and semi-CI. The plan is the roadmap, #3.
+**Where we are:** the Foundation (#4) and the 13 Wave-1 components (#11–#23) are done, and real runs work end to end on one machine. Wave 2 (#117–#124) has two tracks: Track A (#117–#121) makes every component work on a real problem and comes first; Track B (#122–#124) leads to the H1 comparison on the testbed. Wave L (#127–#132) is the local infrastructure track: every worker in its own container or pod on one machine (Docker, then kind), the blackboard over HTTP, Redis as the store; it runs alongside Wave 2 and adds the `infra` tests. The testbed (#10) is the herd's guardrail and semi-CI. The plan is the roadmap, #3.
 
 ## Start here
 
@@ -40,6 +40,7 @@ uv run pytest                              # default selection: -m "not slow"
 uv run pytest -m "l0 and <component>"      # your L0 assertions, e.g. -m "l0 and queue"
 uv run pytest -m smoke                     # must stay green on every PR
 uv run pytest -m slow                      # long or real-time tests, run on purpose
+uv run pytest -m infra                     # the local track's stack tests; need Docker (kind for the Kubernetes ones)
 ```
 
 Component markers: `blackboard indexer queue eval router tools executor harness integrator budget runtime egress cli`.
@@ -71,6 +72,12 @@ Component markers: `blackboard indexer queue eval router tools executor harness 
 | `adapters/signal/command/` | W2-01 #117 |
 | `adapters/store/sqlite/` | W2-04 #120 |
 | `examples/testbed-sched/` (repo root) | W2-07 #123 |
+| `testing/scripted_worker.py`, `testing/boundary.py`, `adapters/harness/scripted/`; `deploy/worker/`, `tests/infra/conftest.py` (repo root) | L-00 #127 (coordinating session) |
+| `adapters/executor/docker/`, `adapters/executor/sandbox/container_egress.py` | L-01 #128 |
+| `adapters/store/git_http/`, `runtime/stack_assembly.py`, `runtime/stack.py`, `cli/stack.py`; `deploy/compose/` (repo root) | L-02 #129 |
+| `adapters/store/redis/` (from Wave L on) | L-03 #130 |
+| `adapters/executor/kubernetes/`; `deploy/k8s/`, `deploy/kind/`, `deploy/herd/` (repo root) | L-04 #131 |
+| `tests/infra/test_<topic>.py` (repo root) | the Wave L issue that names it |
 | Wave-1 paths a Wave-2 issue lists under **Owns** | that issue, for the files it names |
 | `testbed/`, `problems/`, `tests/testbed/` (repo root) | **testbed agents** (#10) |
 | `tests/unit/<component>/` (repo root) | that component |
