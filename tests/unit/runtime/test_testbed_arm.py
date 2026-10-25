@@ -21,6 +21,7 @@ from tests.unit.runtime.testbed_support import (
     write_files,
 )
 from vlah.adapters.executor.local.passthrough import PassthroughSandbox
+from vlah.adapters.harness.scripted.harness import ScriptedWorkerHarness
 from vlah.adapters.signal.testbed_http.client import SlowTierClient
 from vlah.arms.config import PRESETS
 from vlah.cli import main
@@ -86,6 +87,9 @@ def test_arm_cli_submits_merges_and_records_the_exact_final(
     def scripted_harness(assembly: ArmAssembly, context: RunContext) -> ArmHarness:
         harness = real_harness(assembly, context)
         assert isinstance(harness, ArmHarness)
+        assert isinstance(harness.harness, ScriptedWorkerHarness)
+        assert harness.harness.config.source_ids == ("slow",)
+        assert harness.harness.config.script == "sleep"
         harness.harness = ScriptedCliHarness(default_program="fixture")
         configured_harnesses.append(harness)
         return harness

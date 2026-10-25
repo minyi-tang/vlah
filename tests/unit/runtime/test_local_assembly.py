@@ -17,6 +17,7 @@ from vlah.adapters.executor.docker.executor import ContainerResources, DockerExe
 from vlah.adapters.executor.local.executor import LocalExecutor
 from vlah.adapters.executor.sandbox.sandbox import ProcessSandbox
 from vlah.adapters.harness.claude_code.harness import ClaudeCodeHarness
+from vlah.adapters.harness.scripted.harness import ScriptedWorkerHarness
 from vlah.adapters.store.redis.store import RedisKeyValueStore
 from vlah.arms.config import PRESETS
 from vlah.core.integrator.service import HerdIntegrator
@@ -72,9 +73,23 @@ def run_context(problem: Problem, run_root: Path) -> RunContext:
     )
 
 
-def test_the_local_assembly_builds_every_real_component(tmp_path: Path) -> None:
+@pytest.mark.parametrize("scripted", [False, True], ids=["copilot", "scripted"])
+def test_the_local_assembly_builds_every_real_component(
+    tmp_path: Path, scripted: bool
+) -> None:
     root = example_problem(tmp_path)
     problem = load_problem(root)
+    if scripted:
+        problem = dataclasses.replace(
+            problem,
+            herd_config=problem.herd_config.model_copy(
+                update={
+                    "harness": AdapterChoice(
+                        kind="scripted", settings={"script": "sleep"}
+                    )
+                }
+            ),
+        )
     context = run_context(problem, root / ".herd" / "runs" / "r-1")
     assembly = LocalAssembly(allow_unenforced_egress=True, executor_poll_seconds=0.5)
     components = assembly.build(context)
@@ -88,6 +103,10 @@ def test_the_local_assembly_builds_every_real_component(tmp_path: Path) -> None:
         assert integrator.current().k == 0
         assert (context.run_root / "baseline0" / "prompt.md").exists()
         assert components.target_repository == str(root / "target")
+        if scripted:
+            assert isinstance(components.harness, ScriptedWorkerHarness)
+            assert components.harness.config.source_ids == ("rubric",)
+            assert components.harness.config.script == "sleep"
         executor = assembly.parts[0].executor
         assert isinstance(executor, LocalExecutor)
         assert executor.sandbox_root == root / ".herd" / "sandboxes" / "r-1"

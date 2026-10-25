@@ -55,6 +55,10 @@ credentials to a worker.
 
 The launch path is independent of any observer:
 
+Harness construction uses the shared local factory, including its source IDs
+and scripted harness support. A scripted harness uses its configured
+`python_executable` (or the runtime's Python), not a model CLI.
+
 1. `convert_testbed_problem(packed_root, template_root, destination, clock=clock)`
    returns a loaded `Problem`. It preserves the template's parameters, sources,
    limits and approvals, but excludes source definitions from the blackboard.

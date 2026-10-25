@@ -3,6 +3,7 @@
 import hmac
 import math
 import shutil
+import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal
@@ -38,6 +39,7 @@ from vlah.runtime.local_assembly import (
     protected_directories,
     sandbox_root_for,
     setting_mapping,
+    setting_text,
     setting_texts,
 )
 from vlah.runtime.testbed_problem import (
@@ -283,11 +285,18 @@ class TestbedAssembly(LocalAssembly):
         assert self.worker_runtime is not None
         herd_config = context.problem.herd_config
         command = setting_texts(herd_config.harness.settings, "command")
-        executable = shutil.which(
-            command[0]
-            if command
-            else ("copilot" if herd_config.harness.kind == "copilot" else "claude")
-        )
+        if herd_config.harness.kind == "scripted":
+            executable_name = (
+                setting_text(herd_config.harness.settings, "python_executable")
+                or sys.executable
+            )
+        elif command:
+            executable_name = command[0]
+        else:
+            executable_name = (
+                "copilot" if herd_config.harness.kind == "copilot" else "claude"
+            )
+        executable = shutil.which(executable_name)
         if executable is None:
             raise ValueError(
                 "the configured worker harness executable is not installed"
@@ -306,7 +315,7 @@ class TestbedAssembly(LocalAssembly):
             worker_runtime=self.worker_runtime,
             runtime_read_paths=(
                 *(Path(path).expanduser() for path in configured_paths),
-                Path(executable),
+                Path(executable).resolve(),
             ),
         )
         sandbox.require_enforcement()

@@ -196,8 +196,8 @@ def make_template(root: Path) -> Path:
                     "judges": {"slow": {"adapter_class": SLOW_ADAPTER}},
                     "executor": {"kind": "local", "settings": {}},
                     "harness": {
-                        "kind": "copilot",
-                        "settings": {"model": "scripted-fixture"},
+                        "kind": "scripted",
+                        "settings": {"script": "sleep"},
                     },
                 }
             ),
