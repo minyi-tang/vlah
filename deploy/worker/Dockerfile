@@ -8,7 +8,7 @@
 #
 # Build from the repository root, so the vlah package is in the context:
 #     docker build -t vlah-worker:dev -f deploy/worker/Dockerfile .
-FROM node:22-bookworm-slim
+FROM node:22-bookworm-slim AS toolchain
 
 # Bumped on purpose; the image test runs both CLIs.
 ARG CLAUDE_CODE_VERSION=2.1.310
@@ -21,11 +21,23 @@ RUN apt-get update \
 RUN npm install -g "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}" "@github/copilot@${COPILOT_CLI_VERSION}" \
     && npm cache clean --force
 
+FROM toolchain AS packages
+
 COPY pyproject.toml README.md LICENSE /src/
 COPY vlah /src/vlah
+COPY testbed /src/testbed
+COPY problems /src/problems
 RUN python3 -m venv /opt/vlah \
-    && /opt/vlah/bin/pip install --no-cache-dir /src \
-    && rm -rf /src
+    && /opt/vlah/bin/pip wheel --no-cache-dir --no-deps --wheel-dir /wheels /src/testbed /src \
+    && printf 'vlah-testbed @ file://%s\n' /wheels/vlah_testbed-*.whl > /wheels/constraints.txt \
+    && /opt/vlah/bin/pip install --no-cache-dir --find-links /wheels \
+        --constraint /wheels/constraints.txt /wheels/vlah-*.whl \
+    && /opt/vlah/bin/pip check \
+    && /opt/vlah/bin/python -c "import shutil, testbed; from pathlib import Path; shutil.rmtree(Path(testbed.__file__).parent / 'problems')"
+
+FROM toolchain AS worker
+
+COPY --from=packages /opt/vlah /opt/vlah
 
 RUN useradd --create-home --uid 1001 worker \
     && mkdir -p /work/.home \
