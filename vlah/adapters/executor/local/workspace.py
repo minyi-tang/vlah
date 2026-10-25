@@ -19,6 +19,7 @@ import subprocess
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Protocol
 from urllib.parse import unquote, urlparse
 
 from vlah.core.types.ids import ActorId
@@ -156,6 +157,23 @@ def resolve_in_clone(clone: str, ref: str) -> str:
             continue
     run_git("-C", clone, "fetch", "-q", "origin", ref)
     return run_git("-C", clone, "rev-parse", "FETCH_HEAD^{commit}").strip()
+
+
+class ViewSettings(Protocol):
+    def __call__(self, agent: ActorId) -> Mapping[str, str]:
+        """Git settings that open this agent's view of the blackboard (#129)."""
+        ...
+
+
+def view_environment(
+    spec: AgentSpec, view_settings: ViewSettings | None
+) -> dict[str, str]:
+    """What the clone and refresh run with: the session's GIT_CONFIG_* entries and,
+    when the blackboard is served per worker, that worker's own settings."""
+    return {
+        **git_settings(spec.env),
+        **(dict(view_settings(spec.agent)) if view_settings is not None else {}),
+    }
 
 
 def git_settings(environment: Mapping[str, str]) -> dict[str, str]:

@@ -18,7 +18,7 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 from random import Random
-from typing import TextIO
+from typing import Literal, TextIO
 
 from vlah.arms.config import ArmName
 from vlah.core.problem.loader import load_problem
@@ -26,11 +26,19 @@ from vlah.core.types.base import FrozenModel
 from vlah.core.types.clock import Clock, SystemClock
 from vlah.runtime.api import Report
 from vlah.runtime.herd import HerdRun, build_herd
-from vlah.runtime.local_assembly import LocalAssembly
+from vlah.runtime.local_assembly import LocalAssembly, setting_text
+from vlah.runtime.stack import (
+    DEFAULT_WORKER_IMAGE,
+    check_stack,
+    print_checks,
+    run_command,
+)
+from vlah.runtime.stack_assembly import StackAssembly
 
 logger = logging.getLogger(__name__)
 
 RUNS_DIRECTORY = ".herd/runs"
+Stack = Literal["docker"]
 STATUS_EVERY_SECONDS = 30.0
 SECONDS_PER_HOUR = 3600.0
 SUPERVISOR_POLL_SECONDS = 5.0
@@ -51,6 +59,8 @@ class RunRequest:
     allow_unenforced_egress: bool = False
     runs_root: Path | None = None
     is_resume: bool = False
+    # "docker": the stack (#129): containers, Redis, the blackboard over HTTP.
+    stack: Stack | None = None
 
 
 class RunRecord(FrozenModel):
@@ -172,7 +182,26 @@ def run_problem(request: RunRequest, stream: TextIO = sys.stdout) -> Report:
     clock = SystemClock()
     record = run_record(request, runs_root, clock)
     run_id = record.run_id
-    assembly = LocalAssembly(allow_unenforced_egress=request.allow_unenforced_egress)
+    if request.stack == "docker":
+        image = setting_text(problem.herd_config.executor.settings, "image")
+        failed = print_checks(
+            check_stack(
+                run_command,
+                image=image or DEFAULT_WORKER_IMAGE,
+                worker_count=record.worker_count,
+            ),
+            stream,
+        )
+        if failed:
+            raise ValueError("the stack is not ready; fix the failed checks above")
+        else:
+            assembly: LocalAssembly = StackAssembly(
+                allow_unenforced_egress=request.allow_unenforced_egress
+            )
+    else:
+        assembly = LocalAssembly(
+            allow_unenforced_egress=request.allow_unenforced_egress
+        )
     herd = build_herd(
         problem,
         record.arm,

@@ -10,15 +10,6 @@ from vlah import __version__
 from vlah.adapters.human.cli.human import CliHuman
 from vlah.arms.config import PRESETS
 from vlah.cli.charter import init_problem, sign_problem
-from vlah.cli.stack import (
-    DEFAULT_WORKER_IMAGE,
-    check_stack,
-    compose_yaml,
-    print_checks,
-    run_command,
-    stack_down,
-    stack_up,
-)
 from vlah.cli.views import (
     show_demo,
     show_events,
@@ -32,6 +23,15 @@ from vlah.core.types.clock import SystemClock
 from vlah.core.types.events import EventType
 from vlah.ports.errors import NotSupportedError
 from vlah.runtime.command import RunRequest, run_problem
+from vlah.runtime.stack import (
+    DEFAULT_WORKER_IMAGE,
+    check_stack,
+    compose_yaml,
+    print_checks,
+    run_command,
+    stack_down,
+    stack_up,
+)
 
 DEFAULT_SEARCH_LIMIT = 20
 
@@ -109,6 +109,14 @@ def main(argv: list[str] | None = None) -> int:
         "--unsafe-no-sandbox",
         action="store_true",
         help="Development only: run workers without OS-level egress enforcement.",
+    )
+    run_parser.add_argument(
+        "--stack",
+        choices=("docker",),
+        help=(
+            "Run on the stack: workers in containers, state in Redis, the blackboard "
+            "over HTTP; vlah stack check runs first."
+        ),
     )
     add_run_arguments(
         commands.add_parser(
@@ -248,6 +256,7 @@ def main(argv: list[str] | None = None) -> int:
                     seed=arguments.seed,
                     allow_unenforced_egress=arguments.unsafe_no_sandbox,
                     is_resume=arguments.resume is not None,
+                    stack=arguments.stack,
                 )
             )
     except (OSError, ValueError, NotSupportedError) as error:

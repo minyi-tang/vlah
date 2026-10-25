@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from vlah.cli.stack import (
+from vlah.runtime.stack import (
     COMPOSE_PROJECT,
     CommandResult,
     check_stack,
@@ -18,7 +18,7 @@ from vlah.cli.stack import (
     stack_up,
 )
 
-pytestmark = pytest.mark.cli
+pytestmark = pytest.mark.runtime
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 GIBIBYTE = 1024**3

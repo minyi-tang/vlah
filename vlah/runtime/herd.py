@@ -371,6 +371,12 @@ class LocalHerd:
             if is_compose
             else worker_view(components.blackboard, context.arm, context.run_id, agent)
         )
+        publisher = components.view_publisher
+        clone_url = (
+            view.clone_url()
+            if publisher is None
+            else publisher.publish(context.run_id, agent, view)
+        )
         return WorkerDeps(
             task_queue=(
                 components.compose_queue if is_compose else components.task_queue
@@ -391,7 +397,7 @@ class LocalHerd:
             workspace=Workspace(
                 target_repository=components.target_repository,
                 target_ref=components.target_ref,
-                blackboard_clone_url=view.clone_url(),
+                blackboard_clone_url=clone_url,
             ),
             clock=context.clock,
             stop=stop_signal,

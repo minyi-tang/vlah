@@ -1,4 +1,4 @@
-"""vlah stack: the herd's services on this machine, up, down and checked (#129).
+"""The herd's services on this machine, up, down and checked: vlah stack (#129).
 
 The stack is one Docker Compose project, vlah: Redis with append-only persistence
 on a named volume, the store a run on the stack keeps its queue, leases and budget
