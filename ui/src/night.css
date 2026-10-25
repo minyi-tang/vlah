@@ -1,0 +1,8 @@
+:root { color-scheme: dark; --ink: #d9e3f3; --muted: #96a5bd; }
+body { background: #050810; color: var(--ink); }
+::selection { background: #31496e; color: #e3eeff; }
+.distant-stars { position: absolute; inset: 0; width: 100%; height: 100%; fill: #b6cbed; pointer-events: none; }
+.world-camera-controls { background: #0d1728c9; backdrop-filter: blur(12px); }
+.world-camera-controls button { color: #99b5da; }
+.world-camera-controls button:hover { background: #799dd51b; }
+.world-camera-controls span { color: #7e98ba; }
