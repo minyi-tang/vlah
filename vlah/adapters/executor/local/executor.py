@@ -42,6 +42,7 @@ from vlah.adapters.executor.local.workspace import (
     check_out_target,
     clone_blackboard,
     files_touched,
+    git_settings,
     refresh_blackboard,
     refuse_sandbox_inside_run_directory,
     sandbox_paths,
@@ -139,7 +140,7 @@ class LocalExecutor:
                 agent=spec.agent,
                 task_id=task.id,
             )
-        clone_blackboard(paths, spec.blackboard_clone_url)
+        clone_blackboard(paths, spec.blackboard_clone_url, git_settings(spec.env))
         process = self.launch(
             handle, spec, paths, {**spec.files, **start_pack.files}, attempt=1
         )
@@ -265,7 +266,11 @@ class LocalExecutor:
 
     def refresh(self, session: Session, now_seconds: float) -> None:
         try:
-            refresh_blackboard(session.paths, session.spec.blackboard_clone_url)
+            refresh_blackboard(
+                session.paths,
+                session.spec.blackboard_clone_url,
+                git_settings(session.spec.env),
+            )
         except SIDECAR_FAILURES:
             logger.exception(f"blackboard refresh failed for {session.handle.agent}")
         session.next_refresh_seconds = now_seconds + self.clone_refresh_seconds
