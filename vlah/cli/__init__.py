@@ -2,6 +2,7 @@
 
 import argparse
 import logging
+import os
 import sys
 from pathlib import Path
 from typing import get_args
@@ -22,6 +23,7 @@ from vlah.cli.views import (
 from vlah.core.types.clock import SystemClock
 from vlah.core.types.events import EventType
 from vlah.ports.errors import NotSupportedError
+from vlah.runtime.api import ArmRunRequest
 from vlah.runtime.command import RunRequest, run_problem
 from vlah.runtime.stack import (
     DEFAULT_WORKER_IMAGE,
@@ -32,6 +34,7 @@ from vlah.runtime.stack import (
     stack_down,
     stack_up,
 )
+from vlah.runtime.testbed_command import DEFAULT_TEMPLATE, run_testbed_arm
 
 DEFAULT_SEARCH_LIMIT = 20
 
@@ -117,6 +120,27 @@ def main(argv: list[str] | None = None) -> int:
             "Run on the stack: workers in containers, state in Redis, the blackboard "
             "over HTTP; vlah stack check runs first."
         ),
+    )
+    arm_commands = commands.add_parser(
+        "arm", help="Entry points for the testbed's arm runner."
+    ).add_subparsers(dest="arm_command", required=True)
+    arm_run = arm_commands.add_parser(
+        "run", help="Run the herd on a packed testbed problem."
+    )
+    arm_run.add_argument("--arm", choices=sorted(PRESETS), required=True)
+    arm_run.add_argument(
+        "--problem", type=Path, required=True, help="Packed worker problem."
+    )
+    arm_run.add_argument("--slow-url", required=True)
+    arm_run.add_argument("--run-id", required=True)
+    arm_run.add_argument("--workers", type=int, required=True)
+    arm_run.add_argument("--hours", type=float, required=True)
+    arm_run.add_argument("--integrator-config", type=Path, required=True)
+    arm_run.add_argument(
+        "--template",
+        type=Path,
+        default=Path(os.environ.get("VLAH_TESTBED_TEMPLATE", str(DEFAULT_TEMPLATE))),
+        help="Signed herd template; also settable with VLAH_TESTBED_TEMPLATE.",
     )
     add_run_arguments(
         commands.add_parser(
@@ -245,6 +269,19 @@ def main(argv: list[str] | None = None) -> int:
             show_demo(arguments.seed, sys.stdout)
         elif arguments.command == "stack":
             return run_stack(arguments)
+        elif arguments.command == "arm":
+            run_testbed_arm(
+                ArmRunRequest(
+                    arm=arguments.arm,
+                    problem_root=arguments.problem,
+                    slow_eval_url=arguments.slow_url,
+                    run_id=arguments.run_id,
+                    worker_count=arguments.workers,
+                    duration_hours=arguments.hours,
+                ),
+                arguments.integrator_config,
+                arguments.template,
+            )
         else:
             run_problem(
                 RunRequest(
@@ -259,7 +296,7 @@ def main(argv: list[str] | None = None) -> int:
                     stack=arguments.stack,
                 )
             )
-    except (OSError, ValueError, NotSupportedError) as error:
+    except (OSError, ValueError, RuntimeError, NotSupportedError) as error:
         print(f"vlah: {error}", file=sys.stderr)
         return 2
     return 0
