@@ -11,7 +11,7 @@ from tests.fixtures.fakes import FakeIndexer, RecordingBudget
 from tests.fixtures.herd import make_store_blackboard
 from vlah.adapters.memory.signal_source import FAKE_SCORE_FILE_NAME, FakeSlowSource
 from vlah.arms.config import PRESETS, ArmConfig
-from vlah.core.blackboard.blackboard import StoreBlackboard
+from vlah.core.blackboard.api import Blackboard
 from vlah.core.eval.api import EvalRequest, EvalRequestKind
 from vlah.core.eval.jobs import BaselineScores, GateOutcome
 from vlah.core.eval.service import LadderEvalService
@@ -78,7 +78,7 @@ def zero_baseline(source_id: str, baseline: str, dataset: Dataset) -> tuple[floa
 @dataclass(kw_only=True)
 class EvalHarness:
     clock: FakeClock
-    blackboard: StoreBlackboard
+    blackboard: Blackboard
     sources: tuple[FakeSlowSource, ...]
     indexer: ScriptedSimilarity
     budget: RecordingBudget
@@ -150,7 +150,7 @@ def make_eval_harness(
     arm: ArmConfig = PRESETS["S2"],
     declarations: tuple[SourceDecl, ...] = (source_declaration("slow", 1.0, "10m"),),
     gates: tuple[GateSpec, ...] = (),
-    blackboard: StoreBlackboard | None = None,
+    blackboard: Blackboard | None = None,
     baseline_scores: BaselineScores = zero_baseline,
     params: Params | None = None,
 ) -> EvalHarness:

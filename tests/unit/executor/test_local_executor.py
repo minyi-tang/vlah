@@ -2,11 +2,14 @@
 
 import json
 import os
+import subprocess
+import sys
 import time
 from pathlib import Path
 
 import pytest
 
+from tests.fixtures.egress import serve_locally
 from tests.fixtures.executor import (
     QUICK_PROGRAM,
     SLEEP_PROGRAM,
@@ -20,12 +23,14 @@ from tests.fixtures.executor import (
     wait_for_file,
 )
 from vlah.adapters.executor.local.traces import RESTART_HINT, STUB_TAG
+from vlah.adapters.executor.local.workspace import sandbox_paths, worker_environment
 from vlah.adapters.memory.store import MemoryObjectStore
 from vlah.core.types.claims import parse_claim
 from vlah.core.types.clock import FakeClock, SystemClock
 from vlah.core.types.ids import ActorId
 from vlah.core.types.interrupts import Interrupt
 from vlah.core.types.params import Params
+from vlah.testing.boundary import BoundaryExpectations, check_worker_boundary
 from vlah.testing.conformance import ExecutorCheckInputs, check_executor
 
 pytestmark = pytest.mark.executor
@@ -341,3 +346,49 @@ def test_a_failing_trace_upload_neither_blocks_nor_repeats_the_restart(
         exit_info = harness.executor.wait(handle, 10.0)
         assert exit_info is not None and exit_info.return_code == 0
         assert (harness.sandbox() / "runs.txt").read_text() == "run\nrun\n"
+
+
+def test_the_sandbox_passes_the_worker_boundary_check(tmp_path: Path) -> None:
+    """The one check every executor in the local track runs (#127): here it covers
+    the environment the executor composes and the clones it makes; the OS layer and
+    hidden paths are the sandbox's and the containers' (L0-17, #128)."""
+    tool_server = serve_locally()
+    with running_executor(tmp_path, FakeClock()) as harness:
+        handle = harness.executor.start(
+            harness.spec(QUICK_PROGRAM), TASK, START_PACK, harness.sink
+        )
+        assert harness.executor.wait(handle, 10.0) is not None
+        paths = sandbox_paths(harness.sandbox())
+        environment = worker_environment(
+            harness.spec(QUICK_PROGRAM),
+            TASK.id,
+            paths,
+            harness.executor.transcript_path(handle),
+            {"PATH": os.environ.get("PATH", ""), "VLAH_PUSH_TOKEN": "s3cret"},
+        )
+
+        def run_in_sandbox(argv: tuple[str, ...]) -> tuple[int, str]:
+            completed = subprocess.run(
+                list(argv),
+                cwd=paths.root,
+                env=environment,
+                capture_output=True,
+                text=True,
+                timeout=60.0,
+                check=False,
+            )
+            return completed.returncode, completed.stdout + completed.stderr
+
+        try:
+            check_worker_boundary(
+                run_in_sandbox,
+                BoundaryExpectations(
+                    python_executable=sys.executable,
+                    tool_url=f"http://127.0.0.1:{tool_server.port}/hook/check",
+                    search_roots=(str(paths.root),),
+                    allowed_variables=(),
+                    is_enforced_below_proxy=False,
+                ),
+            )
+        finally:
+            tool_server.stop()
