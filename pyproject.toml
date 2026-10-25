@@ -12,6 +12,7 @@ dependencies = [
     "redis>=5.0",
     "starlette>=1.9",
     "uvicorn>=0.54",
+    "vlah-testbed>=0.1.0,<0.2.0",
 ]
 
 [project.scripts]
@@ -33,12 +34,32 @@ dev = [
 requires = ["hatchling>=1.25"]
 build-backend = "hatchling.build"
 
+[tool.hatch.build]
+exclude = [
+    "**/private/**",
+    "**/hidden/**",
+    "**/holdout/**",
+    "**/planted/**",
+    "**/.herd/**",
+    "**/__pycache__/**",
+    "**/*.py[cod]",
+    "**/test_hidden.py",
+    "**/.env",
+    "**/*.key",
+]
+
 [tool.hatch.build.targets.wheel]
 packages = ["vlah"]
+
+[tool.hatch.build.targets.sdist]
+only-include = ["vlah", "pyproject.toml", "README.md", "LICENSE", ".gitignore"]
 
 # The testbed (testbed/, problems/, tests/testbed/) is built by separate agents; see issue #10.
 [tool.uv.workspace]
 members = ["testbed"]
+
+[tool.uv.sources]
+vlah-testbed = { workspace = true }
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

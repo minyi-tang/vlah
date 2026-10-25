@@ -1,7 +1,7 @@
 # Quickstart
 
 > [!NOTE]
-> **Preview.** VLAH is pre-alpha, so the commands on this page describe the interface we are building and don't run yet. If something here wouldn't work for your problem, [open an issue](https://github.com/minyi-tang/vlah/issues/new). Changing it now is cheap.
+> **Pre-alpha.** Installation and the deterministic demo work today. The later problem-setup and real-run examples include planned interfaces, such as `vlah chat`. If something here wouldn't work for your problem, [open an issue](https://github.com/minyi-tang/vlah/issues/new).
 
 This guide takes you from a fresh clone to a combined patch for your own problem. The running example is raising the prompt-cache hit rate of an agent harness.
 
@@ -15,11 +15,52 @@ This guide takes you from a fresh clone to a combined patch for your own problem
 
 ## 1. Install
 
+### From source
+
+The uv workspace installs VLAH and its testbed dependency editably, so local edits
+remain visible:
+
 ```bash
 git clone https://github.com/minyi-tang/vlah && cd vlah
-uv sync
+uv sync --locked
 uv run vlah --version
 ```
+
+### From built artifacts
+
+No PyPI publication is assumed. From a checkout, build both distributions, then
+install only the VLAH wheel into an environment outside the repository:
+
+```bash
+uv build --all-packages --no-sources
+artifacts="$PWD/dist"
+install_dir="$(mktemp -d)"
+uv venv "$install_dir/.venv" --python 3.11
+uv pip install --python "$install_dir/.venv/bin/python" \
+  --find-links "$artifacts" "$artifacts/vlah-0.0.1-py3-none-any.whl"
+cd "$install_dir"
+.venv/bin/vlah --version
+.venv/bin/vlah --help
+.venv/bin/vlah demo --seed 1
+```
+
+Keep both wheels in the artifact directory. The installer resolves
+`vlah-testbed>=0.1.0,<0.2.0` from that directory and fetches the other declared
+dependencies from its configured package index. VLAH remains at `0.0.1`; the
+testbed has its own version, `0.1.0`. Neither package needs `PYTHONPATH` or an
+editable installation for these commands.
+
+VLAH's source archive, `vlah-0.0.1.tar.gz`, can replace its wheel in the install
+command. It includes the VLAH package, worker prompts, router rules, type marker,
+README, license, VCS ignore file and build metadata, and rebuilds without the
+repository. The testbed remains a separate declared dependency; its code, problem catalog, and
+the repository's tests, UI, examples, docs and private state are not copied into
+VLAH's archive.
+
+The remaining examples use the source workflow's `uv run vlah`. With an artifact
+installation, use the installed environment's `vlah` command instead. A real run
+still needs Git, the configured model CLI and credentials, and a problem folder;
+installing the Python packages does not provision them.
 
 ## 2. Run the demo
 
