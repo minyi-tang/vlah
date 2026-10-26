@@ -58,6 +58,7 @@ WORKERS = (ActorId("worker-01"), ActorId("worker-02"))
 HERD_RUN_ID = "r-kind-herd"
 HERD_TIMEOUT_SECONDS = 900.0
 POD_TIMEOUT_SECONDS = 180.0
+NAMESPACE_GONE_TIMEOUT_SECONDS = 120.0
 FAKE_SCORE_JUDGE = '''\
 """A judge for the scripted worker's candidates: the scores in fake_score.json."""
 import json
@@ -105,8 +106,9 @@ def cluster_unavailable_reason() -> str | None:
 def home_path(tmp_path: Path) -> Iterator[Path]:
     """A scratch directory under the home: pytest's tmp_path is not on the node's
     mount, so a pod would see an empty directory in its place."""
-    root = Path.home() / ".vlah-kind-tests" / tmp_path.name
-    root.mkdir(parents=True, exist_ok=True)
+    root = Path.home() / ".vlah-kind-tests" / f"{tmp_path.parent.name}-{tmp_path.name}"
+    shutil.rmtree(root, ignore_errors=True)
+    root.mkdir(parents=True)
     yield root
     shutil.rmtree(root, ignore_errors=True)
 
@@ -315,4 +317,8 @@ def test_two_scripted_workers_run_the_herd_on_kind(
         assembly.close()
     assert follow_ups_done(blackboard), "both workers answered their results"
     assert len(merged_events(blackboard)) == blackboard.head_sequence()
+    # Namespace deletion is asynchronous: close() asks for it and does not wait.
+    deadline = time.monotonic() + NAMESPACE_GONE_TIMEOUT_SECONDS
+    while time.monotonic() < deadline and kube.namespace_exists(f"vlah-{HERD_RUN_ID}"):
+        time.sleep(2.0)
     assert not kube.namespace_exists(f"vlah-{HERD_RUN_ID}"), "the namespace is gone"
