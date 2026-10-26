@@ -1,0 +1,14 @@
+# Deployment settings. Workers never see this file.
+judges:
+  slow:
+    adapter_class: vlah.adapters.signal.testbed_http.client:SlowTierSource
+executor:
+  kind: local
+  settings:
+    target_repository: __TARGET_REPOSITORY__
+    target_ref: main
+harness:
+  kind: copilot
+  settings: {}
+models:
+  worker: gpt-6.1-sol

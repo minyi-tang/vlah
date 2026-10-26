@@ -36,6 +36,7 @@ from vlah.adapters.executor.docker.client import DockerCli, DockerClient
 from vlah.adapters.executor.docker.egress import IMAGE_PYTHON
 from vlah.adapters.executor.docker.executor import ContainerResources, DockerExecutor
 from vlah.adapters.executor.local.executor import LocalExecutor
+from vlah.adapters.executor.local.workspace import ViewSettings
 from vlah.adapters.executor.sandbox.sandbox import ProcessSandbox
 from vlah.adapters.harness.claude_code.harness import (
     DEFAULT_MODEL_API_URLS,
@@ -572,6 +573,8 @@ class LocalAssembly:
     # The audit noise for spot checks; None derives it from baseline@0's seeds.
     integrator_sigma: float | None = None
     docker: DockerClient = field(default_factory=DockerCli)
+    # Set by the stack: how each worker's clone opens its view over HTTP (#129).
+    view_settings: ViewSettings | None = None
     parts: list[LocalRunParts] = field(default_factory=list[LocalRunParts])
 
     def judges(self, context: RunContext, run_root: Path) -> dict[str, CommandJudge]:
@@ -628,6 +631,7 @@ class LocalAssembly:
                 },
                 refused_mount_roots=(problem.root, run_root),
                 allow_unenforced=self.allow_unenforced_egress,
+                view_settings=self.view_settings,
                 poll_seconds=self.executor_poll_seconds,
             )
         else:
@@ -647,6 +651,7 @@ class LocalAssembly:
                 params=context.params,
                 clock=context.clock,
                 inherited_environment=os.environ,
+                view_settings=self.view_settings,
                 poll_seconds=self.executor_poll_seconds,
             )
 
