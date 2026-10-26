@@ -14,7 +14,7 @@ from pathlib import Path
 
 import yaml
 
-from testbed.problem_api import iter_candidate_files
+from testbed.problem_api import copy_writable_file, iter_candidate_files
 
 MISSING = object()
 
@@ -204,4 +204,4 @@ def copy_tree(source_dir: Path, destination_dir: Path):
     for relative_path, path in iter_candidate_files(Path(source_dir)):
         destination = destination_dir / relative_path
         destination.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(path, destination)
+        copy_writable_file(path, destination)

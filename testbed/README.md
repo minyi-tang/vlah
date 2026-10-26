@@ -23,12 +23,13 @@ What is here:
 | Extras | `testbed/extras/` | Quick validations beyond the spec (see below). |
 | CLI | `tb` | `fast submit status history final` for workers; `serve pack-problem run precheck probes scorecard report selftest extras` for operators. |
 
-Choices the spec left open, and where we departed from it, are in [DECISIONS.md](DECISIONS.md).
+Choices the spec left open, and where we departed from it, are in
+[DECISIONS.md](https://github.com/minyi-tang/vlah/blob/main/testbed/DECISIONS.md).
 Problem B (the broken harness) is not started; the spec says to wait for a go-ahead.
 
 ## Install
 
-From the repo root:
+**Source checkout (editable):** from the repo root:
 
 ```bash
 uv sync --all-packages          # the workspace, including the testbed and its tb command
@@ -36,20 +37,71 @@ uv run tb --help
 source .venv/bin/activate       # optional: the commands below then work without "uv run"
 ```
 
+**Built distributions:** Python 3.11 or later is required. Build locally; these commands do
+not upload or release anything:
+
+```bash
+uv build --package vlah-testbed --no-sources
+```
+
+Install either `dist/vlah_testbed-0.1.0-py3-none-any.whl` or
+`dist/vlah_testbed-0.1.0.tar.gz` into a fresh environment. The source archive contains
+everything needed to build its wheel without the parent repository:
+
+```bash
+python -m venv /tmp/tb-env
+/tmp/tb-env/bin/python -m pip install /absolute/path/to/vlah_testbed-0.1.0-py3-none-any.whl
+cd /tmp
+/tmp/tb-env/bin/python -I -c 'import testbed.integrator.core'
+/tmp/tb-env/bin/tb --help
+/tmp/tb-env/bin/tb pack-problem stub ./stub-worker
+/tmp/tb-env/bin/tb fast ./stub-worker/policy --seed 1
+```
+
+The last command scores the public stub baseline at `-1000.0`; it needs no model, service,
+or hidden data. `tb selftest --out ./selftest` exercises the scripted arms on the same stub.
+For the scheduling simulator, use `tb pack-problem sched ./sched-worker` and then
+`tb fast ./sched-worker/policy --seed 1`. This worker copy uses the public traces without
+mechanisms; during a run, `tb fast` uses the service-side public tier as described below.
+Built-in names (`stub`, `sched`) find bundled resources in an installed package; an explicit
+problem-directory path still takes precedence. Checkout commands continue to use `problems/`.
+Copies of templates in worker and run workspaces are owner-writable even when the installation
+is read-only; source permissions and executable bits are preserved. A herd that exits without
+a final submits a baseline copy under its run directory, never the installed template itself.
+
+Distributions include only the code listed in `testbed/pyproject.toml` and the public problem
+files listed in `testbed/hatch_build.py`, plus README and MIT license metadata. Adding a public
+runtime file requires updating its allowlist. Builds reject missing files and symlinked
+inputs. Neither wheels nor source archives include `DECISIONS.md`, `extras/`, private judge
+data, holdouts, reference/probe/planted files, run state, credentials, or transcripts.
+
+These are **operator distributions, not worker problem packs**: the public scheduling
+profiles contain workload and mechanism settings. Give workers only `tb pack-problem`
+output. The agent sandbox denies bundled problem resources even when it allows the
+environment's installed packages. Slow scheduling runs, prechecks and probes still need
+the operator's separately supplied hidden material. `tb extras` additionally requires a
+source checkout; its alternative policies are deliberately not distributed.
+`tb run --arm herd` also needs the separate VLAH installation and its launcher (`uv` by
+default, or an explicit `TB_HERD_CMD`); this package does not install VLAH or a model CLI.
+
 ## Hidden material and run state (never in git)
 
 Problem A's hidden seeds, reference policy, ingredient probes and **the judge's site profiles**
 (`sites/common.yaml` and `sites/site1..6.yaml`, DECISIONS A16) are **not committed** (issue #10, §2;
 CI's `no-hidden-material` job and `tests/testbed/test_no_hidden_material.py` check this). The testbed
-looks for them in `$TB_PRIVATE/sched/`, then `private/testbed/sched/` (gitignored), then
+looks for them in `$TB_PRIVATE/sched/`, then `private/testbed/sched/` in a source checkout
+(gitignored), then
 `~/.vlah-private/testbed/sched/`. Ask the maintainer for a copy. Without them the problem still works for
 workers (`tb fast`, packing, on the public-tier profiles in `problems/sched/sites/`), and the tests that
 need them skip. A machine that has the hidden seeds but not the judge's `sites/` refuses to load the
 problem rather than judge on the public tier. `TB_PRIVATE=none` simulates their absence.
 
 Run state (slow-eval data and its system key, runs, precheck and extras output) goes to
-`private/testbed/var/` (or `$TB_STATE_DIR`). Workers get only `tb pack-problem` output; their sandbox
-cannot read any of the above.
+`private/testbed/var/` in a source checkout, or `~/.vlah-private/testbed/var/` for a normal
+installation. `$TB_STATE_DIR` overrides either default. Installed packages never use
+`site-packages/private/` for state or hidden-data discovery. The commands below show the
+checkout paths; installed operators should substitute their state directory. Workers get
+only `tb pack-problem` output; their sandbox cannot read any of the above.
 
 ## Copy-paste commands per day (spec §7, §11.10)
 
@@ -205,5 +257,11 @@ flowchart LR
 
 ```bash
 uv run pytest tests/testbed                       # every PR (CI job testbed-selfcheck): no LLM, ~1-2 min
+uv run pytest tests/testbed/test_packaging.py       # builds wheel/sdist, installs outside the checkout, checks public contents
 uv run pytest -m slow tests/testbed/test_precheck_sched.py -s   # the day-3 precheck (needs hidden material, ~40 min)
 ```
+
+The packaging cases use `uv` and the configured Python package index to build and install
+isolated environments. They make the installed package read-only, exercise both the direct
+wheel and the wheel rebuilt from the archive, and seed the build tree with forbidden
+sentinel files to guard the distribution boundary.
