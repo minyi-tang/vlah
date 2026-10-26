@@ -20,7 +20,7 @@
 ---
 
 > [!NOTE]
-> **VLAH is pre-alpha.** The design is written and the code is being built now. The quickstart and SDK on this page show the interface we are building toward. They don't run yet. If it doesn't fit your problem, [tell us](#contributing) now, while it's cheap to change.
+> **VLAH is pre-alpha.** Installation and the deterministic demo work today. Some real-run and SDK examples on this page still show the interface we are building toward. If it doesn't fit your problem, [tell us](#contributing) now, while it's cheap to change.
 
 You have a metric that matters: a prompt-cache hit rate, p99 latency, or a pass rate on a benchmark you can't fake. Moving it takes changes in five different places, and each needs its own deep dive. The only number you trust comes from a benchmark that takes 30 minutes and can run twice an hour.
 
@@ -84,16 +84,22 @@ Good fits include:
 
 ## Quickstart
 
-> Preview: this is the planned interface. See the [full quickstart](docs/quickstart.md).
+For editable development, install both packages through the uv workspace:
 
 ```bash
 git clone https://github.com/minyi-tang/vlah && cd vlah
-uv sync
+uv sync --locked
 
-uv run vlah demo     # a toy problem, fully in memory: about 10 seconds, no API keys
+uv run vlah demo     # a toy problem, fully in memory; no API keys
 ```
 
-Point it at your own problem:
+Normal wheels and source archives also work without a checkout. VLAH declares
+`vlah-testbed` as a runtime dependency for its shared integrator; it is not an
+optional extra or a copied implementation. The [artifact installation instructions](docs/quickstart.md#from-built-artifacts)
+build both distributions and install VLAH into a fresh environment. They do not
+assume either package has been published on PyPI.
+
+The following real-run flow is a preview:
 
 ```bash
 uv run vlah init cache-hit --repo ~/code/my-harness   # scaffold a problem folder
