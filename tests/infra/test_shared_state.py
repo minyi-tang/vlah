@@ -42,6 +42,11 @@ THREAD_COUNT = 8
 INCREMENTS_PER_THREAD = 50
 FIRST_CLAIM_TIMEOUT_SECONDS = 400.0
 RESUME_TIMEOUT_SECONDS = 600.0
+# A refused resume exits within moments; a run that gets past the lock keeps going.
+LOCK_REFUSAL_SECONDS = 20.0
+LOCK_RETRY_SECONDS = 10.0
+# The CLI's lock TTL is 120 s; the retries cover it with room.
+LOCK_EXPIRY_TIMEOUT_SECONDS = 240.0
 FAKE_SCORE_JUDGE = '''\
 """A judge for the scripted worker's candidates: the scores in fake_score.json."""
 import json
@@ -208,6 +213,22 @@ def follow_ups_done(root: Path) -> bool:
     )
 
 
+def resume_once_the_lock_expires(root: Path) -> subprocess.Popen[str]:
+    """A crashed driver's lock outlives it by its TTL; a resume before that is refused
+    and says so, which the test treats as "try again" (D56, #130)."""
+    deadline = time.monotonic() + LOCK_EXPIRY_TIMEOUT_SECONDS
+    while True:
+        resumed = vlah("run", str(root), "--stack", "docker", "--resume", RUN_ID)
+        try:
+            printed, _ = resumed.communicate(timeout=LOCK_REFUSAL_SECONDS)
+        except subprocess.TimeoutExpired:
+            return resumed
+        if "driven by" in printed and time.monotonic() < deadline:
+            time.sleep(LOCK_RETRY_SECONDS)
+        else:
+            raise AssertionError(f"the resume ended at once:\n{printed[-4000:]}")
+
+
 def test_a_run_killed_mid_way_resumes_on_the_stack_without_repeating_work(
     tmp_path: Path, worker_image: str, redis_up: redis.Redis
 ) -> None:
@@ -251,11 +272,18 @@ def test_a_run_killed_mid_way_resumes_on_the_stack_without_repeating_work(
         first.send_signal(signal.SIGKILL)
         first.wait(timeout=30)
     head_before = len(blackboard_paths(root, "events/_seq/"))
-    resumed = vlah("run", str(root), "--stack", "docker", "--resume", RUN_ID)
+    resumed = resume_once_the_lock_expires(root)
     try:
-        assert wait_until(
-            RESUME_TIMEOUT_SECONDS, lambda: follow_ups_done(root)
-        ), "the resumed run did not finish both workers' follow-ups"
+        finished = wait_until(RESUME_TIMEOUT_SECONDS, lambda: follow_ups_done(root))
+        if not finished:
+            resumed.kill()
+            printed, _ = resumed.communicate(timeout=60)
+            raise AssertionError(
+                "the resumed run did not finish both workers' follow-ups; it printed:\n"
+                f"{printed[-4000:]}"
+            )
+        else:
+            pass
     finally:
         stop = vlah("stop", str(root), "--run-id", RUN_ID)
         stop.wait(timeout=60)
