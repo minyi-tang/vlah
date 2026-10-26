@@ -6,6 +6,7 @@ import shutil
 import subprocess
 import sys
 import time
+from collections.abc import Iterator
 from pathlib import Path
 from random import Random
 
@@ -100,6 +101,16 @@ def cluster_unavailable_reason() -> str | None:
         )
 
 
+@pytest.fixture
+def home_path(tmp_path: Path) -> Iterator[Path]:
+    """A scratch directory under the home: pytest's tmp_path is not on the node's
+    mount, so a pod would see an empty directory in its place."""
+    root = Path.home() / ".vlah-kind-tests" / tmp_path.name
+    root.mkdir(parents=True, exist_ok=True)
+    yield root
+    shutil.rmtree(root, ignore_errors=True)
+
+
 @pytest.fixture(scope="module")
 def kube() -> KubectlCli:
     reason = cluster_unavailable_reason()
@@ -110,8 +121,9 @@ def kube() -> KubectlCli:
 
 
 def test_the_kubernetes_executor_meets_the_port_and_holds_the_boundary(
-    tmp_path: Path, worker_image: str, kube: KubectlCli
+    home_path: Path, worker_image: str, kube: KubectlCli
 ) -> None:
+    tmp_path = home_path
     run_id = "r-kind-check"
     blackboard = open_blackboard(tmp_path / "runs", run_id, "blackboard")
     blackboard.write(ActorId("human"), {"spec.md": b"the spec"}, "spec")
@@ -276,9 +288,9 @@ def merged_events(blackboard: Blackboard) -> list[Event]:
 
 
 def test_two_scripted_workers_run_the_herd_on_kind(
-    tmp_path: Path, worker_image: str, kube: KubectlCli
+    home_path: Path, worker_image: str, kube: KubectlCli
 ) -> None:
-    root = kind_problem(tmp_path, worker_image)
+    root = kind_problem(home_path, worker_image)
     problem = load_problem(root)
     assembly = LocalAssembly(kube=kube, executor_poll_seconds=0.5, waiter_seconds=1.0)
     run = build_herd(

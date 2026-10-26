@@ -98,8 +98,15 @@ def namespace_manifest(namespace: str, run_id: str) -> dict[str, JsonValue]:
     }
 
 
-def deny_workers_manifest(namespace: str, run_id: str) -> dict[str, JsonValue]:
-    """Every pod with an agent label but the proxy reaches only DNS and the proxy."""
+def deny_workers_manifest(
+    namespace: str, run_id: str, node_addresses: tuple[str, ...]
+) -> dict[str, JsonValue]:
+    """Every pod with an agent label but the proxy reaches only DNS and the proxy.
+
+    The proxy pod runs on the node's network (it is the one pod that must reach this
+    machine), so it is reached at the node's address: the rule names the nodes'
+    IPs on the proxy ports as well as the proxy's pod selector.
+    """
     dns_rule: dict[str, JsonValue] = {
         "to": [
             {
@@ -115,7 +122,10 @@ def deny_workers_manifest(namespace: str, run_id: str) -> dict[str, JsonValue]:
         ],
     }
     proxy_rule: dict[str, JsonValue] = {
-        "to": [{"podSelector": {"matchLabels": {AGENT_LABEL: PROXY_AGENT}}}],
+        "to": [
+            {"podSelector": {"matchLabels": {AGENT_LABEL: PROXY_AGENT}}},
+            *({"ipBlock": {"cidr": f"{address}/32"}} for address in node_addresses),
+        ],
         "ports": [
             {
                 "protocol": "TCP",
@@ -157,6 +167,10 @@ def proxy_deployment_manifest(
 ) -> dict[str, JsonValue]:
     labels = {RUN_LABEL: run_id, AGENT_LABEL: PROXY_AGENT}
     pod_spec: dict[str, JsonValue] = {
+        # The node's network: a pod of its own cannot reach this machine on kind,
+        # the node can; the deny policy lets workers reach the node's proxy ports.
+        "hostNetwork": True,
+        "dnsPolicy": "ClusterFirstWithHostNet",
         "automountServiceAccountToken": False,
         "enableServiceLinks": False,
         "containers": [
@@ -269,7 +283,11 @@ class NamespaceEgress:
         namespace = self.namespace
         objects = [namespace_manifest(namespace, self.run_id)]
         if not self.allow_unenforced:
-            objects.append(deny_workers_manifest(namespace, self.run_id))
+            objects.append(
+                deny_workers_manifest(
+                    namespace, self.run_id, self.kube.node_addresses()
+                )
+            )
         else:
             pass
         objects.append(

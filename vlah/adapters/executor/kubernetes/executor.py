@@ -159,13 +159,33 @@ class KubernetesExecutor:
         kube: KubernetesClient,
         resources: PodResources | None = None,
         host_aliases: tuple[HostAlias, ...] = (),
+        node_mount: Path | None = None,
         allow_unenforced: bool = False,
         view_settings: ViewSettings | None = None,
         grace_seconds: float = DEFAULT_GRACE_SECONDS,
         clone_refresh_seconds: float = DEFAULT_CLONE_REFRESH_SECONDS,
         poll_seconds: float | None = DEFAULT_POLL_SECONDS,
     ) -> None:
-        """poll_seconds None runs no sidecar thread; the caller then drives tick itself."""
+        """poll_seconds None runs no sidecar thread; the caller then drives tick itself.
+
+        node_mount is the directory of this machine the kind node mounts (the home
+        directory by default): the sandboxes and logs must lie under it, or the pods
+        would mount empty directories of the node and hang on the proxy's ready file.
+        """
+        mount = (node_mount or Path.home()).resolve()
+        outside = [
+            root
+            for root in (sandbox_root, log_root)
+            if not root.resolve().is_relative_to(mount)
+        ]
+        if outside:
+            raise ValueError(
+                f"{outside} are not under {mount}, the directory the kind node mounts; "
+                "a pod could not see them (keep the problem folder under your home, or "
+                "set executor.settings.node_mount to what the cluster mounts)"
+            )
+        else:
+            pass
         self.run_id = run_id
         self.image = image
         self.sandbox_root = sandbox_root

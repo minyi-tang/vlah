@@ -172,6 +172,9 @@ class FakeKubernetes:
     def namespace_exists(self, namespace: str) -> bool:
         return ("Namespace", "", namespace) in self.manifests
 
+    def node_addresses(self) -> tuple[str, ...]:
+        return ("172.18.0.2",)
+
     def delete_namespace(self, namespace: str) -> None:
         self.deleted_namespaces.append(namespace)
         self.manifests = {
@@ -284,6 +287,8 @@ def running_kubernetes_executor(
         clock=clock,
         kube=kube,
         resources=resources,
+        # The fake cluster sees every directory; the real one mounts the home.
+        node_mount=tmp_path,
         allow_unenforced=allow_unenforced,
         grace_seconds=grace_seconds,
         poll_seconds=poll_seconds,

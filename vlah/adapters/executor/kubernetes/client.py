@@ -187,6 +187,10 @@ class KubernetesClient(Protocol):
 
     def delete_namespace(self, namespace: str) -> None: ...
 
+    def node_addresses(self) -> tuple[str, ...]:
+        """The nodes' internal IPs: where a host-networked pod is reached."""
+        ...
+
 
 def parse_pod_state(raw: object) -> PodState:
     """The newest pod of a kubectl get pods -o json listing."""
@@ -362,6 +366,15 @@ class KubectlCli:
 
     def namespace_exists(self, namespace: str) -> bool:
         return self.kubectl("get", "namespace", namespace, check=False).returncode == 0
+
+    def node_addresses(self) -> tuple[str, ...]:
+        completed = self.kubectl(
+            "get",
+            "nodes",
+            "-o",
+            'jsonpath={.items[*].status.addresses[?(@.type=="InternalIP")].address}',
+        )
+        return tuple(completed.stdout.split())
 
     def delete_namespace(self, namespace: str) -> None:
         self.kubectl(

@@ -510,6 +510,8 @@ def check_kind(
         "--restart=Never",
         f"--image={image}",
         "--image-pull-policy=IfNotPresent",
+        # The proxy pod runs on the node's network; the probe asks what it will see.
+        '--overrides={"spec": {"hostNetwork": true}}',
         "--",
         "python",
         "-c",
@@ -518,25 +520,26 @@ def check_kind(
     )
     checks.append(
         Check(
-            name="host from a pod",
-            passed=probe.passed and "resolved" in probe.stdout,
+            name="host from the node",
+            # The probe exits non-zero when the gateway fails; the name still resolved.
+            passed="resolved" in probe.stdout,
             detail=(
-                f"{CONTAINER_HOST} resolves in a pod"
+                f"{CONTAINER_HOST} resolves on the node"
                 + (" and the gateway answers" if "reached" in probe.stdout else "")
                 if "resolved" in probe.stdout
-                else f"{CONTAINER_HOST} does not resolve in a pod: {probe.detail}"
+                else f"{CONTAINER_HOST} does not resolve on the node: {probe.detail}"
             ),
         )
     )
     if gateway_url is not None and "resolved" in probe.stdout:
         checks.append(
             Check(
-                name="model gateway from a pod",
+                name="model gateway from the node",
                 passed="reached" in probe.stdout,
                 detail=(
-                    f"{gateway_url} answers from a pod"
+                    f"{gateway_url} answers from the node"
                     if "reached" in probe.stdout
-                    else f"{gateway_url} is unreachable from a pod: {probe.detail}"
+                    else f"{gateway_url} is unreachable from the node: {probe.detail}"
                 ),
             )
         )

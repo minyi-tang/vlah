@@ -686,6 +686,11 @@ class LocalAssembly:
                         settings, "host_aliases"
                     ).items()
                 ),
+                node_mount=(
+                    Path(node_mount).expanduser()
+                    if (node_mount := setting_text(settings, "node_mount"))
+                    else None
+                ),
                 allow_unenforced=self.allow_unenforced_egress,
                 view_settings=self.view_settings,
                 poll_seconds=self.executor_poll_seconds,

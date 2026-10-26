@@ -1,6 +1,7 @@
 """The Kubernetes executor over a fake cluster: what the Job and the namespace are
 told, how a session ends, restarts and is interrupted, and what a resume sweeps (#131)."""
 
+import json
 from pathlib import Path
 
 import pytest
@@ -128,8 +129,10 @@ def test_a_session_is_a_job_that_mounts_only_its_sandbox_and_runs_unprivileged(
         policy_spec = policy["spec"]
         assert isinstance(policy_spec, dict)
         assert policy_spec["policyTypes"] == ["Egress"]
+        assert '"cidr": "172.18.0.2/32"' in json.dumps(policy_spec), "the node's proxy"
         proxy = kube.proxy_deployment()
         proxy_pod = pod_spec_of(proxy)
+        assert proxy_pod["hostNetwork"] is True, "the proxy reaches this machine"
         assert proxy_pod["automountServiceAccountToken"] is False
         (logs_volume,) = (
             proxy_pod["volumes"] if isinstance(proxy_pod["volumes"], list) else []

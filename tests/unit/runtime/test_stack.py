@@ -234,6 +234,6 @@ def test_check_kind_names_the_missing_cluster_and_the_pod_probe() -> None:
     checks = check_kind(ready, gateway_url="http://host.docker.internal:4000")
     assert all(check.passed for check in checks), [check.detail for check in checks]
     assert [check.name for check in checks][-2:] == [
-        "host from a pod",
-        "model gateway from a pod",
+        "host from the node",
+        "model gateway from the node",
     ]
