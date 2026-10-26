@@ -40,6 +40,8 @@ logger = logging.getLogger(__name__)
 RUNS_DIRECTORY = ".herd/runs"
 Stack = Literal["docker"]
 STATUS_EVERY_SECONDS = 30.0
+# Renewed on every status tick, so a live driver never loses its lock (#130).
+DRIVER_LOCK_TTL_SECONDS = 4 * STATUS_EVERY_SECONDS
 SECONDS_PER_HOUR = 3600.0
 SUPERVISOR_POLL_SECONDS = 5.0
 RUN_RECORD_FILE_NAME = "run.json"
@@ -146,10 +148,11 @@ def write_report(report: Report, path: Path) -> None:
     )
 
 
-def wait_for(run: HerdRun, stream: TextIO) -> None:
-    """Block until the run stops on its own; Ctrl-C stops it cleanly."""
+def wait_for(run: HerdRun, stream: TextIO, assembly: LocalAssembly) -> None:
+    """Block until the run stops on its own, renewing the driver lock; Ctrl-C stops it cleanly."""
     try:
         while not run.wait(STATUS_EVERY_SECONDS):
+            assembly.renew()
             status = run.status()
             print(
                 f"[{status.run_id}] baseline@{status.current_baseline}, "
@@ -196,11 +199,13 @@ def run_problem(request: RunRequest, stream: TextIO = sys.stdout) -> Report:
             raise ValueError("the stack is not ready; fix the failed checks above")
         else:
             assembly: LocalAssembly = StackAssembly(
-                allow_unenforced_egress=request.allow_unenforced_egress
+                allow_unenforced_egress=request.allow_unenforced_egress,
+                driver_lock_ttl_seconds=DRIVER_LOCK_TTL_SECONDS,
             )
     else:
         assembly = LocalAssembly(
-            allow_unenforced_egress=request.allow_unenforced_egress
+            allow_unenforced_egress=request.allow_unenforced_egress,
+            driver_lock_ttl_seconds=DRIVER_LOCK_TTL_SECONDS,
         )
     herd = build_herd(
         problem,
@@ -227,7 +232,7 @@ def run_problem(request: RunRequest, stream: TextIO = sys.stdout) -> Report:
     )
     run = herd.start()
     try:
-        wait_for(run, stream)
+        wait_for(run, stream, assembly)
         report = run.report()
     finally:
         assembly.close()

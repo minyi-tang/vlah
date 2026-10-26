@@ -76,6 +76,7 @@ from vlah.ports.store import KeyValueStore
 from vlah.roles.critic.holdout import HoldoutCritic, SealedVerdict, integrator_params
 from vlah.runtime.assembly import RunComponents, RunContext
 from vlah.runtime.compose import compose_arm
+from vlah.runtime.driver import DriverLock
 from vlah.runtime.herd import top_level_source
 from vlah.runtime.status import KeyValueQueueCounts
 from vlah.testing.scripted_worker import SCRIPTS
@@ -558,6 +559,7 @@ class LocalRunParts:
     executor: LocalExecutor | DockerExecutor
     integrator: HerdIntegrator
     key_value_store: KeyValueStore
+    driver_lock: DriverLock | None
 
 
 @dataclass(kw_only=True)
@@ -575,6 +577,9 @@ class LocalAssembly:
     docker: DockerClient = field(default_factory=DockerCli)
     # Set by the stack: how each worker's clone opens its view over HTTP (#129).
     view_settings: ViewSettings | None = None
+    # With a TTL, build takes the run's driver lock before anything else (#130);
+    # None leaves it to the caller, as tests and library users do.
+    driver_lock_ttl_seconds: float | None = None
     parts: list[LocalRunParts] = field(default_factory=list[LocalRunParts])
 
     def judges(self, context: RunContext, run_root: Path) -> dict[str, CommandJudge]:
@@ -670,6 +675,16 @@ class LocalAssembly:
             pass
         objects = MemoryObjectStore()
         store = key_value_store(problem.herd_config, context)
+        if self.driver_lock_ttl_seconds is not None:
+            lock: DriverLock | None = DriverLock(
+                store=store,
+                run_id=context.run_id,
+                clock=context.clock,
+                ttl_seconds=self.driver_lock_ttl_seconds,
+            )
+            lock.acquire()
+        else:
+            lock = None
         task_queue = KeyValueTaskQueue(store=store)
         compose_queue = KeyValueTaskQueue(store=store, pool="external")
         leases = KeyValueLeases(
@@ -808,6 +823,7 @@ class LocalAssembly:
                 executor=executor,
                 integrator=integrator,
                 key_value_store=store,
+                driver_lock=lock,
             )
         )
         return RunComponents(
@@ -842,13 +858,25 @@ class LocalAssembly:
             critic=critic,
         )
 
+    def renew(self) -> None:
+        """Keep the runs' driver locks from expiring while they wait (#130)."""
+        for parts in self.parts:
+            if parts.driver_lock is not None:
+                parts.driver_lock.renew()
+            else:
+                pass
+
     def close(self) -> None:
-        """Stop what the runs own: worker processes, the tool servers, then the store."""
+        """Stop what the runs own: worker processes, the tool servers, the lock, then the store."""
         for parts in self.parts:
             parts.executor.close()
             parts.integrator.close()
             for served in parts.tool_servers:
                 served.close()
+            if parts.driver_lock is not None:
+                parts.driver_lock.release()
+            else:
+                pass
             store = parts.key_value_store
             if isinstance(store, SqliteKeyValueStore):
                 store.close()
