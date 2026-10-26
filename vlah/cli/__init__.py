@@ -23,6 +23,15 @@ from vlah.core.types.clock import SystemClock
 from vlah.core.types.events import EventType
 from vlah.ports.errors import NotSupportedError
 from vlah.runtime.command import RunRequest, run_problem
+from vlah.runtime.stack import (
+    DEFAULT_WORKER_IMAGE,
+    check_stack,
+    compose_yaml,
+    print_checks,
+    run_command,
+    stack_down,
+    stack_up,
+)
 
 DEFAULT_SEARCH_LIMIT = 20
 
@@ -40,6 +49,27 @@ def add_run_arguments(
     else:
         pass
     return view_parser
+
+
+def run_stack(arguments: argparse.Namespace) -> int:
+    if arguments.stack_command == "up":
+        return stack_up(run_command, sys.stdout)
+    elif arguments.stack_command == "down":
+        return stack_down(run_command, sys.stdout, arguments.run, arguments.volumes)
+    elif arguments.stack_command == "check":
+        return print_checks(
+            check_stack(
+                run_command,
+                image=arguments.image,
+                gateway_url=arguments.gateway_url,
+                worker_count=arguments.workers,
+                memory_text=arguments.memory,
+            ),
+            sys.stdout,
+        )
+    else:
+        sys.stdout.write(compose_yaml())
+        return 0
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -79,6 +109,14 @@ def main(argv: list[str] | None = None) -> int:
         "--unsafe-no-sandbox",
         action="store_true",
         help="Development only: run workers without OS-level egress enforcement.",
+    )
+    run_parser.add_argument(
+        "--stack",
+        choices=("docker",),
+        help=(
+            "Run on the stack: workers in containers, state in Redis, the blackboard "
+            "over HTTP; vlah stack check runs first."
+        ),
     )
     add_run_arguments(
         commands.add_parser(
@@ -127,6 +165,34 @@ def main(argv: list[str] | None = None) -> int:
         "demo", help="Run a whole herd on a toy problem, in memory."
     )
     demo_parser.add_argument("--seed", type=int, default=0)
+    stack_parser = commands.add_parser(
+        "stack", help="The herd's services on this machine (Docker): up, down, check."
+    )
+    stack_commands = stack_parser.add_subparsers(dest="stack_command", required=True)
+    stack_commands.add_parser(
+        "up", help="Start the services (Redis) and wait for them."
+    )
+    down_parser = stack_commands.add_parser(
+        "down", help="Stop the services and remove what runs left behind."
+    )
+    down_parser.add_argument(
+        "--run", metavar="RUN_ID", help="Only this run's containers and networks."
+    )
+    down_parser.add_argument(
+        "--volumes", action="store_true", help="Also remove the Redis volume."
+    )
+    check_parser = stack_commands.add_parser(
+        "check", help="Pre-flight: Docker, the image, Redis, the gateway, memory."
+    )
+    check_parser.add_argument("--image", default=DEFAULT_WORKER_IMAGE)
+    check_parser.add_argument(
+        "--gateway-url", help="A model gateway URL as a container would reach it."
+    )
+    check_parser.add_argument("--workers", type=int, default=1)
+    check_parser.add_argument(
+        "--memory", default="2g", help="Memory per worker container, such as 2g."
+    )
+    stack_commands.add_parser("compose", help="Print the compose file the stack uses.")
     try:
         arguments = parser.parse_args(argv)
     except SystemExit as exit_status:
@@ -177,6 +243,8 @@ def main(argv: list[str] | None = None) -> int:
             # The demo's story is its output; the components' progress logs are not.
             logging.basicConfig(level=logging.WARNING, format="%(message)s")
             show_demo(arguments.seed, sys.stdout)
+        elif arguments.command == "stack":
+            return run_stack(arguments)
         else:
             run_problem(
                 RunRequest(
@@ -188,6 +256,7 @@ def main(argv: list[str] | None = None) -> int:
                     seed=arguments.seed,
                     allow_unenforced_egress=arguments.unsafe_no_sandbox,
                     is_resume=arguments.resume is not None,
+                    stack=arguments.stack,
                 )
             )
     except (OSError, ValueError, NotSupportedError) as error:
