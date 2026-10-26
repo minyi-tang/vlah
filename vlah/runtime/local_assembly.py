@@ -35,6 +35,12 @@ from pydantic import JsonValue, TypeAdapter
 from vlah.adapters.executor.docker.client import DockerCli, DockerClient
 from vlah.adapters.executor.docker.egress import IMAGE_PYTHON
 from vlah.adapters.executor.docker.executor import ContainerResources, DockerExecutor
+from vlah.adapters.executor.kubernetes.client import (
+    HostAlias,
+    KubectlCli,
+    KubernetesClient,
+)
+from vlah.adapters.executor.kubernetes.executor import KubernetesExecutor, PodResources
 from vlah.adapters.executor.local.executor import LocalExecutor
 from vlah.adapters.executor.local.workspace import ViewSettings
 from vlah.adapters.executor.sandbox.sandbox import ProcessSandbox
@@ -100,8 +106,10 @@ OUTPUT_TAIL_CHARACTERS = 2000
 SUPPORTED_HARNESSES = ("copilot", "claude_code", "scripted")
 # Used when herd.yaml does not say the model's window; Claude models have at least this.
 DEFAULT_CONTEXT_WINDOW_TOKENS = 200_000
-SUPPORTED_EXECUTORS = ("local", "docker")
+SUPPORTED_EXECUTORS = ("local", "docker", "kubernetes")
 DOCKER_EXECUTOR = "docker"
+KUBERNETES_EXECUTOR = "kubernetes"
+DEFAULT_KUBE_CONTEXT = "kind-vlah"
 DEFAULT_WORKER_IMAGE = "vlah-worker:dev"
 # Containers reach the machine by this name; the tool servers then listen on every
 # interface, because the name does not resolve to the host's loopback on Linux.
@@ -287,20 +295,29 @@ def is_docker(herd_config: HerdConfig) -> bool:
     return herd_config.executor.kind == DOCKER_EXECUTOR
 
 
+def is_in_container(herd_config: HerdConfig) -> bool:
+    """Whether workers run from the worker image: in containers (#128) or pods (#131)."""
+    return herd_config.executor.kind in (DOCKER_EXECUTOR, KUBERNETES_EXECUTOR)
+
+
 def tool_server_hosts(herd_config: HerdConfig, tool_host: str) -> tuple[str, str]:
     """The host the sessions are told and the one the servers bind: the same on this
-    machine, the containers' name for the host and every interface under Docker."""
-    if is_docker(herd_config):
-        return CONTAINER_HOST, ALL_INTERFACES
+    machine, the containers' name for the host and every interface under Docker or
+    kind (herd.yaml's executor.settings.herd_host overrides the name)."""
+    if is_in_container(herd_config):
+        return (
+            setting_text(herd_config.executor.settings, "herd_host") or CONTAINER_HOST,
+            ALL_INTERFACES,
+        )
     else:
         return tool_host, tool_host
 
 
 def worker_python(herd_config: HerdConfig) -> str:
     """The Python the hook and the scripted worker run with: herd.yaml's, else the
-    image's under Docker, else this interpreter."""
+    image's in a container or pod, else this interpreter."""
     return setting_text(herd_config.harness.settings, "python_executable") or (
-        IMAGE_PYTHON if is_docker(herd_config) else sys.executable
+        IMAGE_PYTHON if is_in_container(herd_config) else sys.executable
     )
 
 
@@ -556,7 +573,7 @@ class LocalRunParts:
     """What a run owns besides its components: the things close() must stop."""
 
     tool_servers: tuple[ServedToolServer, ...]
-    executor: LocalExecutor | DockerExecutor
+    executor: LocalExecutor | DockerExecutor | KubernetesExecutor
     integrator: HerdIntegrator
     key_value_store: KeyValueStore
     driver_lock: DriverLock | None
@@ -575,6 +592,8 @@ class LocalAssembly:
     # The audit noise for spot checks; None derives it from baseline@0's seeds.
     integrator_sigma: float | None = None
     docker: DockerClient = field(default_factory=DockerCli)
+    # None builds a KubectlCli for herd.yaml's context; tests pass a fake cluster.
+    kube: KubernetesClient | None = None
     # Set by the stack: how each worker's clone opens its view over HTTP (#129).
     view_settings: ViewSettings | None = None
     # With a TTL, build takes the run's driver lock before anything else (#130);
@@ -608,8 +627,9 @@ class LocalAssembly:
         blackboard: Blackboard,
         objects: MemoryObjectStore,
         claims: McpToolServer,
-    ) -> LocalExecutor | DockerExecutor:
-        """Worker processes under the egress sandbox, or one container per session (#128)."""
+    ) -> LocalExecutor | DockerExecutor | KubernetesExecutor:
+        """Worker processes under the egress sandbox, one container per session (#128),
+        or one Job per session on a kind cluster (#131)."""
         problem = context.problem
         run_root = context.run_root
         settings = problem.herd_config.executor.settings
@@ -635,6 +655,42 @@ class LocalAssembly:
                     ).items()
                 },
                 refused_mount_roots=(problem.root, run_root),
+                allow_unenforced=self.allow_unenforced_egress,
+                view_settings=self.view_settings,
+                poll_seconds=self.executor_poll_seconds,
+            )
+        elif problem.herd_config.executor.kind == KUBERNETES_EXECUTOR:
+            resources = container_resources(settings)
+            return KubernetesExecutor(
+                run_id=context.run_id,
+                image=setting_text(settings, "image") or DEFAULT_WORKER_IMAGE,
+                sandbox_root=sandbox_root,
+                log_root=log_root,
+                blackboard=blackboard,
+                objects=objects,
+                claims=claims,
+                params=context.params,
+                clock=context.clock,
+                kube=(
+                    self.kube
+                    if self.kube is not None
+                    else KubectlCli(
+                        context=setting_text(settings, "context")
+                        or DEFAULT_KUBE_CONTEXT
+                    )
+                ),
+                resources=PodResources(cpus=resources.cpus, memory=resources.memory),
+                host_aliases=tuple(
+                    HostAlias(ip=ip, hostname=hostname)
+                    for hostname, ip in setting_mapping(
+                        settings, "host_aliases"
+                    ).items()
+                ),
+                node_mount=(
+                    Path(node_mount).expanduser()
+                    if (node_mount := setting_text(settings, "node_mount"))
+                    else None
+                ),
                 allow_unenforced=self.allow_unenforced_egress,
                 view_settings=self.view_settings,
                 poll_seconds=self.executor_poll_seconds,

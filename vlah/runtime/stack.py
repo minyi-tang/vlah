@@ -1,4 +1,4 @@
-"""The herd's services on this machine, up, down and checked: vlah stack (#129).
+"""The herd's services on this machine, up, down and checked: vlah stack (#129, #131).
 
 The stack is one Docker Compose project, vlah: Redis with append-only persistence
 on a named volume, the store a run on the stack keeps its queue, leases and budget
@@ -46,6 +46,26 @@ COMPOSE_DEFINITION: dict[str, JsonValue] = {
     },
     "volumes": {"vlah-redis": {}},
 }
+KIND_CLUSTER = "vlah"
+KIND_CONTEXT = f"kind-{KIND_CLUSTER}"
+KIND_NODE = f"{KIND_CLUSTER}-control-plane"
+# Pinned and bumped on purpose; kindnet does not enforce NetworkPolicy, Calico does.
+CALICO_MANIFEST_URL = "https://raw.githubusercontent.com/projectcalico/calico/v3.29.1/manifests/calico.yaml"
+CALICO_POD_SUBNET = "192.168.0.0/16"
+KIND_WAIT = "180s"
+HOST_PROBE = (
+    "import socket, sys, urllib.error, urllib.request\n"
+    "address = socket.gethostbyname(sys.argv[1])\n"
+    "print('resolved', address)\n"
+    "if len(sys.argv) > 2:\n"
+    "    try:\n"
+    f"        urllib.request.urlopen(sys.argv[2], timeout={PROBE_TIMEOUT_SECONDS}).read()\n"
+    "    except urllib.error.HTTPError:\n"
+    "        pass\n"
+    "    print('reached')\n"
+    "else:\n"
+    "    pass\n"
+)
 GATEWAY_PROBE = (
     "import sys, urllib.error, urllib.request\n"
     "try:\n"
@@ -318,3 +338,211 @@ def print_checks(checks: list[Check], stream: TextIO) -> int:
     else:
         print("the stack is ready", file=stream)
         return 0
+
+
+def kind_cluster_yaml(home: str) -> str:
+    """The kind cluster: no default CNI (Calico follows), the home directory mounted
+    into the node so a worker pod can mount its own sandbox and nothing else (#131)."""
+    definition: dict[str, JsonValue] = {
+        "kind": "Cluster",
+        "apiVersion": "kind.x-k8s.io/v1alpha4",
+        "name": KIND_CLUSTER,
+        "networking": {"disableDefaultCNI": True, "podSubnet": CALICO_POD_SUBNET},
+        "nodes": [
+            {
+                "role": "control-plane",
+                "extraMounts": [
+                    {"hostPath": home, "containerPath": home, "readOnly": False}
+                ],
+            }
+        ],
+    }
+    return yaml.safe_dump(definition, sort_keys=False)
+
+
+def kubectl(run: RunCommand, *arguments: str) -> CommandResult:
+    return run(("kubectl", "--context", KIND_CONTEXT, *arguments))
+
+
+def kind_up(run: RunCommand, stream: TextIO, home: str, image: str) -> int:
+    """Create the cluster if it is missing, install Calico, wait, load the worker image."""
+    clusters = run(("kind", "get", "clusters"))
+    if KIND_CLUSTER in clusters.stdout.split():
+        print(f"kind cluster {KIND_CLUSTER} exists", file=stream)
+    else:
+        created = run(
+            ("kind", "create", "cluster", "--config", "-", "--wait", KIND_WAIT),
+            stdin_text=kind_cluster_yaml(home),
+        )
+        if not created.passed:
+            print(f"kind create cluster failed: {created.detail}", file=stream)
+            return 1
+        else:
+            print(f"kind cluster {KIND_CLUSTER} created", file=stream)
+    calico = kubectl(run, "apply", "-f", CALICO_MANIFEST_URL)
+    if not calico.passed:
+        print(f"Calico did not apply: {calico.detail}", file=stream)
+        return 1
+    else:
+        pass
+    ready = kubectl(
+        run,
+        "wait",
+        "--for=condition=Ready",
+        "nodes",
+        "--all",
+        f"--timeout={KIND_WAIT}",
+    )
+    if not ready.passed:
+        print(f"the node did not become Ready: {ready.detail}", file=stream)
+        return 1
+    else:
+        pass
+    calico_ready = kubectl(
+        run,
+        "wait",
+        "--for=condition=Ready",
+        "pods",
+        "-n",
+        "kube-system",
+        "-l",
+        "k8s-app=calico-node",
+        f"--timeout={KIND_WAIT}",
+    )
+    if not calico_ready.passed:
+        print(f"Calico did not become Ready: {calico_ready.detail}", file=stream)
+        return 1
+    else:
+        pass
+    loaded = run(("kind", "load", "docker-image", image, "--name", KIND_CLUSTER))
+    if not loaded.passed:
+        print(f"could not load {image} into the cluster: {loaded.detail}", file=stream)
+        return 1
+    else:
+        print(
+            f"kind cluster {KIND_CLUSTER} is ready with Calico and {image}", file=stream
+        )
+        return 0
+
+
+def kind_down(run: RunCommand, stream: TextIO) -> int:
+    deleted = run(("kind", "delete", "cluster", "--name", KIND_CLUSTER))
+    if deleted.passed:
+        print(f"kind cluster {KIND_CLUSTER} is gone", file=stream)
+        return 0
+    else:
+        print(f"kind delete cluster failed: {deleted.detail}", file=stream)
+        return 1
+
+
+def check_kind(
+    run: RunCommand,
+    *,
+    image: str = DEFAULT_WORKER_IMAGE,
+    gateway_url: str | None = None,
+) -> list[Check]:
+    """The pre-flight for the Kubernetes executor on kind."""
+    checks: list[Check] = []
+    for tool in ("kind", "kubectl"):
+        version = run((tool, "version"))
+        checks.append(Check(name=tool, passed=version.passed, detail=version.detail))
+    if not all(check.passed for check in checks):
+        return checks
+    else:
+        pass
+    cluster = kubectl(run, "cluster-info")
+    checks.append(
+        Check(
+            name="cluster",
+            passed=cluster.passed,
+            detail=(
+                f"{KIND_CONTEXT} answers"
+                if cluster.passed
+                else f"{cluster.detail}; run vlah stack --kind up"
+            ),
+        )
+    )
+    if not cluster.passed:
+        return checks
+    else:
+        pass
+    calico = kubectl(
+        run,
+        "get",
+        "pods",
+        "-n",
+        "kube-system",
+        "-l",
+        "k8s-app=calico-node",
+        "-o",
+        "jsonpath={.items[*].status.phase}",
+    )
+    checks.append(
+        Check(
+            name="calico",
+            passed=calico.passed and "Running" in calico.stdout,
+            detail=(
+                "calico-node is Running (NetworkPolicy is enforced)"
+                if "Running" in calico.stdout
+                else "calico-node is not running; NetworkPolicy would not be enforced"
+            ),
+        )
+    )
+    on_node = run(("docker", "exec", KIND_NODE, "crictl", "images", "-q", image))
+    checks.append(
+        Check(
+            name="worker image on the node",
+            passed=on_node.passed and bool(on_node.stdout.strip()),
+            detail=(
+                f"{image} is on {KIND_NODE}"
+                if on_node.stdout.strip()
+                else f"{image} is not on the node; run vlah stack --kind up"
+            ),
+        )
+    )
+    probe_arguments = [CONTAINER_HOST] + ([gateway_url] if gateway_url else [])
+    probe = kubectl(
+        run,
+        "run",
+        "vlah-stack-probe",
+        "--rm",
+        "-i",
+        "--restart=Never",
+        f"--image={image}",
+        "--image-pull-policy=IfNotPresent",
+        # The proxy pod runs on the node's network; the probe asks what it will see.
+        '--overrides={"spec": {"hostNetwork": true}}',
+        "--",
+        "python",
+        "-c",
+        HOST_PROBE,
+        *probe_arguments,
+    )
+    checks.append(
+        Check(
+            name="host from the node",
+            # The probe exits non-zero when the gateway fails; the name still resolved.
+            passed="resolved" in probe.stdout,
+            detail=(
+                f"{CONTAINER_HOST} resolves on the node"
+                + (" and the gateway answers" if "reached" in probe.stdout else "")
+                if "resolved" in probe.stdout
+                else f"{CONTAINER_HOST} does not resolve on the node: {probe.detail}"
+            ),
+        )
+    )
+    if gateway_url is not None and "resolved" in probe.stdout:
+        checks.append(
+            Check(
+                name="model gateway from the node",
+                passed="reached" in probe.stdout,
+                detail=(
+                    f"{gateway_url} answers from the node"
+                    if "reached" in probe.stdout
+                    else f"{gateway_url} is unreachable from the node: {probe.detail}"
+                ),
+            )
+        )
+    else:
+        pass
+    return checks

@@ -1,0 +1,31 @@
+name: Nightly kind
+
+# Wave L (#131): the Kubernetes executor's infra tests need a kind cluster with
+# Calico, which takes minutes to bring up; they run nightly and on request.
+on:
+  schedule:
+    - cron: "17 3 * * *"
+  workflow_dispatch:
+
+jobs:
+  kind:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+      - run: uv sync --locked
+      - name: Build the worker image
+        run: docker build -t vlah-worker:dev -f deploy/worker/Dockerfile .
+      - name: Install kind
+        run: |
+          curl -Lo ./kind https://kind.sigs.k8s.io/dl/v0.33.0/kind-linux-amd64
+          chmod +x ./kind && sudo mv ./kind /usr/local/bin/kind
+      - name: Bring the kind cluster up with Calico and the worker image
+        run: uv run vlah stack --kind up
+      - name: Pre-flight
+        run: uv run vlah stack --kind check
+      - run: uv run pytest -m "infra and kubernetes" tests/infra
+      - name: Tear the cluster down
+        if: always()
+        run: uv run vlah stack --kind down

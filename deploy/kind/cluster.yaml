@@ -1,0 +1,20 @@
+# The kind cluster the Kubernetes executor runs on (L-04, #131).
+#
+# The default CNI (kindnet) does not enforce NetworkPolicy, and the worker
+# namespace's default-deny egress is the boundary, so the cluster starts without
+# a CNI and vlah stack --kind up installs Calico. The pod subnet is Calico's
+# default. The sandboxes live on this machine under <problem>/.herd/sandboxes, as
+# they do for the Docker executor, and reach the node through the mount below so a
+# worker pod mounts only its own task's directory (a hostPath scoped to it).
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+name: vlah
+networking:
+  disableDefaultCNI: true
+  podSubnet: 192.168.0.0/16
+nodes:
+  - role: control-plane
+    extraMounts:
+      - hostPath: /Users
+        containerPath: /Users
+        readOnly: false
