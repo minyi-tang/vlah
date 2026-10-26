@@ -42,6 +42,11 @@ THREAD_COUNT = 8
 INCREMENTS_PER_THREAD = 50
 FIRST_CLAIM_TIMEOUT_SECONDS = 400.0
 RESUME_TIMEOUT_SECONDS = 600.0
+# A refused resume exits within moments; a run that gets past the lock keeps going.
+LOCK_REFUSAL_SECONDS = 20.0
+LOCK_RETRY_SECONDS = 10.0
+# The CLI's lock TTL is 120 s; the retries cover it with room.
+LOCK_EXPIRY_TIMEOUT_SECONDS = 240.0
 FAKE_SCORE_JUDGE = '''\
 """A judge for the scripted worker's candidates: the scores in fake_score.json."""
 import json
@@ -136,6 +141,7 @@ def vlah(*arguments: str) -> subprocess.Popen[str]:
     return subprocess.Popen(
         [
             sys.executable,
+            "-u",
             "-c",
             "from vlah.cli import main; raise SystemExit(main())",
             *arguments,
@@ -148,8 +154,28 @@ def vlah(*arguments: str) -> subprocess.Popen[str]:
 
 
 def blackboard_paths(root: Path, prefix: str) -> tuple[str, ...]:
-    blackboard = open_blackboard(root / ".herd" / "runs", RUN_ID, "blackboard")
-    return blackboard.list_paths(prefix, None)
+    """Read the run's repository with git itself: a store object of this process
+    would cache the tree it first saw, and opening one would create the repository
+    before the run does."""
+    repository = root / ".herd" / "runs" / RUN_ID / "blackboard.git"
+    if not repository.is_dir():
+        return ()
+    else:
+        listing = subprocess.run(
+            [
+                "git",
+                "--git-dir",
+                str(repository),
+                "ls-tree",
+                "-r",
+                "--name-only",
+                "main",
+            ],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        return tuple(path for path in listing.stdout.split() if path.startswith(prefix))
 
 
 class Condition(Protocol):
@@ -166,16 +192,41 @@ def wait_until(timeout_seconds: float, condition: Condition) -> bool:
     return False
 
 
+def claim_text(root: Path, path: str) -> str:
+    repository = root / ".herd" / "runs" / RUN_ID / "blackboard.git"
+    return subprocess.run(
+        ["git", "--git-dir", str(repository), "show", f"main:{path}"],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout
+
+
 def follow_ups_done(root: Path) -> bool:
     """Each worker has answered its result with a dead end (D28)."""
-    blackboard = open_blackboard(root / ".herd" / "runs", RUN_ID, "blackboard")
     return all(
         any(
-            parse_claim(blackboard.read(path, None).decode()).type == "dead_end"
-            for path in blackboard.list_paths(f"claims/{agent}/", None)
+            parse_claim(claim_text(root, path)).type == "dead_end"
+            for path in blackboard_paths(root, f"claims/{agent}/")
         )
         for agent in WORKERS
     )
+
+
+def resume_once_the_lock_expires(root: Path) -> subprocess.Popen[str]:
+    """A crashed driver's lock outlives it by its TTL; a resume before that is refused
+    and says so, which the test treats as "try again" (D56, #130)."""
+    deadline = time.monotonic() + LOCK_EXPIRY_TIMEOUT_SECONDS
+    while True:
+        resumed = vlah("run", str(root), "--stack", "docker", "--resume", RUN_ID)
+        try:
+            printed, _ = resumed.communicate(timeout=LOCK_REFUSAL_SECONDS)
+        except subprocess.TimeoutExpired:
+            return resumed
+        if "driven by" in printed and time.monotonic() < deadline:
+            time.sleep(LOCK_RETRY_SECONDS)
+        else:
+            raise AssertionError(f"the resume ended at once:\n{printed[-4000:]}")
 
 
 def test_a_run_killed_mid_way_resumes_on_the_stack_without_repeating_work(
@@ -200,12 +251,20 @@ def test_a_run_killed_mid_way_resumes_on_the_stack_without_repeating_work(
         RUN_ID,
     )
     try:
-        assert wait_until(
+        started = wait_until(
             FIRST_CLAIM_TIMEOUT_SECONDS,
             lambda: any(
                 blackboard_paths(root, f"claims/{agent}/") for agent in WORKERS
             ),
-        ), "no worker wrote a claim before the crash"
+        )
+        if not started:
+            first.kill()
+            printed, _ = first.communicate(timeout=60)
+            raise AssertionError(
+                f"no worker wrote a claim before the crash; vlah run printed:\n{printed[-4000:]}"
+            )
+        else:
+            pass
         held = vlah("run", str(root), "--stack", "docker", "--resume", RUN_ID)
         output, _ = held.communicate(timeout=120)
         assert held.returncode != 0 and "driven by" in output, output
@@ -213,11 +272,18 @@ def test_a_run_killed_mid_way_resumes_on_the_stack_without_repeating_work(
         first.send_signal(signal.SIGKILL)
         first.wait(timeout=30)
     head_before = len(blackboard_paths(root, "events/_seq/"))
-    resumed = vlah("run", str(root), "--stack", "docker", "--resume", RUN_ID)
+    resumed = resume_once_the_lock_expires(root)
     try:
-        assert wait_until(
-            RESUME_TIMEOUT_SECONDS, lambda: follow_ups_done(root)
-        ), "the resumed run did not finish both workers' follow-ups"
+        finished = wait_until(RESUME_TIMEOUT_SECONDS, lambda: follow_ups_done(root))
+        if not finished:
+            resumed.kill()
+            printed, _ = resumed.communicate(timeout=60)
+            raise AssertionError(
+                "the resumed run did not finish both workers' follow-ups; it printed:\n"
+                f"{printed[-4000:]}"
+            )
+        else:
+            pass
     finally:
         stop = vlah("stop", str(root), "--run-id", RUN_ID)
         stop.wait(timeout=60)
