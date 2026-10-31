@@ -565,7 +565,8 @@ def run_herd(
         integrator_config=shlex.quote(str(wd / "integrator_config.json")),
     )
     # The herd runtime is trusted infrastructure: it gets the system key (it writes run-level events and
-    # the final as the runner). Keeping it from its own workers is the herd's job.
+    # the final as the runner). Keeping it from its own workers is the herd's job; it registers their
+    # tokens with POST /actors (DECISIONS I17).
     env = dict(
         os.environ,
         TB_RUN_ID=runner.run_id,
