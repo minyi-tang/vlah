@@ -43,6 +43,7 @@ from vlah.adapters.executor.kubernetes.client import (
 from vlah.adapters.executor.kubernetes.executor import KubernetesExecutor, PodResources
 from vlah.adapters.executor.local.executor import LocalExecutor
 from vlah.adapters.executor.local.workspace import ViewSettings
+from vlah.adapters.executor.sandbox.api import Sandbox
 from vlah.adapters.executor.sandbox.sandbox import ProcessSandbox
 from vlah.adapters.harness.claude_code.harness import (
     DEFAULT_MODEL_API_URLS,
@@ -63,7 +64,7 @@ from vlah.core.blackboard.api import Blackboard, PublicProblemFiles
 from vlah.core.blackboard.layout import PROBLEM_AUTHOR, init_layout, open_blackboard
 from vlah.core.budget.meter import KeyValueBudgetMeter
 from vlah.core.eval.api import EvalService
-from vlah.core.eval.jobs import GateOutcome
+from vlah.core.eval.jobs import BaselineScores, GateOutcome
 from vlah.core.eval.service import LadderEvalService
 from vlah.core.indexer.indexer import StoreIndexer
 from vlah.core.integrator.core_adapter import CoreCalibration
@@ -78,14 +79,21 @@ from vlah.core.types.params import GateSpec, Params
 from vlah.core.types.paths import may_create
 from vlah.ports.errors import NotSupportedError
 from vlah.ports.harness import Harness
+from vlah.ports.signal_source import SignalSource
 from vlah.ports.store import KeyValueStore
-from vlah.roles.critic.holdout import HoldoutCritic, SealedVerdict, integrator_params
+from vlah.roles.critic.holdout import (
+    HoldoutCritic,
+    SealedVerdict,
+    VerdictJudge,
+    integrator_params,
+)
 from vlah.runtime.assembly import RunComponents, RunContext
 from vlah.runtime.compose import compose_arm
 from vlah.runtime.driver import DriverLock
 from vlah.runtime.herd import top_level_source
 from vlah.runtime.status import KeyValueQueueCounts
 from vlah.testing.scripted_worker import SCRIPTS
+from vlah.tools.api import Recorder
 from vlah.tools.herd_tools import HerdTools
 from vlah.tools.server import McpToolServer
 
@@ -579,6 +587,18 @@ class LocalRunParts:
     driver_lock: DriverLock | None
 
 
+@dataclass(frozen=True, kw_only=True)
+class EvaluationSetup:
+    """The judge boundary; a missing verdict judge leaves holdouts to the arm runner."""
+
+    sources: tuple[SignalSource, ...]
+    baseline_scores: BaselineScores
+    calibration: CoreCalibration
+    integrator_params: Params
+    recorder: Recorder | None
+    verdict_judge: VerdictJudge | None
+
+
 @dataclass(kw_only=True)
 class LocalAssembly:
     """runtime.assembly.Assembly over the real adapters, for one machine."""
@@ -696,12 +716,7 @@ class LocalAssembly:
                 poll_seconds=self.executor_poll_seconds,
             )
         else:
-            sandbox = ProcessSandbox(
-                clock=context.clock,
-                work_directory=run_root / "egress",
-                protected_directories=protected_directories(problem.root, run_root),
-                allow_unenforced=self.allow_unenforced_egress,
-            )
+            sandbox = self.make_sandbox(context)
             return LocalExecutor(
                 sandbox_root=sandbox_root,
                 log_root=log_root,
@@ -716,19 +731,73 @@ class LocalAssembly:
                 poll_seconds=self.executor_poll_seconds,
             )
 
+    def baseline_directory(
+        self, context: RunContext, target_repository: Path, target_ref: str
+    ) -> Path:
+        return export_baseline(
+            target_repository, target_ref, context.run_root / "baseline0"
+        )
+
+    def evaluation(
+        self, context: RunContext, blackboard: Blackboard, baseline_directory: Path
+    ) -> EvaluationSetup:
+        judges = self.judges(context, context.run_root)
+        top_level = top_level_source(context.problem.sources)
+        if top_level is None:
+            raise ValueError("the problem declares no pull judge in eval/sources/")
+        else:
+            return EvaluationSetup(
+                sources=tuple(judges[source.id] for source in context.problem.sources),
+                baseline_scores=CommandBaselineScores(
+                    judges=judges,
+                    baseline_directory=baseline_directory,
+                    blackboard=blackboard,
+                ),
+                calibration=run_calibration(
+                    judges[top_level],
+                    baseline_directory,
+                    self.integrator_sigma,
+                    context.run_root / CALIBRATION_FILE_NAME,
+                ),
+                integrator_params=integrator_params(context.params, context.arm),
+                recorder=None,
+                verdict_judge=judges[top_level],
+            )
+
+    def make_sandbox(self, context: RunContext) -> Sandbox:
+        return ProcessSandbox(
+            clock=context.clock,
+            work_directory=context.run_root / "egress",
+            protected_directories=protected_directories(
+                context.problem.root, context.run_root
+            ),
+            allow_unenforced=self.allow_unenforced_egress,
+        )
+
+    def make_harness(self, context: RunContext) -> Harness:
+        return worker_harness(
+            context.problem.herd_config,
+            context.params,
+            tuple(source.id for source in context.problem.sources),
+        )
+
+    def public_files(self, context: RunContext) -> PublicProblemFiles:
+        return layout_files(context.problem.public_files)
+
     def build(self, context: RunContext) -> RunComponents:
         problem = context.problem
         run_root = context.run_root
         run_root.mkdir(parents=True, exist_ok=True)
         target_repository, target_ref = target_of(problem.herd_config)
-        baseline_directory = export_baseline(
-            target_repository, target_ref, run_root / "baseline0"
+        baseline_directory = self.baseline_directory(
+            context, target_repository, target_ref
         )
         blackboard = open_blackboard(run_root.parent, context.run_id, BLACKBOARD_NAME)
         if not blackboard.list_paths("spec.md", None):
-            init_layout(blackboard, layout_files(problem.public_files))
+            init_layout(blackboard, self.public_files(context))
         else:
             pass
+        evaluation = self.evaluation(context, blackboard, baseline_directory)
         objects = MemoryObjectStore()
         store = key_value_store(problem.herd_config, context)
         if self.driver_lock_ttl_seconds is not None:
@@ -772,20 +841,15 @@ class LocalAssembly:
             clock=context.clock,
         )
         meter = KeyValueBudgetMeter(store=store, limits=problem.limits)
-        judges = self.judges(context, run_root)
         gate_runner = CommandGateRunner(problem_root=problem.root)
         eval_service = LadderEvalService(
             blackboard=blackboard,
-            sources=tuple(judges[source.id] for source in problem.sources),
+            sources=evaluation.sources,
             indexer=indexer,
             budget=meter,
             gates=problem.gates,
             gate_runner=gate_runner,
-            baseline_scores=CommandBaselineScores(
-                judges=judges,
-                baseline_directory=baseline_directory,
-                blackboard=blackboard,
-            ),
+            baseline_scores=evaluation.baseline_scores,
             arm=context.arm,
             params=context.params,
             clock=context.clock,
@@ -803,7 +867,7 @@ class LocalAssembly:
                     eval_service=eval_service,
                     leases=leases,
                     router=router,
-                    recorder=None,
+                    recorder=evaluation.recorder,
                     arm=arm,
                     params=context.params,
                     clock=context.clock,
@@ -821,11 +885,7 @@ class LocalAssembly:
         executor = self.build_executor(
             context, blackboard, objects, tool_servers[0].server
         )
-        harness = worker_harness(
-            problem.herd_config,
-            context.params,
-            tuple(source.id for source in problem.sources),
-        )
+        harness = self.make_harness(context)
         integrator = HerdIntegrator(
             blackboard=blackboard,
             eval_service=eval_service,
@@ -834,18 +894,12 @@ class LocalAssembly:
             gates=problem.gates,
             gate_runner=gate_runner,
             arm=context.arm,
-            # The spot checks get holdout_run_cap less the Critic's rechecks (D66).
-            params=integrator_params(context.params, context.arm),
+            params=evaluation.integrator_params,
             clock=context.clock,
             top_level=top_level,
             work_directory=run_root / "integrator",
             baseline_directory=baseline_directory,
-            calibration=run_calibration(
-                judges[top_level],
-                baseline_directory,
-                self.integrator_sigma,
-                run_root / CALIBRATION_FILE_NAME,
-            ),
+            calibration=evaluation.calibration,
             waiter=SleepingWaiter(
                 eval_service=eval_service, seconds=self.waiter_seconds
             ),
@@ -857,22 +911,25 @@ class LocalAssembly:
             router=router,
             top_level=top_level,
         )
-        critic = HoldoutCritic(
-            blackboard=blackboard,
-            eval_service=eval_service,
-            integrator=integrator,
-            arm=context.arm,
-            params=context.params,
-            clock=context.clock,
-            top_level=top_level,
-            work_directory=run_root / "critic",
-            verdict=SealedVerdict(
-                judge=judges[top_level],
-                repeat_count=context.params.verdict_repeat_count,
-                deliverable_directory=DeliverableFiles(integrator=integrator),
-                metrics=metrics,
-            ),
-        )
+        if evaluation.verdict_judge is None:
+            critic = None
+        else:
+            critic = HoldoutCritic(
+                blackboard=blackboard,
+                eval_service=eval_service,
+                integrator=integrator,
+                arm=context.arm,
+                params=context.params,
+                clock=context.clock,
+                top_level=top_level,
+                work_directory=run_root / "critic",
+                verdict=SealedVerdict(
+                    judge=evaluation.verdict_judge,
+                    repeat_count=context.params.verdict_repeat_count,
+                    deliverable_directory=DeliverableFiles(integrator=integrator),
+                    metrics=metrics,
+                ),
+            )
         self.parts.append(
             LocalRunParts(
                 tool_servers=tool_servers,
