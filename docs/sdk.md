@@ -1,7 +1,7 @@
 # Python SDK
 
 > [!NOTE]
-> **Preview.** This page describes the public SDK we are building; the top-level names it imports (`vlah.Harness`, `vlah.SignalSource`, `vlah.adapters.executors`, `vlah.testing.check_executor`) are not exported yet. What runs today lives under `vlah.ports`, `vlah.adapters.*` and `vlah.runtime`; see [interfaces.md](interfaces.md) and [status.md](status.md). If your setup doesn't fit, [open an issue](https://github.com/minyi-tang/vlah/issues/new).
+> **Preview.** This page describes the public SDK we are building; the top-level names it imports (`vlah.Harness`, `vlah.SignalSource`, `vlah.adapters.executors`, `vlah.testing.check_executor`) are not exported yet. What runs today lives under `vlah.ports`, `vlah.adapters.*` and `vlah.runtime`; see [interfaces.md](interfaces.md). If your setup doesn't fit, [open an issue](https://github.com/minyi-tang/vlah/issues/new).
 
 The CLI covers the common path; the [quickstart](quickstart.md) walks through it. Use the SDK when you want to:
 - drive a herd from your own code;
