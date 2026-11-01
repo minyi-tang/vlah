@@ -6,7 +6,7 @@ import json
 import shutil
 from pathlib import Path
 
-from testbed.problem_api import load_problem, resolve_problem_dir
+from testbed.problem_api import copy_writable_file, load_problem, resolve_problem_dir
 
 HIDDEN_DIRS = {"hidden", "reference", "probes", "planted", "__pycache__"}
 HIDDEN_FILES = {"problem.yaml", "test_hidden.py", "pi_prompt.md"}
@@ -43,7 +43,7 @@ def pack_problem(name: str, out: Path) -> Path:
             continue
         q = out / rel
         q.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(p, q)
+        copy_writable_file(p, q)
     if write_worker_sites is not None:
         write_worker_sites(out)
     fast, detail = {}, {}

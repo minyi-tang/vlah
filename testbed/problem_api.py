@@ -1,8 +1,6 @@
-"""Problem protocol (spec 11.2), shared stats helpers, and the problem loader.
+"""Problem protocol (spec 11.2), shared statistics, and path-based problem loading.
 
-A problem package is a directory with ``__init__.py`` and ``problem.py`` exposing
-``load(root: Path) -> Problem``. It is loaded by path so the same code works in the
-repo (slow-eval machine, has hidden files) and in a packed worker copy (no hidden files).
+Built-ins load from a checkout or distribution; explicit paths select worker copies.
 """
 
 from __future__ import annotations
@@ -16,6 +14,8 @@ import math
 import multiprocessing
 import os
 import random
+import shutil
+import stat
 import sys
 from collections.abc import Iterator
 from concurrent.futures import ProcessPoolExecutor
@@ -23,11 +23,18 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Literal, Protocol
 
-REPO_ROOT = Path(__file__).resolve().parent.parent
-PROBLEMS_ROOT = REPO_ROOT / "problems"
+PACKAGE_ROOT = Path(__file__).resolve().parent
+REPO_ROOT = PACKAGE_ROOT.parent
+IS_CHECKOUT = (PACKAGE_ROOT / "pyproject.toml").is_file()
+PROBLEMS_ROOT = (REPO_ROOT if IS_CHECKOUT else PACKAGE_ROOT) / "problems"
 # Run state (slow-eval data and system key, runs, precheck and extras output): gitignored, never on workers.
 STATE_DIR = Path(
-    os.environ.get("TB_STATE_DIR") or REPO_ROOT / "private" / "testbed" / "var"
+    os.environ.get("TB_STATE_DIR")
+    or (
+        REPO_ROOT / "private" / "testbed" / "var"
+        if IS_CHECKOUT
+        else Path.home() / ".vlah-private" / "testbed" / "var"
+    )
 )
 
 
@@ -38,10 +45,11 @@ def private_dirs() -> list[Path]:
     ):  # behave as on CI or a worker: no hidden material
         return []
     out = [Path(os.environ["TB_PRIVATE"])] if os.environ.get("TB_PRIVATE") else []
-    return out + [
-        REPO_ROOT / "private" / "testbed",
-        Path.home() / ".vlah-private" / "testbed",
-    ]
+    if IS_CHECKOUT:
+        out.append(REPO_ROOT / "private" / "testbed")
+    else:
+        pass
+    return out + [Path.home() / ".vlah-private" / "testbed"]
 
 
 def hidden_root(problem_name: str) -> Path | None:
@@ -214,6 +222,12 @@ def iter_candidate_files(candidate_dir: Path):
             continue
         selected.append((rel.as_posix(), p))
     return sorted(selected)
+
+
+def copy_writable_file(source: Path, destination: Path) -> None:
+    """Copy a template into a writable workspace, preserving its executable bits."""
+    shutil.copy2(source, destination)
+    destination.chmod(stat.S_IMODE(destination.stat().st_mode) | stat.S_IWUSR)
 
 
 def content_hash(candidate_dir: Path) -> str:
