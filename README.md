@@ -6,7 +6,7 @@
 
 **Point a herd of AI agents at a hard optimization problem.<br>Come back to the changes that actually move your metric, already combined.**
 
-[![status: pre-alpha](https://img.shields.io/badge/status-pre--alpha-orange)](#status-and-roadmap)
+[![status: alpha](https://img.shields.io/badge/status-alpha-yellow)](docs/status.md)
 [![license: MIT](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 
 [Quickstart](docs/quickstart.md) •
@@ -20,7 +20,7 @@
 ---
 
 > [!NOTE]
-> **VLAH is pre-alpha.** The design is written and the code is being built now. The quickstart and SDK on this page show the interface we are building toward. They don't run yet. If it doesn't fit your problem, [tell us](#contributing) now, while it's cheap to change.
+> **VLAH is alpha.** The herd runs end to end on a real problem, on one machine, in Docker and on Kubernetes (kind), with Claude Code or GitHub Copilot workers. Interfaces still change: parts of the quickstart and the Python SDK page describe what we are building rather than what runs today, and each page says which. [Status and early findings](docs/status.md) has the details. If it doesn't fit your problem, [tell us](#contributing) now, while it's cheap to change.
 
 You have a metric that matters: a prompt-cache hit rate, p99 latency, or a pass rate on a benchmark you can't fake. Moving it takes changes in five different places, and each needs its own deep dive. The only number you trust comes from a benchmark that takes 30 minutes and can run twice an hour.
 
@@ -170,12 +170,15 @@ VLAH is a standalone runtime that touches the outside world only through six por
 VLAH is built on a bet that hasn't been proven yet: **with the same time and the same judge budget, agents that share what they learn will beat the same agents working alone and merged the same way.** The first thing we ship is the experiment that tests this bet. We will publish the result whichever way it comes out.
 
 - [x] Design ([overview](docs/design.md))
-- [ ] Testbed: two synthetic problems with a deliberately slow judge, and an automatic scorecard
-- [ ] Minimal herd running on the testbed, with in-memory and local adapters
-- [ ] Head-to-head: one agent vs. isolated agents vs. the herd, pre-registered and scored on a sealed holdout
-- [ ] Kubernetes, Redis and S3 adapters, plus the lead agent and Slack
-- [ ] Real problems
+- [x] Minimal herd: every component built, with in-memory and local adapters, and real runs on one machine (2026-10-24)
+- [x] Docker and Kubernetes (kind) executors, the blackboard over HTTP, Redis; the same `herd.yaml` runs on all three (2026-10-26)
+- [ ] Testbed: two synthetic problems with a deliberately slow judge, and an automatic scorecard (built; problem A is not yet hard enough for the gate)
+- [ ] Head-to-head: isolated agents vs. the herd, pre-registered and scored on a sealed holdout (the herd arm is in review; preregistration numbers pending)
+- [ ] S3 adapter, the lead agent and Slack
+- [ ] Real problems: candidates as changes to a whole repository, and the report files
 - [ ] The herd improves its own code, scored by the testbed
+
+What the first runs showed, and what alpha means here: [docs/status.md](docs/status.md).
 
 ## Related work
 

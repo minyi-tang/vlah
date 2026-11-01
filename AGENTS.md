@@ -6,7 +6,7 @@ These rules apply to every coding agent working in this repository, including Co
 
 VLAH runs many LLM agents on one hard optimization problem, where the only trustworthy judge is slow and scarce. The bet (H1) is that agents who share as they go beat the same agents working in isolation and merged the same way, with the same time and the same judge budget.
 
-**Where we are:** the Foundation (#4) and the 13 Wave-1 components (#11–#23) are done, and real runs work end to end on one machine. Wave 2 (#117–#124) has two tracks: Track A (#117–#121) makes every component work on a real problem and comes first; Track B (#122–#124) leads to the H1 comparison on the testbed. Wave L (#127–#132) is the local infrastructure track: every worker in its own container or pod on one machine (Docker, then kind), the blackboard over HTTP, Redis as the store; it runs alongside Wave 2 and adds the `infra` tests. The testbed (#10) is the herd's guardrail and semi-CI. The plan is the roadmap, #3.
+**Where we are:** the Foundation (#4), the 13 Wave-1 components (#11–#23) and the local infrastructure track Wave L (#127–#131: Docker, kind, the blackboard over HTTP, Redis, the `infra` tests) are done, and real runs work end to end on one machine, in containers and on kind. Wave 2 (#117–#124) has two tracks: Track A (#117–#121) makes every component work on a real problem and comes first (#119–#121 done; #117, #118 open); Track B (#122–#124) leads to the H1 comparison on the testbed (#123 done, #122 in review, #124 open). #132 (scale, the H12 check) is Wave L's last issue. [docs/status.md](docs/status.md) has the current state and the first findings. The testbed (#10) is the herd's guardrail and semi-CI. The plan is the roadmap, #3.
 
 ## Start here
 
