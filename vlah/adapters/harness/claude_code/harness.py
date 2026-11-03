@@ -48,7 +48,9 @@ from vlah.core.types.tasks import Task
 from vlah.ports.errors import NotSupportedError
 from vlah.ports.executor import AgentSpec, Handle, StartPack
 from vlah.ports.harness import ContextUsage, HookConfig, ToolEndpoint, Workspace
-from vlah.prompts.worker import render_worker_prompt
+from vlah.prompts.assemble import assemble
+from vlah.prompts.capabilities import McpServer
+from vlah.prompts.profile import WORKER, RoleProfile
 
 logger = logging.getLogger(__name__)
 
@@ -60,15 +62,6 @@ HOOK_MODULE = "vlah.adapters.harness.claude_code.hook"
 HOOK_TIMEOUT_SECONDS = 10
 # dontAsk runs exactly the allowed tools and denies anything that would prompt.
 DEFAULT_PERMISSION_MODE = "dontAsk"
-DEFAULT_ALLOWED_TOOLS = (
-    "Bash",
-    "Read",
-    "Edit",
-    "Write",
-    "Glob",
-    "Grep",
-    f"mcp__{HERD_SERVER_NAME}__*",
-)
 DEFAULT_MODEL_API_URLS = ("https://api.anthropic.com",)
 WRAP_UP_TOOLS = tuple(f"mcp__{HERD_SERVER_NAME}__{name}" for name in WRAP_UP_TOOL_NAMES)
 # Claude Code retries 429s and 529s itself with exponential backoff; the watchdog
@@ -92,7 +85,10 @@ class ClaudeCodeConfig:
     claude_command: tuple[str, ...] = ("claude",)
     python_executable: str = field(default_factory=lambda: sys.executable)
     permission_mode: str = DEFAULT_PERMISSION_MODE
-    allowed_tools: tuple[str, ...] = DEFAULT_ALLOWED_TOOLS
+    # The role's prompt and capabilities; herd.yaml may change the capability set.
+    profile: RoleProfile = WORKER
+    # Set only to run with other tools than the profile's capabilities grant.
+    allowed_tools: tuple[str, ...] | None = None
     # Hosts the agent's shell may reach, such as a local judge for quick checks.
     allowed_urls: tuple[str, ...] = ()
     # Where Claude Code reaches the model: the Anthropic API, or a gateway.
@@ -101,13 +97,34 @@ class ClaudeCodeConfig:
     environment: dict[str, str] = field(default_factory=dict[str, str])
 
 
-def mcp_config(tool_endpoint: ToolEndpoint) -> str:
-    server = {
-        "type": "http",
-        "url": tool_endpoint.url,
-        "headers": {"Authorization": f"Bearer {tool_endpoint.bearer_token}"},
-    }
-    return json.dumps({"mcpServers": {HERD_SERVER_NAME: server}}, indent=2)
+def mcp_config(tool_endpoint: ToolEndpoint, profile: RoleProfile) -> str:
+    """The herd's server when the profile has the herd capability, then the static
+    servers its other capabilities bring; nothing else loads (--strict-mcp-config)."""
+    servers = (
+        [
+            McpServer(
+                name=HERD_SERVER_NAME,
+                url=tool_endpoint.url,
+                headers={"Authorization": f"Bearer {tool_endpoint.bearer_token}"},
+            )
+        ]
+        if profile.has(HERD_SERVER_NAME)
+        else []
+    )
+    servers.extend(profile.mcp_servers())
+    return json.dumps(
+        {
+            "mcpServers": {
+                server.name: {
+                    "type": "http",
+                    "url": server.url,
+                    "headers": server.headers,
+                }
+                for server in servers
+            }
+        },
+        indent=2,
+    )
 
 
 def settings(python_executable: str) -> str:
@@ -127,7 +144,7 @@ def egress_policy(
     return session_policy(
         tool_endpoint,
         hook_config,
-        config.allowed_urls,
+        (*config.allowed_urls, *config.profile.allowed_urls()),
         url_rules(config.model_api_urls, "model_api"),
     )
 
@@ -149,6 +166,11 @@ class ClaudeCodeHarness:
     def command(self, prompt: str) -> tuple[str, ...]:
         config = self.config
         effort = ("--effort", config.effort) if config.effort else ()
+        allowed_tools = (
+            config.allowed_tools
+            if config.allowed_tools is not None
+            else config.profile.tools("claude_code")
+        )
         return (
             config.python_executable,
             "-m",
@@ -170,7 +192,7 @@ class ClaudeCodeHarness:
             "--permission-mode",
             config.permission_mode,
             "--allowedTools",
-            ",".join(config.allowed_tools),
+            ",".join(allowed_tools),
         )
 
     def build(
@@ -184,10 +206,10 @@ class ClaudeCodeHarness:
     ) -> AgentSpec:
         return AgentSpec(
             agent=agent,
-            command=self.command(render_worker_prompt(agent, task)),
+            command=self.command(assemble(self.config.profile, agent, task)),
             files={
                 **start_pack.files,
-                MCP_CONFIG_PATH: mcp_config(tool_endpoint),
+                MCP_CONFIG_PATH: mcp_config(tool_endpoint, self.config.profile),
                 SETTINGS_PATH: settings(self.config.python_executable),
             },
             env={

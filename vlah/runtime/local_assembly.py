@@ -79,6 +79,7 @@ from vlah.core.types.paths import may_create
 from vlah.ports.errors import NotSupportedError
 from vlah.ports.harness import Harness
 from vlah.ports.store import KeyValueStore
+from vlah.prompts.profile import WORKER, RoleProfile, with_capabilities
 from vlah.roles.critic.holdout import HoldoutCritic, SealedVerdict, integrator_params
 from vlah.runtime.assembly import RunComponents, RunContext
 from vlah.runtime.compose import compose_arm
@@ -370,10 +371,17 @@ def copilot_harness(herd_config: HerdConfig, params: Params) -> CopilotHarness:
             allowed_urls=setting_texts(settings, "allowed_urls"),
             copilot_command=command if command else ("copilot",),
             python_executable=worker_python(herd_config),
+            profile=worker_profile(herd_config),
             environment=setting_mapping(settings, "environment"),
         ),
         params=params,
     )
+
+
+def worker_profile(herd_config: HerdConfig) -> RoleProfile:
+    """The worker profile, with harness.settings.capabilities when herd.yaml sets it."""
+    names = setting_texts(herd_config.harness.settings, "capabilities")
+    return with_capabilities(WORKER, names) if names else WORKER
 
 
 def claude_code_harness(herd_config: HerdConfig, params: Params) -> ClaudeCodeHarness:
@@ -390,6 +398,7 @@ def claude_code_harness(herd_config: HerdConfig, params: Params) -> ClaudeCodeHa
             effort=setting_text(settings, "effort"),
             claude_command=command if command else ("claude",),
             python_executable=worker_python(herd_config),
+            profile=worker_profile(herd_config),
             allowed_urls=setting_texts(settings, "allowed_urls"),
             model_api_urls=model_api_urls if model_api_urls else DEFAULT_MODEL_API_URLS,
             environment=setting_mapping(settings, "environment"),
