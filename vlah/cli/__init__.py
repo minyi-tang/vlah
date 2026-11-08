@@ -25,8 +25,12 @@ from vlah.ports.errors import NotSupportedError
 from vlah.runtime.command import RunRequest, run_problem
 from vlah.runtime.stack import (
     DEFAULT_WORKER_IMAGE,
+    check_kind,
     check_stack,
     compose_yaml,
+    kind_cluster_yaml,
+    kind_down,
+    kind_up,
     print_checks,
     run_command,
     stack_down,
@@ -52,7 +56,26 @@ def add_run_arguments(
 
 
 def run_stack(arguments: argparse.Namespace) -> int:
-    if arguments.stack_command == "up":
+    if arguments.kind:
+        if arguments.stack_command == "up":
+            return kind_up(
+                run_command, sys.stdout, str(Path.home()), DEFAULT_WORKER_IMAGE
+            )
+        elif arguments.stack_command == "down":
+            return kind_down(run_command, sys.stdout)
+        elif arguments.stack_command == "check":
+            return print_checks(
+                check_kind(
+                    run_command,
+                    image=arguments.image,
+                    gateway_url=arguments.gateway_url,
+                ),
+                sys.stdout,
+            )
+        else:
+            sys.stdout.write(kind_cluster_yaml(str(Path.home())))
+            return 0
+    elif arguments.stack_command == "up":
         return stack_up(run_command, sys.stdout)
     elif arguments.stack_command == "down":
         return stack_down(run_command, sys.stdout, arguments.run, arguments.volumes)
@@ -168,6 +191,11 @@ def main(argv: list[str] | None = None) -> int:
     stack_parser = commands.add_parser(
         "stack", help="The herd's services on this machine (Docker): up, down, check."
     )
+    stack_parser.add_argument(
+        "--kind",
+        action="store_true",
+        help="The kind cluster for the Kubernetes executor instead of the compose services.",
+    )
     stack_commands = stack_parser.add_subparsers(dest="stack_command", required=True)
     stack_commands.add_parser(
         "up", help="Start the services (Redis) and wait for them."
@@ -192,7 +220,10 @@ def main(argv: list[str] | None = None) -> int:
     check_parser.add_argument(
         "--memory", default="2g", help="Memory per worker container, such as 2g."
     )
-    stack_commands.add_parser("compose", help="Print the compose file the stack uses.")
+    stack_commands.add_parser(
+        "compose",
+        help="Print the compose file (or, with --kind, the kind cluster config).",
+    )
     try:
         arguments = parser.parse_args(argv)
     except SystemExit as exit_status:
