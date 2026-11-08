@@ -1,9 +1,4 @@
-"""The worker prompt: the goal and taste, the enforced rules, the suggestions (D1, D35).
-
-The three parts are separate files because the P11 decision may move items between
-the rules and the suggestions. The prompt states a goal and never tells the agent to
-read particular material (D1); CONTEXT.md carries the material.
-"""
+"""Shared worker mission, required boundaries and tool protocols, and suggestions."""
 
 from importlib.resources import files
 from string import Template
@@ -13,7 +8,7 @@ from vlah.core.types.tasks import Task
 
 PARTS = (
     ("Goal", "goal.md"),
-    ("Rules the herd enforces", "rules.md"),
+    ("Boundaries and tool protocols", "rules.md"),
     ("Suggestions", "suggestions.md"),
 )
 

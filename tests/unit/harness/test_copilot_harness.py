@@ -29,6 +29,7 @@ from vlah.core.types.params import EgressPolicy, HostRule, Params
 from vlah.ports.errors import NotSupportedError
 from vlah.ports.executor import Handle, StartPack
 from vlah.ports.harness import HookConfig, ToolEndpoint, Workspace
+from vlah.prompts.worker import render_worker_prompt
 from vlah.testing.conformance import HarnessCheckInputs, check_harness
 
 pytestmark = pytest.mark.harness
@@ -83,6 +84,7 @@ def test_build_runs_copilot_with_the_herd_server_and_the_hook() -> None:
     copilot = command[3:]
     assert copilot[:2] == ["copilot", "-p"]
     assert "Make the solver faster." in copilot[2], "the prompt states the task's goal"
+    assert copilot[2] == render_worker_prompt(WORKER, TASK)
 
     def flag(name: str) -> str:
         return copilot[copilot.index(name) + 1]
@@ -121,6 +123,38 @@ def test_build_runs_copilot_with_the_herd_server_and_the_hook() -> None:
     assert "herd-repo_write" in spec.env["VLAH_WRAP_UP_TOOLS"].split(",")
     assert spec.env["SOME_PASSTHROUGH"] == "yes"
     assert spec.files["CONTEXT.md"] == START_PACK.files["CONTEXT.md"]
+
+
+def test_prompt_keeps_tool_formats_required_and_research_methods_optional() -> None:
+    """Formats required for successful tool calls were listed as optional advice."""
+    spec = harness().build(WORKER, TASK, START_PACK, ENDPOINT, HOOKS, WORKSPACE)
+    prompt = spec.command[spec.command.index("-p") + 1]
+    mission, protocols, suggestions = prompt.split("\n\n# ")
+    assert mission.startswith("# Goal\n")
+    assert f"You are {WORKER}" in mission
+    assert f"Your goal: {TASK.goal}" in mission
+    assert "Choose your own research methods" in mission
+    assert protocols.startswith("Boundaries and tool protocols\n")
+    assert f"claims/{WORKER}/" in protocols
+    for requirement in (
+        "repo_write",
+        "eval_request",
+        "private/",
+        "append-only",
+        "interrupt",
+        "nearly full",
+        "manifest.yaml",
+        ".git",
+        "YAML frontmatter",
+        "Each evidence item",
+    ):
+        assert requirement in protocols
+    assert suggestions.startswith("Suggestions\n")
+    assert "These are suggestions, not rules." in suggestions
+    assert "Isolate a change when" in suggestions
+    assert "combine changes when" in suggestions
+    assert "manifest.yaml" not in suggestions
+    assert "YAML frontmatter" not in suggestions
 
 
 def test_build_allows_the_herd_the_testbed_and_copilot_hosts_only() -> None:
