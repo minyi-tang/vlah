@@ -117,7 +117,7 @@ def run_testbed_arm(
         )
         run = herd.start()
         try:
-            wait_for(run, stream)
+            wait_for(run, stream, assembly)
             report = run.report()
             final = assembly.finalize(report)
             (herd.context.run_root / "final.json").write_text(
