@@ -1,7 +1,7 @@
 # Quickstart
 
 > [!NOTE]
-> **Pre-alpha.** Installation and the deterministic demo work today. The later problem-setup and real-run examples include planned interfaces, such as `vlah chat`. If something here wouldn't work for your problem, [open an issue](https://github.com/minyi-tang/vlah/issues/new).
+> **Alpha.** Steps 1 to 4, 6 and the commands under step 7 run today (`vlah init`, `sign`, `run`, `status`, `events`, `inbox`, `stop`, `report`, `search`, `demo`). Not yet: the lead agent in step 5 (`vlah chat`), answering inbox questions from the CLI (`vlah answer`), and the `report/` files in step 7, which [#117](https://github.com/minyi-tang/vlah/issues/117) and [#118](https://github.com/minyi-tang/vlah/issues/118) add. For a run that works end to end now, follow [examples/prompt_optimization](../examples/prompt_optimization/README.md). If something here wouldn't work for your problem, [open an issue](https://github.com/minyi-tang/vlah/issues/new). Changing it now is cheap.
 
 This guide takes you from a fresh clone to a combined patch for your own problem. The running example is raising the prompt-cache hit rate of an agent harness.
 
