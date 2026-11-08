@@ -28,6 +28,7 @@ from vlah.core.types.params import Params
 from vlah.ports.executor import Executor
 from vlah.ports.harness import Harness
 from vlah.roles.critic.holdout import HoldoutCritic
+from vlah.runtime.isolation import ViewPublisher
 from vlah.tools.api import ToolServer
 
 
@@ -85,6 +86,8 @@ class RunComponents:
     compose_tool_server: ToolServer
     target_repository: str
     target_ref: str
+    # Set when workers clone their views over the network instead of by path (#129).
+    view_publisher: ViewPublisher | None = None
     count_queued_tasks: CountQueuedTasks
     # None: verified claims go straight to the Integrator and nothing in the run
     # scores the verdict split (D66).

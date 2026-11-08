@@ -15,6 +15,9 @@ run keeps one judge quota (C3) and B1's verified candidates still merge in the
 background (D58).
 """
 
+from collections.abc import Mapping
+from typing import Protocol
+
 import yaml
 
 from vlah.arms.config import ArmConfig
@@ -108,3 +111,15 @@ def worker_view(
         return blackboard
     else:
         return blackboard.mirror(f"{run_id}-{agent}", keep)
+
+
+class ViewPublisher(Protocol):
+    """Serves each worker's view over the network (#129): the stack's blackboard."""
+
+    def publish(self, run_id: str, agent: ActorId, view: Blackboard) -> str:
+        """Make the view reachable; the URL the worker's sandbox clones."""
+        ...
+
+    def settings(self, agent: ActorId) -> Mapping[str, str]:
+        """Git settings that open that worker's view and no other's."""
+        ...

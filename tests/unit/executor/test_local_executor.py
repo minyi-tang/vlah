@@ -22,9 +22,20 @@ from tests.fixtures.executor import (
     running_executor,
     wait_for_file,
 )
+from tests.fixtures.tools import free_port
 from vlah.adapters.executor.local.traces import RESTART_HINT, STUB_TAG
-from vlah.adapters.executor.local.workspace import sandbox_paths, worker_environment
+from vlah.adapters.executor.local.workspace import (
+    GitCommandError,
+    sandbox_paths,
+    worker_environment,
+)
 from vlah.adapters.memory.store import MemoryObjectStore
+from vlah.adapters.store.git_http.server import (
+    GitHttpService,
+    ServedGitHttp,
+    clone_environment,
+)
+from vlah.core.blackboard.blackboard import StoreBlackboard
 from vlah.core.types.claims import parse_claim
 from vlah.core.types.clock import FakeClock, SystemClock
 from vlah.core.types.ids import ActorId
@@ -392,3 +403,38 @@ def test_the_sandbox_passes_the_worker_boundary_check(tmp_path: Path) -> None:
             )
         finally:
             tool_server.stop()
+
+
+def test_the_blackboard_is_cloned_over_http_with_the_sessions_token(
+    tmp_path: Path,
+) -> None:
+    """A view over HTTP (#129) opens only with the session's token, which travels as
+    git settings in the session's environment; without them the clone is refused."""
+    with running_executor(tmp_path, FakeClock()) as harness:
+        assert isinstance(harness.blackboard, StoreBlackboard)
+        store = harness.blackboard.store
+        service = GitHttpService(host="127.0.0.1", port=free_port())
+        served = ServedGitHttp.start(service)
+        try:
+            access = service.register_view(
+                "run-1", WORKER, getattr(store, "repository_path")
+            )
+            spec = harness.spec(QUICK_PROGRAM, env=clone_environment(access.token))
+            spec = spec.model_copy(update={"blackboard_clone_url": access.url})
+            handle = harness.executor.start(spec, TASK, START_PACK, harness.sink)
+            assert harness.executor.wait(handle, 10.0) is not None
+            assert (
+                harness.sandbox() / "blackboard" / "spec.md"
+            ).read_text() == "the spec"
+            unauthorized = harness.spec(QUICK_PROGRAM).model_copy(
+                update={"blackboard_clone_url": access.url}
+            )
+            with pytest.raises(GitCommandError):
+                harness.executor.start(
+                    unauthorized,
+                    TASK.model_copy(update={"id": "t-00002"}),
+                    START_PACK,
+                    harness.sink,
+                )
+        finally:
+            served.close()

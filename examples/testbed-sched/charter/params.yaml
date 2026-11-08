@@ -1,0 +1,15 @@
+slots_per_approach:
+  order: 1
+  admit: 1
+  place: 1
+  preempt: 1
+accept_rule: default
+accept_min_standard_errors: 1
+interaction_sigma_multiple: 2
+spot_check_every_merges: 2
+spot_check_sigma_multiple: 2.5
+spot_check_reserved_for_bisection: 3
+quota_integrator_total: 16
+quota_integrator_per_hour: 1
+holdout_run_cap: 10
+verdict_repeat_count: 5

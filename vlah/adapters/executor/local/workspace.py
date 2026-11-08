@@ -13,11 +13,13 @@ and objects. Each refresh deletes FETCH_HEAD, which would name the bare reposito
 The commit the target started from is kept as refs/vlah/base inside the clone.
 """
 
+import os
 import shutil
 import subprocess
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Protocol
 from urllib.parse import unquote, urlparse
 
 from vlah.core.types.ids import ActorId
@@ -44,19 +46,22 @@ INHERITED_VARIABLES = (
     "USER",
 )
 FORBIDDEN_VARIABLES = frozenset({"VLAH_PUSH_TOKEN"})
+GIT_SETTINGS_PREFIX = "GIT_CONFIG_"
 
 
 class GitCommandError(RuntimeError):
     pass
 
 
-def run_git(*arguments: str) -> str:
+def run_git(*arguments: str, environment: Mapping[str, str] | None = None) -> str:
+    """environment is added to the herd's own: the git settings a view needs (#129)."""
     completed = subprocess.run(
         ["git", *arguments],
         capture_output=True,
         text=True,
         timeout=GIT_TIMEOUT_SECONDS,
         check=False,
+        env={**os.environ, **(environment or {})},
     )
     if completed.returncode != 0:
         raise GitCommandError(
@@ -154,17 +159,64 @@ def resolve_in_clone(clone: str, ref: str) -> str:
     return run_git("-C", clone, "rev-parse", "FETCH_HEAD^{commit}").strip()
 
 
-def clone_blackboard(paths: SandboxPaths, clone_url: str) -> None:
+class ViewSettings(Protocol):
+    def __call__(self, agent: ActorId) -> Mapping[str, str]:
+        """Git settings that open this agent's view of the blackboard (#129)."""
+        ...
+
+
+def view_environment(
+    spec: AgentSpec, view_settings: ViewSettings | None
+) -> dict[str, str]:
+    """What the clone and refresh run with: the session's GIT_CONFIG_* entries and,
+    when the blackboard is served per worker, that worker's own settings."""
+    return {
+        **git_settings(spec.env),
+        **(dict(view_settings(spec.agent)) if view_settings is not None else {}),
+    }
+
+
+def git_settings(environment: Mapping[str, str]) -> dict[str, str]:
+    """The GIT_CONFIG_* entries of a session's environment: how a view over HTTP is
+    opened (its token as an extra header), and nothing else of the session's."""
+    return {
+        name: value
+        for name, value in environment.items()
+        if name.startswith(GIT_SETTINGS_PREFIX)
+    }
+
+
+def clone_blackboard(
+    paths: SandboxPaths, clone_url: str, environment: Mapping[str, str] | None = None
+) -> None:
     if paths.blackboard.exists():
         return
     else:
-        run_git("clone", "-q", "--no-local", clone_url, str(paths.blackboard))
+        run_git(
+            "clone",
+            "-q",
+            "--no-local",
+            clone_url,
+            str(paths.blackboard),
+            environment=environment,
+        )
         forget_origin(paths.blackboard)
 
 
-def refresh_blackboard(paths: SandboxPaths, clone_url: str) -> None:
+def refresh_blackboard(
+    paths: SandboxPaths, clone_url: str, environment: Mapping[str, str] | None = None
+) -> None:
     """Bring the clone up to the blackboard's head; local edits in it are discarded."""
-    run_git("-C", str(paths.blackboard), "fetch", "-q", "--no-tags", clone_url, "HEAD")
+    run_git(
+        "-C",
+        str(paths.blackboard),
+        "fetch",
+        "-q",
+        "--no-tags",
+        clone_url,
+        "HEAD",
+        environment=environment,
+    )
     run_git("-C", str(paths.blackboard), "reset", "-q", "--hard", "FETCH_HEAD")
     forget_origin(paths.blackboard)
 

@@ -1,0 +1,14 @@
+id: slow
+mode: pull
+latency: 600s
+# The service additionally enforces 2 per fixed hour window and 96 total.
+budget:
+  per_day: 48
+  allocated_by: human
+# Schema-only draft sentinel, not a measured or approved machine-hour cost.
+cost_machine_hours: 1
+# Unapproved draft policy; see charter/sources.md before signing.
+trust: 0
+readable_by: []
+noise:
+  n_for_ci: 20

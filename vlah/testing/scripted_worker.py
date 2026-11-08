@@ -87,6 +87,9 @@ PRUNED_DIRECTORIES = frozenset({"proc", "sys", "dev"})
 PROBE_TIMEOUT_SECONDS = 5.0
 GIT_TIMEOUT_SECONDS = 30.0
 HTTPS_PORT = 443
+# What the herd's allowlist proxy (vlah.adapters.executor.sandbox.proxy) answers.
+PROXY_DENIED_STATUS = 403
+PROXY_DENIED_TEXT = "outside the egress allowlist"
 
 
 class ScriptedTranscript(FrozenModel):
@@ -344,12 +347,20 @@ def sleep_forever(session: ScriptedWorkerSession) -> None:
 
 
 def attempt_fetch(url: str) -> str:
-    """reached when the URL answers with any HTTP status; blocked otherwise."""
+    """reached when the URL answers with any HTTP status; blocked otherwise.
+
+    An allowlist proxy answers a denied destination with a 403 of its own, so that
+    one status is read as blocked when its body says so.
+    """
     try:
         with urllib.request.urlopen(url, timeout=PROBE_TIMEOUT_SECONDS) as response:
             response.read()
-    except urllib.error.HTTPError:
-        return "reached"
+    except urllib.error.HTTPError as error:
+        body = error.read().decode("utf-8", errors="replace")
+        if error.code == PROXY_DENIED_STATUS and PROXY_DENIED_TEXT in body:
+            return "blocked: allowlist"
+        else:
+            return "reached"
     except (urllib.error.URLError, OSError, ValueError) as error:
         return f"blocked: {type(error).__name__}"
     return "reached"

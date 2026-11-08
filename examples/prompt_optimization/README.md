@@ -70,6 +70,53 @@ Every worker runs on `claude-opus-5-5` unless `--model` says otherwise. Each
 session gets a private Claude Code config directory, so your own settings, MCP
 servers and memory never load.
 
+## Workers in containers
+
+With `executor.kind: docker` every worker session runs in its own container of the
+worker image, on a Docker network with no route out; the only way to the model
+gateway, the tool server and the judge is the run's egress proxy container, which
+enforces the same allowlist as on the host (D75). The container sees nothing but its
+sandbox, mounted at `/work`. Build the image once from the repository root, then
+point `herd.yaml` at it; the paths in `harness.settings` are paths inside the image,
+and `host.docker.internal` is how a container reaches this machine:
+
+```bash
+docker build -t vlah-worker:dev -f deploy/worker/Dockerfile .
+```
+
+```yaml
+executor:
+  kind: docker
+  settings:
+    target_repository: ~/vlah-runs/prompt-opt-docker/target
+    target_ref: main
+    image: vlah-worker:dev
+    resources: {cpus: 2, memory: 2g}
+    mounts_read_only:
+      ~/litellm-copilot/claude-ghcp: /opt/gateway/claude-ghcp
+      ~/litellm-copilot/.env: /opt/gateway/.env
+harness:
+  kind: claude_code
+  settings:
+    command: [/opt/gateway/claude-ghcp]
+    model_api_urls: [http://host.docker.internal:4000]
+    effort: low
+    environment: {LITELLM_URL: http://host.docker.internal:4000}
+```
+
+`mounts_read_only` binds single files read-only into every worker container (never
+anything under the problem folder or the run directory); here the gateway wrapper and
+the file it reads its key from. Then run as before:
+
+```bash
+uv run vlah run ~/vlah-runs/prompt-opt-docker --arm S2 --workers 2 --hours 0.5
+```
+
+`docker ps --filter label=vlah.run=<run id>` lists a run's containers; the run
+removes them when it ends, and `logs/<run id>/<agent>-denied.tsv` holds every
+connection the proxy refused. `--unsafe-no-sandbox` puts the workers on a network
+with a route out, for development only.
+
 ## Change the problem
 
 - `target/prompt.md` is the thing being optimized. Replace it with your own prompt.
