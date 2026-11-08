@@ -56,18 +56,27 @@ def create_app(
         if not trusted(key):
             raise ApiError(403, {"reason": "testbed only"})
 
-    def actor_ok(run_id, actor, key, token):
+    def actor_ok(run_id, actor, key, token, route):
         if actor in SYSTEM_ACTORS and not trusted(key):
             raise ApiError(
                 403, {"reason": f"actor {actor!r} is reserved for the testbed"}
             )
-        se.check_actor(run_id, actor, token, trusted(key))
+        se.check_actor(run_id, actor, token, trusted(key), route)
         return actor
 
     @app.post("/runs")
     def runs(body: dict = Body(...), x_tb_key: str | None = Header(None)):
         need_system(x_tb_key)
         return se.create_run(body)
+
+    @app.post("/actors")
+    def register_actors(
+        body: dict = Body(...),
+        x_tb_run: str | None = Header(None),
+        x_tb_key: str | None = Header(None),
+    ):
+        need_system(x_tb_key)
+        return se.register_actors(need_run(x_tb_run), body)
 
     @app.post("/submit")
     def submit(
@@ -90,7 +99,9 @@ def create_app(
     ):
         run = need_run(x_tb_run)
         return se.fast(
-            run, body, actor_ok(run, x_tb_actor or "anon", x_tb_key, x_tb_token)
+            run,
+            body,
+            actor_ok(run, x_tb_actor or "anon", x_tb_key, x_tb_token, "/fast"),
         )
 
     @app.get("/status/{ticket}")
@@ -102,7 +113,9 @@ def create_app(
         x_tb_token: str | None = Header(None),
     ):
         run = need_run(x_tb_run)
-        return se.status(run, ticket, actor_ok(run, x_tb_actor, x_tb_key, x_tb_token))
+        return se.status(
+            run, ticket, actor_ok(run, x_tb_actor, x_tb_key, x_tb_token, "/status")
+        )
 
     @app.get("/history")
     def history(
@@ -112,7 +125,9 @@ def create_app(
         x_tb_token: str | None = Header(None),
     ):
         run = need_run(x_tb_run)
-        return se.history(run, actor_ok(run, x_tb_actor, x_tb_key, x_tb_token))
+        return se.history(
+            run, actor_ok(run, x_tb_actor, x_tb_key, x_tb_token, "/history")
+        )
 
     @app.get("/meta")
     def meta(x_tb_run: str | None = Header(None)):
@@ -128,7 +143,7 @@ def create_app(
     ):
         run = need_run(x_tb_run)
         if not trusted(x_tb_key):
-            se.check_actor(run, x_tb_actor, x_tb_token, False)
+            se.check_actor(run, x_tb_actor, x_tb_token, False, "/events")
         return se.post_events(
             run, body.get("events") or [], x_tb_actor, trusted=trusted(x_tb_key)
         )
@@ -159,7 +174,9 @@ def create_app(
     ):
         run = need_run(x_tb_run)
         return se.final(
-            run, body, actor_ok(run, x_tb_actor or "anon", x_tb_key, x_tb_token)
+            run,
+            body,
+            actor_ok(run, x_tb_actor or "anon", x_tb_key, x_tb_token, "/final"),
         )
 
     @app.post("/final_check")
