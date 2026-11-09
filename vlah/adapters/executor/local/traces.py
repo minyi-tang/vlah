@@ -86,7 +86,11 @@ def pointer_path(blackboard: Blackboard, agent: ActorId, task_id: str) -> str:
 
 
 def upload_logs(objects: ObjectStore, ended: EndedSession) -> dict[str, str]:
-    """Archive every log that exists; traces are never deleted (D33)."""
+    """Archive every log that exists; traces are never deleted (D33).
+
+    A log the worker replaced with a link is skipped: the archive is readable by
+    other workers, and a link could name a file only the driver may read.
+    """
     prefix = f"traces/{ended.agent}/{ended.task.id}/{ended.handle_id}/{ended.attempt}"
     pointers: dict[str, str] = {}
     for name, path in (
@@ -94,7 +98,9 @@ def upload_logs(objects: ObjectStore, ended: EndedSession) -> dict[str, str]:
         ("stderr", ended.logs.stderr),
         ("transcript", ended.logs.transcript),
     ):
-        if path.is_file():
+        if path.is_symlink():
+            logger.error(f"not archiving {name} of {ended.agent}: {path} is a link")
+        elif path.is_file():
             pointers[name] = objects.put(f"{prefix}/{name}", path.read_bytes(), False)
         else:
             pass

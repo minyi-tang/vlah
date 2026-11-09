@@ -290,3 +290,47 @@ def test_a_resumed_run_keeps_the_critics_rechecks_and_refutations(
     deliverable = second.report().deliverable
     assert (deliverable.k, len(deliverable.candidates)) == (1, 1), "lucky stays out"
     assert_each_event_once(second.components.blackboard)
+
+
+def test_a_follow_up_claimed_but_not_yet_leased_at_the_crash_is_queued_again(
+    tmp_path: Path,
+) -> None:
+    """The worker loop takes a task off the queue, starts the session, and only then
+    acquires the lease. A crash in between leaves the task in no queue and under no
+    lease. The queue tops up advance tasks, but a result has one follow-up (D28), so
+    the resume queues it again, once, until it is done (#164)."""
+    clock = FakeClock()
+    assembly = MemoryAssembly(
+        clock=clock,
+        root=tmp_path,
+        use_real_eval=True,
+        use_real_integrator=True,
+        durable=True,
+    )
+    first = prepare(assembly, clock, tmp_path)
+    first.supervisor.tick(clock.now_seconds())
+    submit_on_a_task(
+        first, WORKER_ONE, write_candidate(tmp_path / "a", WORKER_ONE, {"A": 2.0}, 0)
+    )
+    judge_and_integrate(first, clock)
+    follow_up = first.components.task_queue.claim_task(WORKER_ONE)
+    assert follow_up is not None and follow_up.kind == "result_followup"
+    assert follow_up.id not in queued_task_ids(first), "claimed: it left the queue"
+    assert first.components.leases.active() == (), "and no lease names it yet"
+    first.supervisor.stop_signal.set()
+
+    second = prepare(assembly, clock, tmp_path)
+    assert queued_task_ids(second).count(follow_up.id) == 1, "queued again"
+    second.supervisor.stop_signal.set()
+    third = prepare(assembly, clock, tmp_path)
+    assert queued_task_ids(third).count(follow_up.id) == 1, "never queued twice"
+    assert third.components.task_queue.claim_task(WORKER_ONE) == follow_up
+    third.components.leases.acquire(WORKER_ONE, follow_up, "handle-follow-up")
+    third.components.leases.release(WORKER_ONE)
+    third.components.task_queue.complete(follow_up.id, WORKER_ONE)
+    third.supervisor.stop_signal.set()
+
+    fourth = prepare(assembly, clock, tmp_path)
+    assert follow_up.id not in queued_task_ids(fourth), "a finished one never returns"
+    fourth.stop()
+    assert_each_event_once(fourth.components.blackboard)

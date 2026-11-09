@@ -15,8 +15,11 @@ from tests.fixtures.docker import FakeDockerClient
 from tests.fixtures.runtime import toy_problem
 from vlah.adapters.executor.docker.executor import ContainerResources, DockerExecutor
 from vlah.adapters.executor.local.executor import LocalExecutor
+from vlah.adapters.executor.local.passthrough import PassthroughSandbox
+from vlah.adapters.executor.sandbox.api import WrappedCommand
 from vlah.adapters.executor.sandbox.sandbox import ProcessSandbox
 from vlah.adapters.harness.claude_code.harness import ClaudeCodeHarness
+from vlah.adapters.harness.scripted.harness import ScriptedWorkerHarness
 from vlah.adapters.store.redis.store import RedisKeyValueStore
 from vlah.arms.config import PRESETS
 from vlah.core.integrator.service import HerdIntegrator
@@ -24,6 +27,7 @@ from vlah.core.problem.api import AdapterChoice, Problem
 from vlah.core.problem.loader import load_problem
 from vlah.core.types.clock import FakeClock
 from vlah.core.types.ids import ActorId
+from vlah.core.types.params import EgressPolicy
 from vlah.core.types.tasks import Task
 from vlah.runtime.assembly import RunContext
 from vlah.runtime.command import RunRequest, run_problem
@@ -34,6 +38,7 @@ from vlah.runtime.local_assembly import (
     key_value_store,
     worker_harness,
 )
+from vlah.runtime.map_scripts import NOT_RUN_OUTPUT, SandboxedScriptRunner
 
 pytestmark = pytest.mark.runtime
 
@@ -73,9 +78,23 @@ def run_context(problem: Problem, run_root: Path) -> RunContext:
     )
 
 
-def test_the_local_assembly_builds_every_real_component(tmp_path: Path) -> None:
+@pytest.mark.parametrize("scripted", [False, True], ids=["copilot", "scripted"])
+def test_the_local_assembly_builds_every_real_component(
+    tmp_path: Path, scripted: bool
+) -> None:
     root = example_problem(tmp_path)
     problem = load_problem(root)
+    if scripted:
+        problem = dataclasses.replace(
+            problem,
+            herd_config=problem.herd_config.model_copy(
+                update={
+                    "harness": AdapterChoice(
+                        kind="scripted", settings={"script": "sleep"}
+                    )
+                }
+            ),
+        )
     context = run_context(problem, root / ".herd" / "runs" / "r-1")
     assembly = LocalAssembly(allow_unenforced_egress=True, executor_poll_seconds=0.5)
     components = assembly.build(context)
@@ -86,9 +105,14 @@ def test_the_local_assembly_builds_every_real_component(tmp_path: Path) -> None:
         assert isinstance(integrator, HerdIntegrator)
         assert integrator.calibration.score == BASELINE_DAILY_SCORE
         assert integrator.calibration.audit_per_seed is not None
+        assert isinstance(integrator.script_runner, SandboxedScriptRunner)
         assert integrator.current().k == 0
         assert (context.run_root / "baseline0" / "prompt.md").exists()
         assert components.target_repository == str(root / "target")
+        if scripted:
+            assert isinstance(components.harness, ScriptedWorkerHarness)
+            assert components.harness.config.source_ids == ("rubric",)
+            assert components.harness.config.script == "sleep"
         executor = assembly.parts[0].executor
         assert isinstance(executor, LocalExecutor)
         assert executor.sandbox_root == root / ".herd" / "sandboxes" / "r-1"
@@ -374,3 +398,42 @@ def test_a_second_driver_of_the_same_run_is_refused_until_the_first_closes(
         assert second.parts[0].driver_lock.is_held
     finally:
         second.close()
+
+
+class RefusingSandbox(PassthroughSandbox):
+    def wrap(
+        self,
+        agent: ActorId,
+        argv: tuple[str, ...],
+        env: dict[str, str],
+        policy: EgressPolicy,
+    ) -> WrappedCommand:
+        raise RuntimeError("no OS-level egress enforcement on this platform")
+
+
+def test_a_map_script_sees_none_of_the_drivers_environment_and_never_runs_unsandboxed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A worker's map script ran as the driver and printed the testbed's system key
+    into its output on the blackboard."""
+    monkeypatch.setenv("TB_SYSTEM_KEY", "operator-secret")
+    baseline = tmp_path / "baseline"
+    baseline.mkdir()
+    (baseline / "params.yaml").write_text("weight: 1\n")
+    script = tmp_path / "measure.py"
+    script.write_text(
+        "import os, pathlib, sys\n"
+        "baseline = pathlib.Path(sys.argv[1])\n"
+        "print(os.environ.get('TB_SYSTEM_KEY'), sorted(path.name for path in baseline.iterdir()))\n"
+        "(baseline / 'written').touch()\n"
+    )
+    runner = SandboxedScriptRunner(
+        sandbox=PassthroughSandbox(), scratch_root=tmp_path / "scratch"
+    )
+    assert runner(script, baseline).strip() == "None ['params.yaml']"
+    assert not (baseline / "written").exists(), "the script got a copy"
+    assert list((tmp_path / "scratch").iterdir()) == []
+    refused = SandboxedScriptRunner(
+        sandbox=RefusingSandbox(), scratch_root=tmp_path / "scratch"
+    )
+    assert refused(script, baseline) == NOT_RUN_OUTPUT
