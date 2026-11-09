@@ -29,7 +29,8 @@ uv run vlah --version
 ### From built artifacts
 
 No PyPI publication is assumed. From a checkout, build both distributions, then
-install only the VLAH wheel into an environment outside the repository:
+install both wheels by path into an environment outside the repository. Naming the
+testbed wheel keeps the installer from fetching a package of that name from an index:
 
 ```bash
 uv build --all-packages --no-sources
@@ -37,7 +38,8 @@ artifacts="$PWD/dist"
 install_dir="$(mktemp -d)"
 uv venv "$install_dir/.venv" --python 3.11
 uv pip install --python "$install_dir/.venv/bin/python" \
-  --find-links "$artifacts" "$artifacts/vlah-0.0.1-py3-none-any.whl"
+  "$artifacts/vlah_testbed-0.1.0-py3-none-any.whl" \
+  "$artifacts/vlah-0.0.1-py3-none-any.whl"
 cd "$install_dir"
 .venv/bin/vlah --version
 .venv/bin/vlah --help
