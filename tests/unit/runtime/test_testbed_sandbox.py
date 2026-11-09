@@ -28,6 +28,7 @@ from vlah.ports.executor import AgentSpec, StartPack
 from vlah.ports.harness import HookConfig, ToolEndpoint, Workspace
 from vlah.runtime.assembly import RunComponents, RunContext
 from vlah.runtime.local_assembly import LocalAssembly
+from vlah.runtime.map_scripts import SandboxedScriptRunner
 from vlah.runtime.testbed_assembly import TestbedAssembly as ArmAssembly
 from vlah.runtime.testbed_problem import SLOW_ADAPTER
 from vlah.runtime.testbed_sandbox import TestbedSandbox as WorkerSandbox
@@ -129,6 +130,110 @@ def test_worker_cannot_read_the_repo_operator_files_or_another_worker(
         assert not (runtime / "testbed" / "integrator").exists()
     finally:
         sandbox.close()
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="Seatbelt is a macOS boundary")
+def test_a_map_script_cannot_read_operator_files_or_the_system_key(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A worker-written map script ran as the driver: it printed the system key from
+    the environment and could read the operator's files."""
+    monkeypatch.setenv("TB_SYSTEM_KEY", "operator-secret")
+    operator_file = tmp_path / "operator" / "system.key"
+    operator_file.parent.mkdir()
+    operator_file.write_text("operator-secret")
+    baseline = tmp_path / "baseline"
+    baseline.mkdir()
+    (baseline / "params.yaml").write_text("weight: 1\n")
+    script = tmp_path / "measure.py"
+    script.write_text(
+        "import os, pathlib, sys\n"
+        "print(os.environ.get('TB_SYSTEM_KEY'))\n"
+        "print((pathlib.Path(sys.argv[1]) / 'params.yaml').read_text().strip())\n"
+        f"try:\n    print(pathlib.Path({str(operator_file)!r}).read_text())\n"
+        "except PermissionError:\n    print('denied')\n"
+    )
+    sandbox = WorkerSandbox(
+        clock=FakeClock(),
+        work_directory=tmp_path / "egress",
+        worker_runtime=stage_worker_runtime(tmp_path / "worker-runtime"),
+    )
+    try:
+        output = SandboxedScriptRunner(
+            sandbox=sandbox, scratch_root=tmp_path / "sandboxes" / "map-scripts"
+        )(script, baseline)
+    finally:
+        sandbox.close()
+    assert output.splitlines() == ["None", "weight: 1", "denied"]
+
+
+WRITE_PROBE = """
+import json, os, pathlib, sys
+root = pathlib.Path(sys.argv[1])
+attempts = {
+    "blackboard file": lambda: (root / "blackboard" / "planted.md").write_text("x"),
+    "git config": lambda: (root / "target" / ".git" / "config").open("a").write("[core]\\n"),
+    "git hook": lambda: (root / "target" / ".git" / "hooks" / "reference-transaction").write_text("x"),
+    "move git directory": lambda: os.rename(root / "target" / ".git", root / "target" / "moved"),
+    "move target": lambda: os.rename(root / "target", root / "moved"),
+    "policy file": lambda: (root / "target" / "policy" / "params.yaml").write_text("x"),
+    "git index": lambda: (root / "target" / ".git" / "index").write_text("x"),
+}
+refused = []
+for name, attempt in attempts.items():
+    try:
+        attempt()
+    except PermissionError:
+        refused.append(name)
+print(json.dumps(refused))
+"""
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="Seatbelt is a macOS boundary")
+def test_worker_cannot_plant_git_settings_the_driver_would_run(tmp_path: Path) -> None:
+    """The driver runs git in the worker's clones outside the sandbox; a worker that
+    set core.fsmonitor or added a hook there got its command run with the driver's
+    environment."""
+    worker = tmp_path / "worker"
+    (worker / "blackboard").mkdir(parents=True)
+    (worker / "target" / "policy").mkdir(parents=True)
+    subprocess.run(["git", "init", "-q", str(worker / "target")], check=True)
+    sandbox = WorkerSandbox(
+        clock=FakeClock(),
+        work_directory=tmp_path / "egress",
+        worker_runtime=stage_worker_runtime(tmp_path / "worker-runtime"),
+    )
+    try:
+        wrapped = sandbox.wrap(
+            ActorId("worker-01"),
+            (sys.executable, "-c", WRITE_PROBE, str(worker.resolve())),
+            {
+                "PATH": os.environ["PATH"],
+                "VLAH_SANDBOX": str(worker),
+                "HOME": str(worker / ".home"),
+                "TMPDIR": str(worker / ".tmp"),
+            },
+            EgressPolicy(),
+        )
+        completed = subprocess.run(
+            wrapped.argv,
+            env=wrapped.env,
+            cwd=worker,
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
+        )
+    finally:
+        sandbox.close()
+    assert completed.returncode == 0, completed.stderr
+    assert json.loads(completed.stdout) == [
+        "blackboard file",
+        "git config",
+        "git hook",
+        "move git directory",
+        "move target",
+    ]
 
 
 @pytest.mark.parametrize("layer", ["none", "linux-namespaces"])

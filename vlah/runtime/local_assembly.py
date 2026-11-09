@@ -91,6 +91,7 @@ from vlah.runtime.assembly import RunComponents, RunContext
 from vlah.runtime.compose import compose_arm
 from vlah.runtime.driver import DriverLock
 from vlah.runtime.herd import top_level_source
+from vlah.runtime.map_scripts import MAP_SCRIPTS_DIRECTORY, SandboxedScriptRunner
 from vlah.runtime.status import KeyValueQueueCounts
 from vlah.testing.scripted_worker import SCRIPTS
 from vlah.tools.api import Recorder
@@ -900,6 +901,11 @@ class LocalAssembly:
             work_directory=run_root / "integrator",
             baseline_directory=baseline_directory,
             calibration=evaluation.calibration,
+            script_runner=SandboxedScriptRunner(
+                sandbox=self.make_sandbox(context),
+                scratch_root=sandbox_root_for(run_root, context.run_id)
+                / MAP_SCRIPTS_DIRECTORY,
+            ),
             waiter=SleepingWaiter(
                 eval_service=eval_service, seconds=self.waiter_seconds
             ),

@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from testbed.integrator.core import IntegratorConfig
+from vlah.adapters.executor.local.workspace import sandbox_paths
 from vlah.adapters.executor.sandbox.api import WrappedCommand
 from vlah.adapters.executor.sandbox.macos import quoted
 from vlah.adapters.executor.sandbox.sandbox import LAYER_MACOS, ProcessSandbox
@@ -100,6 +101,8 @@ class TestbedSandbox(ProcessSandbox):
                 directory.mkdir(parents=True, exist_ok=True, mode=0o700)
         wrapped = super().wrap(agent, argv, env, policy)
         profile = self.work_directory / f"{agent}.sb"
+        paths = sandbox_paths(sandbox_root)
+        git_directory = paths.target / ".git"
         read_paths = (
             *SYSTEM_READ_PATHS,
             Path(sys.prefix),
@@ -125,6 +128,22 @@ class TestbedSandbox(ProcessSandbox):
             ),
             f"(allow file-read* file-write* (subpath {quoted(str(sandbox_root))}))",
             '(allow file-read* file-write* (subpath "/dev"))',
+            # note (Claude): The driver runs git in both clones outside this sandbox, so
+            # the worker must not be able to plant configuration or hooks there, nor
+            # swap either directory for one that carries them.
+            *(
+                f"(deny file-write* (subpath {quoted(str(path))}))"
+                for path in (
+                    paths.blackboard,
+                    git_directory / "config",
+                    git_directory / "hooks",
+                    git_directory / "info",
+                )
+            ),
+            *(
+                f"(deny file-write* (literal {quoted(str(path))}))"
+                for path in (paths.target, git_directory)
+            ),
         ]
         with profile.open("a", encoding="utf-8") as output:
             output.write("\n".join(rules) + "\n")

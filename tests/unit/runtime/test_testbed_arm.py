@@ -12,6 +12,7 @@ import pytest
 
 from testbed.cli.client import write_manifest, zip_candidate
 from testbed.integrator.core import IntegratorConfig
+from tests.fixtures.herd import make_store_blackboard
 from tests.unit.runtime.testbed_support import (
     RunningService,
     ScriptedCliHarness,
@@ -22,6 +23,7 @@ from tests.unit.runtime.testbed_support import (
 )
 from vlah.adapters.executor.local.passthrough import PassthroughSandbox
 from vlah.adapters.harness.scripted.harness import ScriptedWorkerHarness
+from vlah.adapters.memory.store import MemoryKeyValueStore
 from vlah.adapters.signal.testbed_http.client import SlowTierClient
 from vlah.arms.config import PRESETS
 from vlah.cli import main
@@ -29,13 +31,16 @@ from vlah.core.blackboard.api import MergedCommit
 from vlah.core.integrator.core_adapter import config_from_params
 from vlah.core.integrator.service import HerdIntegrator
 from vlah.core.problem.loader import load_problem
+from vlah.core.queue.queue import KeyValueLeases, KeyValueTaskQueue
 from vlah.core.types.candidates import candidate_hash
 from vlah.core.types.clock import FakeClock
 from vlah.core.types.events import BaselineAdvanced
 from vlah.core.types.ids import ActorId
+from vlah.core.types.tasks import Task
 from vlah.ports.errors import NotSupportedError
 from vlah.ports.executor import AgentSpec
 from vlah.runtime.assembly import RunComponents, RunContext
+from vlah.runtime.testbed_assembly import CandidateLeases
 from vlah.runtime.testbed_assembly import TestbedAssembly as ArmAssembly
 from vlah.runtime.testbed_problem import convert_testbed_problem
 from vlah.runtime.testbed_workers import TestbedHarness as ArmHarness
@@ -82,6 +87,7 @@ def test_arm_cli_submits_merges_and_records_the_exact_final(
 
     def record_merges(assembly: ArmAssembly, context: RunContext) -> RunComponents:
         components = real_build(assembly, context)
+        assert isinstance(components.leases, CandidateLeases)
         components.blackboard.subscribe(finish_after_two_merges)
         return components
 
@@ -286,6 +292,41 @@ def test_arm_cli_submits_merges_and_records_the_exact_final(
         )["score"]
         == -880.0
     )
+
+
+def test_heartbeats_name_files_as_a_baseline_advance_does() -> None:
+    """A merge that changed params.yaml never told the worker editing it to rebase:
+    the lease said policy/params.yaml and the merge said params.yaml, so router rule 6
+    found no shared file."""
+    clock = FakeClock()
+    store = MemoryKeyValueStore(clock=clock, namespace="run-1")
+    leases = KeyValueLeases(
+        store=store,
+        task_queue=KeyValueTaskQueue(store=store),
+        blackboard=make_store_blackboard(clock),
+        clock=clock,
+        lease_ttl_seconds=600.0,
+    )
+    worker = ActorId("worker-01")
+    task = Task(
+        id="t-01",
+        approach="order",
+        kind="advance",
+        goal="Advance the scheduler policy.",
+        created_by="queue",
+    )
+    candidate_leases = CandidateLeases(leases=leases)
+    candidate_leases.acquire(worker, task, "handle-1")
+    candidate_leases.beat(
+        worker,
+        ("notes.md", "policy/manifest.yaml", "policy/params.yaml"),
+        clock.now_seconds(),
+    )
+    lease = leases.get(worker)
+    assert lease is not None
+    assert lease.files_touched == ("manifest.yaml", "params.yaml")
+    merged_files = {"params.yaml"}
+    assert merged_files & set(lease.files_touched), "rule 6 can match the merge"
 
 
 def test_conversion_keeps_candidate_hashes_and_operator_policy(

@@ -3,7 +3,7 @@
 import hmac
 import math
 import shutil
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Literal
 
@@ -21,7 +21,9 @@ from vlah.adapters.signal.testbed_http.client import (
 )
 from vlah.core.blackboard.api import Blackboard, MergedCommit, PublicProblemFiles
 from vlah.core.integrator.core_adapter import CoreCalibration, config_from_params
+from vlah.core.queue.api import HandleLiveness, Leases
 from vlah.core.types.ids import ActorId
+from vlah.core.types.tasks import Lease, Task
 from vlah.ports.errors import NotSupportedError
 from vlah.ports.harness import Harness
 from vlah.ports.signal_source import CandidateRef, Dataset
@@ -43,6 +45,7 @@ from vlah.runtime.local_assembly import (
     worker_python,
 )
 from vlah.runtime.testbed_problem import (
+    CANDIDATE_DIRECTORY,
     PACKED_DIRECTORY,
     packed_files,
     require_approved_template,
@@ -164,6 +167,54 @@ class TestbedMergeRecorder:
             pass
 
 
+@dataclass(frozen=True, kw_only=True)
+class CandidateLeases:
+    """The run's leases, with heartbeat paths relative to the candidate directory.
+
+    A baseline advance names the files it changed relative to the candidate, which
+    here is a directory inside the target, while the executor reports paths relative
+    to the target. Router rule 6 intersects the two, so both use the candidate's frame.
+    """
+
+    leases: Leases
+
+    def acquire(self, agent: ActorId, task: Task, handle_id: str) -> Lease:
+        return self.leases.acquire(agent, task, handle_id)
+
+    def beat(
+        self, agent: ActorId, files_touched: tuple[str, ...], timestamp_seconds: float
+    ) -> None:
+        candidate_prefix = f"{CANDIDATE_DIRECTORY}/"
+        self.leases.beat(
+            agent,
+            tuple(
+                path.removeprefix(candidate_prefix)
+                for path in files_touched
+                if path.startswith(candidate_prefix)
+            ),
+            timestamp_seconds,
+        )
+
+    def add_targets(
+        self, agent: ActorId, claim_ids: tuple[str, ...], depends_on: tuple[str, ...]
+    ) -> None:
+        self.leases.add_targets(agent, claim_ids, depends_on)
+
+    def release(self, agent: ActorId) -> None:
+        self.leases.release(agent)
+
+    def get(self, agent: ActorId) -> Lease | None:
+        return self.leases.get(agent)
+
+    def active(self) -> tuple[Lease, ...]:
+        return self.leases.active()
+
+    def reclaim_stale(
+        self, now_seconds: float, liveness: HandleLiveness
+    ) -> tuple[str, ...]:
+        return self.leases.reclaim_stale(now_seconds, liveness)
+
+
 @dataclass(kw_only=True)
 class TestbedAssembly(LocalAssembly):
     """The Assembly interface used by build_herd and observability wrappers."""
@@ -240,13 +291,18 @@ class TestbedAssembly(LocalAssembly):
                     "the slow tier did not acknowledge fast-only scope for every worker"
                 )
             else:
-                return super().build(context)
+                components = super().build(context)
+                return replace(
+                    components, leases=CandidateLeases(leases=components.leases)
+                )
 
     def baseline_directory(
         self, context: RunContext, target_repository: Path, target_ref: str
     ) -> Path:
         return export_baseline(
-            target_repository, f"{target_ref}:policy", context.run_root / "baseline0"
+            target_repository,
+            f"{target_ref}:{CANDIDATE_DIRECTORY}",
+            context.run_root / "baseline0",
         )
 
     def public_files(self, context: RunContext) -> PublicProblemFiles:

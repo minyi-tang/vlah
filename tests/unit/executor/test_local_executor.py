@@ -236,6 +236,28 @@ def test_the_worker_environment_holds_no_push_token(tmp_path: Path) -> None:
             )
 
 
+def test_a_log_replaced_by_a_link_is_not_archived(tmp_path: Path) -> None:
+    """A worker linked its transcript to a file only the driver may read; the upload
+    archived that file where other workers could read it."""
+    operator_file = tmp_path / "system.key"
+    operator_file.write_text("operator-secret")
+    link_transcript = (
+        "import os; transcript = os.environ['VLAH_TRANSCRIPT']; "
+        "os.path.lexists(transcript) and os.remove(transcript); "
+        f"os.symlink({str(operator_file)!r}, transcript)"
+    )
+    with running_executor(tmp_path, FakeClock()) as harness:
+        harness.claims.written[(WORKER, TASK.id)] = ("c-worker-01-00001",)
+        handle = harness.executor.start(
+            harness.spec(link_transcript), TASK, START_PACK, harness.sink
+        )
+        assert harness.executor.wait(handle, 10.0) is not None
+        assert harness.executor.transcript_path(handle).is_symlink()
+        archived = harness.objects.objects
+        assert archived, "the other logs are still archived"
+        assert all(b"operator-secret" not in data for data in archived.values())
+
+
 def test_a_sandbox_inside_the_run_directory_is_refused(tmp_path: Path) -> None:
     with running_executor(
         tmp_path, FakeClock(), sandbox_root=tmp_path / "runs" / "run-1" / "sandboxes"

@@ -40,24 +40,36 @@ class ScriptRunner(Protocol):
         ...
 
 
+def run_measurement(
+    argv: tuple[str, ...],
+    working_directory: Path,
+    environment: dict[str, str] | None,
+) -> str:
+    """One measurement process and its output; an environment of None inherits this one."""
+    try:
+        completed = subprocess.run(
+            argv,
+            cwd=working_directory,
+            env=environment,
+            capture_output=True,
+            text=True,
+            timeout=SCRIPT_TIMEOUT_SECONDS,
+            check=False,
+        )
+    except subprocess.TimeoutExpired:
+        return f"timed out after {SCRIPT_TIMEOUT_SECONDS:g} s"
+    output = completed.stdout if completed.returncode == 0 else completed.stderr
+    return output[:OUTPUT_CHARACTERS]
+
+
 def run_script(script: Path, baseline_directory: Path) -> str:
-    """The default runner: the script under this Python, in a scratch copy of the baseline."""
+    """The default runner, for scripts the operator wrote: this Python and this
+    environment, in a scratch copy of the baseline. A run that lets workers add
+    scripts passes a sandboxed runner instead."""
     with tempfile.TemporaryDirectory() as scratch:
         copy = Path(scratch) / "baseline"
         shutil.copytree(baseline_directory, copy)
-        try:
-            completed = subprocess.run(
-                [sys.executable, str(script), str(copy)],
-                cwd=copy,
-                capture_output=True,
-                text=True,
-                timeout=SCRIPT_TIMEOUT_SECONDS,
-                check=False,
-            )
-        except subprocess.TimeoutExpired:
-            return f"timed out after {SCRIPT_TIMEOUT_SECONDS:g} s"
-        output = completed.stdout if completed.returncode == 0 else completed.stderr
-        return output[:OUTPUT_CHARACTERS]
+        return run_measurement((sys.executable, str(script), str(copy)), copy, None)
 
 
 def gap_summary(k: int, outputs: dict[str, str]) -> str:
