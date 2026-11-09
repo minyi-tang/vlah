@@ -5,11 +5,37 @@ on:
     branches: [main]
   pull_request:
 
+permissions:
+  contents: read
+
 concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
+  distributions:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@d0d8abe699bfb85fec6de9f7adb5ae17292296ff # v6
+        with:
+          version: "0.9.4"
+          python-version: "3.11"
+          enable-cache: false
+      - run: uv sync --locked --all-packages
+      - run: uv build --all-packages --no-sources
+      - name: Validate both installable distributions
+        run: >-
+          uv run python -m scripts.validate_distributions
+          --dist dist --manifest "$RUNNER_TEMP/distribution-validation.json"
+      - name: Exercise the uploader without credentials or uploads
+        run: uv publish --dry-run --trusted-publishing never --no-config dist/*.whl dist/*.tar.gz
+
   # Lint and formatting run in lint.yaml (pre-commit).
   types:
     runs-on: ubuntu-latest

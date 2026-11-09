@@ -1,0 +1,158 @@
+name: Release
+
+on:
+  workflow_dispatch:
+  push:
+    tags: ["v*", "testbed-v*"]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  RELEASE_ENVIRONMENT: pypi
+  RELEASE_PUBLISHING_ENABLED: ${{ vars.PYPI_PUBLISH_ENABLED }}
+  PYPI_INDEX_URL: https://pypi.org/simple/
+  PYPI_PUBLISH_URL: https://upload.pypi.org/legacy/
+  PYPI_JSON_URL: https://pypi.org/pypi
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    outputs:
+      publish: ${{ steps.bundle.outputs.publish }}
+      manifest-sha256: ${{ steps.bundle.outputs.manifest-sha256 }}
+      artifact-id: ${{ steps.upload.outputs.artifact-id }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@d0d8abe699bfb85fec6de9f7adb5ae17292296ff # v6
+        with:
+          version: "0.9.4"
+          python-version: "3.11"
+          enable-cache: false
+      - run: uv sync --locked --all-packages
+      - name: Validate event, version, protected history, and environment
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: uv run python -m scripts.release plan --output "$RUNNER_TEMP/release-plan.json"
+      - name: Run prerequisite tests and types
+        run: |
+          uv run pytest
+          uv run pyright
+      - name: Build original distributions once
+        run: uv build --all-packages --no-sources
+      - name: Validate the original wheels and source archives
+        run: >-
+          uv run python -m scripts.validate_distributions
+          --dist dist --manifest "$RUNNER_TEMP/distribution-validation.json"
+      - name: Stage only the selected validated bytes
+        id: bundle
+        run: >-
+          uv run python -m scripts.release prepare
+          --plan "$RUNNER_TEMP/release-plan.json"
+          --dist dist --validation-manifest "$RUNNER_TEMP/distribution-validation.json"
+          --output release-artifacts
+      - name: Exercise the uploader without credentials or uploads
+        env:
+          MANIFEST_SHA256: ${{ steps.bundle.outputs.manifest-sha256 }}
+        run: >-
+          uv run python -m scripts.release dry-run
+          --bundle release-artifacts --manifest-sha256 "$MANIFEST_SHA256"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        id: upload
+        with:
+          name: release-${{ github.run_id }}-${{ github.run_attempt }}
+          path: release-artifacts/
+          if-no-files-found: error
+          retention-days: 90
+
+  pypi:
+    needs: build
+    if: >-
+      github.repository == 'minyi-tang/vlah' &&
+      github.event_name == 'push' &&
+      github.ref_type == 'tag' &&
+      vars.PYPI_PUBLISH_ENABLED == 'true' &&
+      needs.build.outputs.publish == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment:
+      name: pypi
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@d0d8abe699bfb85fec6de9f7adb5ae17292296ff # v6
+        with:
+          version: "0.9.4"
+          python-version: "3.11"
+          enable-cache: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          artifact-ids: ${{ needs.build.outputs.artifact-id }}
+          merge-multiple: true
+          path: release-artifacts
+      - name: Verify the bundle and publish through OIDC
+        env:
+          GH_TOKEN: ${{ github.token }}
+          MANIFEST_SHA256: ${{ needs.build.outputs.manifest-sha256 }}
+        run: >-
+          uv run --isolated --no-project --no-config
+          --with pydantic==2.14.1 --with packaging==26.3
+          python -m scripts.release publish-pypi
+          --bundle release-artifacts --manifest-sha256 "$MANIFEST_SHA256"
+
+  github:
+    needs: [build, pypi]
+    if: >-
+      github.repository == 'minyi-tang/vlah' &&
+      github.event_name == 'push' &&
+      github.ref_type == 'tag' &&
+      vars.PYPI_PUBLISH_ENABLED == 'true' &&
+      needs.build.outputs.publish == 'true' &&
+      needs.pypi.result == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment:
+      name: pypi
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@d0d8abe699bfb85fec6de9f7adb5ae17292296ff # v6
+        with:
+          version: "0.9.4"
+          python-version: "3.11"
+          enable-cache: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          artifact-ids: ${{ needs.build.outputs.artifact-id }}
+          merge-multiple: true
+          path: release-artifacts
+      - name: Verify PyPI and promote the same files to GitHub
+        env:
+          GH_TOKEN: ${{ github.token }}
+          MANIFEST_SHA256: ${{ needs.build.outputs.manifest-sha256 }}
+        run: >-
+          uv run --isolated --no-project --no-config
+          --with pydantic==2.14.1 --with packaging==26.3
+          python -m scripts.release publish-github
+          --bundle release-artifacts --manifest-sha256 "$MANIFEST_SHA256"

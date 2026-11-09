@@ -28,6 +28,9 @@ Before you write or review code, read [docs/coding_style.md](docs/coding_style.m
 
 ## Pull requests
 
+For package version updates and operator-only publication, follow
+[Releasing the Python packages](docs/releases.md).
+
 ### Before you open one
 
 - Work on a branch. Never commit to `main`; a pre-commit check blocks it.
