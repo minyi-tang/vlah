@@ -202,6 +202,45 @@ def test_kind_up_creates_installs_calico_waits_and_loads_the_image() -> None:
     assert not any(call[:3] == ("kind", "create", "cluster") for call in existing.calls)
 
 
+def test_kind_up_gives_the_node_the_host_name_where_docker_does_not() -> None:
+    """On Docker Engine for Linux host.docker.internal did not resolve on the kind
+    node, so the pre-flight failed on every nightly run (#170)."""
+    linux = ScriptedDocker(
+        answers={
+            "getent ahostsv4": CommandResult(exit_code=2, stdout="", stderr=""),
+            "docker inspect": CommandResult(
+                exit_code=0, stdout="172.18.0.1 \n", stderr=""
+            ),
+        }
+    )
+    assert kind_up(linux, io.StringIO(), "/home/me", "vlah-worker:dev") == 0
+    hosts_writes = [call for call in linux.calls if "/etc/hosts" in call[-1]]
+    assert [call[:3] + call[-1:] for call in hosts_writes] == [
+        (
+            "docker",
+            "exec",
+            "vlah-control-plane",
+            "echo '172.18.0.1 host.docker.internal' >> /etc/hosts",
+        )
+    ]
+
+    desktop = ScriptedDocker(answers={})
+    assert kind_up(desktop, io.StringIO(), "/Users/me", "vlah-worker:dev") == 0
+    assert not any(
+        "/etc/hosts" in call[-1] for call in desktop.calls
+    ), "Docker Desktop's own answer for the name is left alone"
+
+    no_gateway = ScriptedDocker(
+        answers={
+            "getent ahostsv4": CommandResult(exit_code=2, stdout="", stderr=""),
+            "docker inspect": CommandResult(exit_code=0, stdout="\n", stderr=""),
+        }
+    )
+    stream = io.StringIO()
+    assert kind_up(no_gateway, stream, "/home/me", "vlah-worker:dev") == 1
+    assert "gateway of vlah-control-plane" in stream.getvalue()
+
+
 def test_check_kind_names_the_missing_cluster_and_the_pod_probe() -> None:
     no_cluster = ScriptedDocker(
         answers={

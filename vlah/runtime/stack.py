@@ -53,6 +53,7 @@ KIND_NODE = f"{KIND_CLUSTER}-control-plane"
 CALICO_MANIFEST_URL = "https://raw.githubusercontent.com/projectcalico/calico/v3.29.1/manifests/calico.yaml"
 CALICO_POD_SUBNET = "192.168.0.0/16"
 KIND_WAIT = "180s"
+NODE_GATEWAY_FORMAT = "{{range .NetworkSettings.Networks}}{{.Gateway}} {{end}}"
 HOST_PROBE = (
     "import socket, sys, urllib.error, urllib.request\n"
     "address = socket.gethostbyname(sys.argv[1])\n"
@@ -365,7 +366,8 @@ def kubectl(run: RunCommand, *arguments: str) -> CommandResult:
 
 
 def kind_up(run: RunCommand, stream: TextIO, home: str, image: str) -> int:
-    """Create the cluster if it is missing, install Calico, wait, load the worker image."""
+    """Create the cluster if it is missing, make this machine's name resolve on the
+    node, install Calico, wait, load the worker image."""
     clusters = run(("kind", "get", "clusters"))
     if KIND_CLUSTER in clusters.stdout.split():
         print(f"kind cluster {KIND_CLUSTER} exists", file=stream)
@@ -379,6 +381,42 @@ def kind_up(run: RunCommand, stream: TextIO, home: str, image: str) -> int:
             return 1
         else:
             print(f"kind cluster {KIND_CLUSTER} created", file=stream)
+    # Docker Desktop resolves the name for every container; Docker Engine on Linux
+    # does not, and pods on the node's network read the node's hosts file.
+    resolved = run(("docker", "exec", KIND_NODE, "getent", "ahostsv4", CONTAINER_HOST))
+    if resolved.passed:
+        pass
+    else:
+        gateway = run(("docker", "inspect", "--format", NODE_GATEWAY_FORMAT, KIND_NODE))
+        gateway_addresses = gateway.stdout.split()
+        if not gateway.passed or not gateway_addresses:
+            print(
+                f"could not find the gateway of {KIND_NODE}: {gateway.detail}",
+                file=stream,
+            )
+            return 1
+        else:
+            pass
+        hosts_line = f"{gateway_addresses[0]} {CONTAINER_HOST}"
+        added = run(
+            (
+                "docker",
+                "exec",
+                KIND_NODE,
+                "sh",
+                "-c",
+                f"echo '{hosts_line}' >> /etc/hosts",
+            )
+        )
+        if not added.passed:
+            print(
+                f"could not add {CONTAINER_HOST} to the hosts file of {KIND_NODE}: "
+                f"{added.detail}",
+                file=stream,
+            )
+            return 1
+        else:
+            print(f"{KIND_NODE} now resolves {hosts_line}", file=stream)
     calico = kubectl(run, "apply", "-f", CALICO_MANIFEST_URL)
     if not calico.passed:
         print(f"Calico did not apply: {calico.detail}", file=stream)
@@ -527,7 +565,10 @@ def check_kind(
                 f"{CONTAINER_HOST} resolves on the node"
                 + (" and the gateway answers" if "reached" in probe.stdout else "")
                 if "resolved" in probe.stdout
-                else f"{CONTAINER_HOST} does not resolve on the node: {probe.detail}"
+                else (
+                    f"{CONTAINER_HOST} does not resolve on the node; run vlah stack "
+                    f"--kind up ({probe.detail})"
+                )
             ),
         )
     )
