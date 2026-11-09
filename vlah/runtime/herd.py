@@ -10,7 +10,9 @@ fan-out; start starts the supervisor thread and returns the Run.
 A resumed run (vlah run --resume) is the same run in a new process: the same
 blackboard and key-value store, and the deadline from its original start. Every
 lease the store holds at prepare belongs to the earlier process, whose sessions
-this executor never started, so each is released and its task requeued once.
+this executor never started, so each is released and its task requeued once. A
+result's follow-up the earlier process left in no queue and under no lease is
+queued again too: nothing else would ever make it a second time (D28).
 
 The merge fan-out, on every merged commit:
 - feeds the Indexer and the Router;
@@ -49,6 +51,7 @@ from vlah.core.types.clock import Clock
 from vlah.core.types.events import Event, RemeasureReady, ResultReady, event_from_json
 from vlah.core.types.ids import ActorId
 from vlah.core.types.sources import SourceDecl
+from vlah.core.types.tasks import Task
 from vlah.core.worker.loop import InterruptInbox, WorkerDeps, run_worker
 from vlah.core.worker.start_pack import ContextSources
 from vlah.ports.harness import Workspace
@@ -98,11 +101,17 @@ def top_level_source(sources: tuple[SourceDecl, ...]) -> str | None:
         return ladder[-1].id
 
 
-def reclaim_earlier_leases(components: RunComponents) -> None:
-    """Release every lease an earlier process left, and requeue its task once (D32).
+def reclaim_earlier_work(
+    components: RunComponents, follow_ups: tuple[Task, ...]
+) -> None:
+    """Release every lease an earlier process left, and requeue its task once (D32);
+    then requeue every result follow-up that process left unheld (D28).
 
-    The queue refuses to requeue a task that is done, queued or still leased, so a
-    second resume requeues nothing twice.
+    A follow-up is unheld between the queue making it and listing it, and between
+    a worker taking it off the queue and its session getting a lease: a process
+    killed there leaves it in no queue and under no lease. The queue refuses to
+    requeue a task that is done, queued or still leased, so with every earlier
+    lease released only those come back, and a second resume requeues nothing twice.
     """
     for lease in components.leases.active():
         components.leases.release(lease.agent)
@@ -116,6 +125,15 @@ def reclaim_earlier_leases(components: RunComponents) -> None:
         )
         queue.requeue(
             lease.task_id, f"{lease.agent}'s session ended with an earlier process"
+        )
+    for follow_up in follow_ups:
+        queue = (
+            components.compose_queue
+            if follow_up.pool == "external"
+            else components.task_queue
+        )
+        queue.requeue(
+            follow_up.id, "an earlier process left it in no queue and under no lease"
         )
 
 
@@ -175,8 +193,11 @@ class RunFanout:
             else:
                 pass
 
-    def count_and_follow_up(self, event: Event) -> None:
-        """Both steps are idempotent, so a restart replays every earlier event here."""
+    def count_and_follow_up(self, event: Event) -> Task | None:
+        """Count a finished candidate's judge runs; return a result's follow-up task.
+
+        Both steps are idempotent, so a restart replays every earlier event here.
+        """
         finished = event.data
         if (
             isinstance(finished, (ResultReady, RemeasureReady))
@@ -199,9 +220,9 @@ class RunFanout:
                 if is_compose_result
                 else self.components.task_queue
             )
-            queue.on_result_ready(event)
+            return queue.on_result_ready(event)
         else:
-            pass
+            return None
 
 
 def events_on(blackboard: Blackboard) -> Iterator[Event]:
@@ -419,8 +440,10 @@ class LocalHerd:
         activity = RunActivity(clock=context.clock)
         # A fresh Indexer knows nothing merged before this process started.
         components.indexer.rebuild()
-        for event in events_on(components.blackboard):
+        replayed_tasks = [
             fanout.count_and_follow_up(event)
+            for event in events_on(components.blackboard)
+        ]
         components.blackboard.subscribe(fanout)
         components.blackboard.subscribe(activity)
         stale_request = context.run_root / STOP_REQUEST_FILE_NAME
@@ -429,7 +452,9 @@ class LocalHerd:
             stale_request.unlink()
         else:
             pass
-        reclaim_earlier_leases(components)
+        reclaim_earlier_work(
+            components, tuple(task for task in replayed_tasks if task is not None)
+        )
         ledger = SessionLedger()
         leases = LedgerLeases(leases=components.leases, ledger=ledger)
         inbox = InterruptInbox()
