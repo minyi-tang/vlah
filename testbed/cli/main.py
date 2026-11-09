@@ -14,7 +14,7 @@ import sys
 import time
 from pathlib import Path
 
-from testbed.problem_api import STATE_DIR
+from testbed.problem_api import IS_CHECKOUT, STATE_DIR
 
 
 def _env(name, default=None, required=False):
@@ -283,6 +283,13 @@ def cmd_selftest(a):
 
 
 def cmd_extras(a):
+    if not IS_CHECKOUT:
+        sys.exit(
+            "tb extras requires a source checkout and operator-owned hidden material; "
+            "alternative policies are not included in distributions"
+        )
+    else:
+        pass
     from testbed.extras.checks import main as ex_main
 
     sys.exit(ex_main(a))

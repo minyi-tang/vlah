@@ -35,7 +35,15 @@ from testbed.cli.pack import leaked, pack_problem
 from testbed.integrator.core import IntegratorConfig
 from testbed.integrator.driver import Integrator
 from testbed.integrator.merge import copy_tree
-from testbed.problem_api import REPO_ROOT, STATE_DIR, load_problem, resolve_problem_dir
+from testbed.problem_api import (
+    IS_CHECKOUT,
+    PROBLEMS_ROOT,
+    REPO_ROOT,
+    STATE_DIR,
+    load_problem,
+    private_dirs,
+    resolve_problem_dir,
+)
 from testbed.recorder.log import read_events
 from testbed.scorecard.report import render_one
 
@@ -180,9 +188,8 @@ def agent_sandbox_prefix(ws: Path, extra_allow: list[Path] | None = None) -> lis
     rules.append(
         f"(allow file-read-data (literal {q(pkg.parent)}))"
     )  # sys.path entry: listing only
-    rules.append(
-        f"(deny file-read-data (subpath {q(pkg / 'extras')}))"
-    )  # alternative policies live there
+    for operator_path in [pkg / "extras", PROBLEMS_ROOT, STATE_DIR, *private_dirs()]:
+        rules.append(f"(deny file-read-data (subpath {q(operator_path)}))")
     pkg_re = re.escape(_real(pkg)).replace('"', "")
     rules.append(
         f'(deny file-read-data (regex #"^{pkg_re}/.*\\.(md|toml|json|jsonl|txt)$"))'
@@ -385,7 +392,7 @@ def main(a):
     else:
         pass
     run_id = a.run_id or f"r-{datetime.now():%Y%m%d-%H%M%S}-{arm}"
-    wd = Path(a.workdir or STATE_DIR / "runs" / run_id)
+    wd = Path(a.workdir or STATE_DIR / "runs" / run_id).resolve()
     wd.mkdir(parents=True, exist_ok=True)
     url = (
         a.slow_url
@@ -578,7 +585,7 @@ def run_herd(
     with (wd / "herd.log").open("w") as log:
         proc = subprocess.Popen(
             ["/bin/sh", "-c", cmd],
-            cwd=REPO_ROOT,
+            cwd=REPO_ROOT if IS_CHECKOUT else wd,
             env=env,
             stdout=log,
             stderr=subprocess.STDOUT,
@@ -609,7 +616,8 @@ def run_herd(
             None,
         )
         if last is None:
-            base = Path(load_problem(a.problem).baseline_dir())
+            base = wd / "fallback-baseline"
+            copy_tree(load_problem(a.problem).baseline_dir(), base)
             last = runner.submit_dir(
                 base,
                 predicted=0.0,

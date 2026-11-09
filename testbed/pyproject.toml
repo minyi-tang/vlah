@@ -2,6 +2,9 @@
 name = "vlah-testbed"
 version = "0.1.0"
 description = "Herd testbed: cheap problems, a scarce slow judge, recorder, scorecard and the shared integrator (issue #10)."
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
 requires-python = ">=3.11"
 dependencies = [
     "fastapi>=0.110",
@@ -15,17 +18,49 @@ dependencies = [
 tb = "testbed.cli.main:main"
 
 [build-system]
-requires = ["hatchling>=1.25"]
+requires = ["hatchling>=1.27"]
 build-backend = "hatchling.build"
 
-# This directory is the importable package "testbed" itself. The workspace installs it editable:
-# only a path entry for the repo root, nothing copied (a copy would shadow the repo and leak
-# DECISIONS.md into the agents' sandbox).
+# Editable installs still import this directory from the repository root.
 [tool.hatch.build]
 dev-mode-dirs = [".."]
+only-include = [
+    "__init__.py",
+    "problem_api.py",
+    "arms/__init__.py",
+    "arms/runner.py",
+    "arms/scripted/__init__.py",
+    "arms/scripted/cli_agent.py",
+    "arms/scripted/env.py",
+    "arms/scripted/fake_herd.py",
+    "arms/scripted/scenarios.py",
+    "arms/scripted/selftest.py",
+    "cli/__init__.py",
+    "cli/client.py",
+    "cli/main.py",
+    "cli/pack.py",
+    "integrator/__init__.py",
+    "integrator/core.py",
+    "integrator/driver.py",
+    "integrator/merge.py",
+    "recorder/__init__.py",
+    "recorder/log.py",
+    "sandbox/__init__.py",
+    "sandbox/proc.py",
+    "scorecard/__init__.py",
+    "scorecard/metrics.py",
+    "scorecard/report.py",
+    "slow_eval/__init__.py",
+    "slow_eval/app.py",
+    "slow_eval/core.py",
+    "slow_eval/testing.py",
+]
+
+[tool.hatch.build.hooks.custom]
+path = "hatch_build.py"
 
 [tool.hatch.build.targets.wheel]
-bypass-selection = true
+sources = {"" = "testbed"}
 
 [tool.ruff]
 extend = "../pyproject.toml"
