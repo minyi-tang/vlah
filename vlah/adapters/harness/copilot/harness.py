@@ -56,7 +56,9 @@ from vlah.core.types.tasks import Task
 from vlah.ports.errors import NotSupportedError
 from vlah.ports.executor import AgentSpec, Handle, StartPack
 from vlah.ports.harness import ContextUsage, HookConfig, ToolEndpoint, Workspace
-from vlah.prompts.worker import render_worker_prompt
+from vlah.prompts.assemble import assemble
+from vlah.prompts.capabilities import McpServer
+from vlah.prompts.profile import WORKER, RoleProfile
 
 logger = logging.getLogger(__name__)
 
@@ -84,6 +86,8 @@ class CopilotConfig:
     context_window_tokens: int | None = None
     copilot_command: tuple[str, ...] = ("copilot",)
     python_executable: str = field(default_factory=lambda: sys.executable)
+    # The role's prompt and capabilities; herd.yaml may change the capability set.
+    profile: RoleProfile = WORKER
     # Hosts the agent's shell may reach, such as the testbed's slow tier for tb fast.
     allowed_urls: tuple[str, ...] = ()
     # Hosts Copilot itself reaches to sign in and call the model, port 443.
@@ -103,19 +107,45 @@ def egress_policy(
     return session_policy(
         tool_endpoint,
         hook_config,
-        config.allowed_urls,
+        session_urls(config),
         [HostRule(host=host, purpose="model_api") for host in config.copilot_api_hosts],
     )
 
 
-def mcp_config(tool_endpoint: ToolEndpoint) -> str:
-    server = {
-        "type": "http",
-        "url": tool_endpoint.url,
-        "headers": {"Authorization": f"Bearer {tool_endpoint.bearer_token}"},
-        "tools": ["*"],
-    }
-    return json.dumps({"mcpServers": {HERD_SERVER_NAME: server}}, indent=2)
+def session_urls(config: CopilotConfig) -> tuple[str, ...]:
+    """The configured hosts, then those the profile's capabilities need."""
+    return (*config.allowed_urls, *config.profile.allowed_urls())
+
+
+def mcp_config(tool_endpoint: ToolEndpoint, profile: RoleProfile) -> str:
+    """The herd's server when the profile has the herd capability, then the static
+    servers its other capabilities bring."""
+    servers = (
+        [
+            McpServer(
+                name=HERD_SERVER_NAME,
+                url=tool_endpoint.url,
+                headers={"Authorization": f"Bearer {tool_endpoint.bearer_token}"},
+            )
+        ]
+        if profile.has(HERD_SERVER_NAME)
+        else []
+    )
+    servers.extend(profile.mcp_servers())
+    return json.dumps(
+        {
+            "mcpServers": {
+                server.name: {
+                    "type": "http",
+                    "url": server.url,
+                    "headers": server.headers,
+                    "tools": ["*"],
+                }
+                for server in servers
+            }
+        },
+        indent=2,
+    )
 
 
 def settings(python_executable: str) -> str:
@@ -149,7 +179,9 @@ class CopilotHarness:
             else ()
         )
         urls = tuple(
-            argument for url in config.allowed_urls for argument in ("--allow-url", url)
+            argument
+            for url in session_urls(config)
+            for argument in ("--allow-url", url)
         )
         return (
             config.python_executable,
@@ -185,10 +217,10 @@ class CopilotHarness:
         window = self.config.context_window_tokens
         return AgentSpec(
             agent=agent,
-            command=self.command(render_worker_prompt(agent, task)),
+            command=self.command(assemble(self.config.profile, agent, task)),
             files={
                 **start_pack.files,
-                MCP_CONFIG_PATH: mcp_config(tool_endpoint),
+                MCP_CONFIG_PATH: mcp_config(tool_endpoint, self.config.profile),
                 SETTINGS_PATH: settings(self.config.python_executable),
             },
             env={
