@@ -265,7 +265,7 @@ def test_check_kind_names_the_missing_cluster_and_the_pod_probe() -> None:
             "crictl images": CommandResult(
                 exit_code=0, stdout="sha256:abc\n", stderr=""
             ),
-            "vlah-stack-probe": CommandResult(
+            "logs vlah-stack-probe": CommandResult(
                 exit_code=0, stdout="resolved 192.168.65.254\nreached\n", stderr=""
             ),
         }
@@ -276,3 +276,43 @@ def test_check_kind_names_the_missing_cluster_and_the_pod_probe() -> None:
         "host from the node",
         "model gateway from the node",
     ]
+
+
+def test_check_kind_reads_the_probe_from_the_pod_log() -> None:
+    """kubectl run --rm -i lost the output of a probe pod that ended before kubectl
+    attached, so the pre-flight said the name did not resolve when it did (#170)."""
+    lost_attach = ScriptedDocker(
+        answers={
+            "jsonpath={.items[*].status.phase}": CommandResult(
+                exit_code=0, stdout="Running", stderr=""
+            ),
+            "crictl images": CommandResult(
+                exit_code=0, stdout="sha256:abc\n", stderr=""
+            ),
+            "logs vlah-stack-probe": CommandResult(
+                exit_code=0, stdout="resolved 172.18.0.1\n", stderr=""
+            ),
+            "run vlah-stack-probe": CommandResult(
+                exit_code=0,
+                stdout='pod "vlah-stack-probe" deleted from default namespace\n',
+                stderr="",
+            ),
+        }
+    )
+    checks = check_kind(lost_attach)
+    assert checks[-1].name == "host from the node"
+    assert checks[-1].passed, checks[-1].detail
+
+    unresolved = ScriptedDocker(
+        answers={
+            "logs vlah-stack-probe": CommandResult(
+                exit_code=0,
+                stdout="lookup failed: [Errno -2] Name or service not known\n",
+                stderr="",
+            )
+        }
+    )
+    host_check = check_kind(unresolved)[-1]
+    assert not host_check.passed
+    assert "Name or service not known" in host_check.detail
+    assert "vlah stack --kind up" in host_check.detail
