@@ -1252,6 +1252,7 @@ dependencies = [
     { name = "redis" },
     { name = "starlette" },
     { name = "uvicorn" },
+    { name = "vlah-testbed" },
 ]
 
 [package.dev-dependencies]
@@ -1274,6 +1275,7 @@ requires-dist = [
     { name = "redis", specifier = ">=5.0" },
     { name = "starlette", specifier = ">=1.9" },
     { name = "uvicorn", specifier = ">=0.54" },
+    { name = "vlah-testbed", editable = "testbed" },
 ]
 
 [package.metadata.requires-dev]

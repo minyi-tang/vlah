@@ -84,16 +84,22 @@ Good fits include:
 
 ## Quickstart
 
-> Preview: this is the planned interface. See the [full quickstart](docs/quickstart.md).
+For editable development, install both packages through the uv workspace:
 
 ```bash
 git clone https://github.com/minyi-tang/vlah && cd vlah
-uv sync
+uv sync --locked
 
-uv run vlah demo     # a toy problem, fully in memory: about 10 seconds, no API keys
+uv run vlah demo     # a toy problem, fully in memory; no API keys
 ```
 
-Point it at your own problem:
+Normal wheels and source archives also work without a checkout. VLAH declares
+`vlah-testbed` as a runtime dependency for its shared integrator; it is not an
+optional extra or a copied implementation. The [artifact installation instructions](docs/quickstart.md#from-built-artifacts)
+build both distributions and install VLAH into a fresh environment. They do not
+assume either package has been published on PyPI.
+
+The following real-run flow is a preview:
 
 ```bash
 uv run vlah init cache-hit --repo ~/code/my-harness   # scaffold a problem folder
