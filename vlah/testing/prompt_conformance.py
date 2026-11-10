@@ -29,6 +29,9 @@ STUB_TAG = "stub"
 HERD_TOOL_PREFIXES = (f"mcp__{HERD_SERVER_NAME}__", f"{HERD_SERVER_NAME}-")
 # Tools whose arguments are the agent's own prose, where naming a path is not a read.
 PROSE_TOOLS = frozenset({"repo_write", "surprise"})
+# A shell command may name a path to stay out of it (find ! -path); what a shell
+# read returns shows in the transcript, where a canary catches it.
+SHELL_TOOLS = frozenset({"bash", "shell", "powershell", "run_in_terminal"})
 # How the interrupt hook opens its two denials (vlah.adapters.harness.interrupt_hook).
 INTERRUPT_DENIAL = "The herd interrupted you"
 WRAP_UP_DENIAL = "Your context is"
@@ -329,10 +332,12 @@ def not_applicable(check: Check, reason: str) -> Finding:
 
 
 def reads(evidence: SessionEvidence) -> list[ToolCall]:
+    """Calls whose arguments name what they open: not prose, not a shell command."""
     return [
         call
         for call in evidence.tool_calls
         if not (call.is_herd_tool and call.name in PROSE_TOOLS)
+        and call.name.lower() not in SHELL_TOOLS
     ]
 
 
