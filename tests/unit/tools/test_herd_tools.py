@@ -14,6 +14,7 @@ from vlah.core.types.ids import ActorId
 from vlah.core.types.interrupts import Interrupt
 from vlah.core.types.params import Params
 from vlah.core.types.tasks import Task
+from vlah.tools.evidence import NO_FINDING_TAG
 from vlah.tools.herd_tools import HerdTools, ToolReply
 
 pytestmark = pytest.mark.tools
@@ -93,6 +94,30 @@ def test_a_dead_end_must_name_the_candidate_it_tested(tmp_path: Path) -> None:
     )
     assert "error" not in harness.tools.repo_write(WORKER, {cited_path: cited}).result
     assert harness.recorder.events[-1].data["hash"] == "9f3a"
+
+
+def test_a_dead_end_tagged_no_finding_needs_no_candidate(tmp_path: Path) -> None:
+    """The prompt allows a dead end that says "no finding this time" (v2.2 section
+    13), and the tool server refused every one of them for citing no candidate."""
+    harness = make_tools_harness(tmp_path, PRESETS["S2"])
+    harness.tools.register_agent(WORKER, tmp_path)
+    harness.blackboard.write(ActorId("human"), {"spec.md": b"spec"}, "spec")
+    claim = Claim(
+        id=f"c-{WORKER}-00001",
+        type="dead_end",
+        status="proposed",
+        approach="a-01",
+        author=WORKER,
+        tags=(NO_FINDING_TAG,),
+        evidence=(EvidenceRef(path="spec.md"),),
+        body="No finding this time.",
+    )
+    reply = harness.tools.repo_write(
+        WORKER, {f"claims/{WORKER}/{claim.id}.md": render_claim(claim)}
+    )
+    assert "error" not in reply.result
+    (event,) = harness.recorder.events
+    assert event.data["kind"] == "claim" and "hash" not in event.data
 
 
 @pytest.mark.parametrize(

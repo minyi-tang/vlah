@@ -44,6 +44,7 @@ from vlah.ports.store import ObjectStore
 from vlah.tools.api import Recorder
 from vlah.tools.evidence import (
     CLAIM_ID_PATTERN,
+    NO_FINDING_TAG,
     candidate_hashes,
     evidence_pointers,
     parse_claims,
@@ -254,7 +255,9 @@ class HerdTools:
         missing_hash = [
             claim.id
             for claim in claims
-            if claim.type == "dead_end" and not hashes_by_claim[claim.id]
+            if claim.type == "dead_end"
+            and not hashes_by_claim[claim.id]
+            and NO_FINDING_TAG not in claim.tags
         ]
         if gate_errors or parse_errors or private_evidence:
             return {
@@ -264,7 +267,8 @@ class HerdTools:
             return {
                 "error": f"dead ends {missing_hash} must cite the candidate they tested "
                 "(evidence: candidate: candidates/<hash>/..., or the result claim) so "
-                "nobody re-runs it"
+                f"nobody re-runs it; a session that found nothing to test writes a "
+                f"dead_end tagged {NO_FINDING_TAG} instead"
             }, []
         else:
             receipt = self.blackboard.write(

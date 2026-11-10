@@ -19,6 +19,8 @@ CLAIM_ID_PATTERN = re.compile(r"c-(?P<author>.+)-\d+")
 # A claim that records composing two candidates carries this tag (TB section 11.5,
 # conflict handling).
 COMPOSE_TAG = "compose"
+# A dead end with nothing to re-run: a session that found nothing (v2.2 section 13).
+NO_FINDING_TAG = "no_finding"
 RECORDER_KIND_BY_CLAIM_TYPE = {"dead_end": "dead_end", "insight": "insight"}
 
 
@@ -74,10 +76,13 @@ def write_event_data(claim: Claim, hashes: tuple[str, ...]) -> dict[str, JsonVal
     """The blackboard_write recorder event for a merged claim."""
     if COMPOSE_TAG in claim.tags:
         kind = "compose"
+    elif claim.type == "dead_end" and NO_FINDING_TAG in claim.tags:
+        # The recorder counts dead-end re-hits by hash, and this one has none.
+        kind = "claim"
     else:
         kind = RECORDER_KIND_BY_CLAIM_TYPE.get(claim.type, "claim")
     data: dict[str, JsonValue] = {"kind": kind, "id": claim.id, "refs": list(hashes)}
-    if claim.type == "dead_end":
+    if kind == "dead_end":
         data["hash"] = hashes[0]
     else:
         pass

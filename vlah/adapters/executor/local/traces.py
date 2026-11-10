@@ -30,8 +30,8 @@ CONTEXT_FILE = "CONTEXT.md"
 WRITE_ATTEMPTS = 3
 RESTART_HINT = (
     "Your previous session for this task ended without writing a claim. You must "
-    "write at least one claim with evidence before you finish; a dead_end saying "
-    "'no finding this time' is allowed."
+    "write at least one claim with evidence before you finish; a dead_end tagged "
+    "no_finding that says 'no finding this time' is allowed."
 )
 
 

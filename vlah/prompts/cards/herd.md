@@ -26,6 +26,8 @@ The cache misses dominate: halving them doubled the throughput on every seed.
 ```
 
   Each evidence item has exactly one key: path (a file on the blackboard),
-  candidate (a candidate's directory or result), claim (another claim's id) or
-  trace (a trace pointer). Types and their first status: result, insight,
-  dead_end and metric start as proposed; question starts as open.
+  candidate (a file in a candidate's directory, such as candidates/<hash>/result.json
+  or manifest.yaml), claim (another claim's id) or trace (a traces/... pointer the
+  herd wrote). A dead_end cites the candidate it tested, or carries the tag
+  no_finding. Types and their first status: result, insight, dead_end and metric
+  start as proposed; question starts as open.

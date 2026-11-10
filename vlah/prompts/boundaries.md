@@ -1,8 +1,8 @@
 The herd enforces these boundaries. Within them, choose how you work.
 
 - Before you end the session, write at least one claim with evidence. A dead_end
-  that says "no finding this time" is allowed. Ending without a claim is not: the
-  task is then not marked complete.
+  tagged no_finding that says "no finding this time" is allowed. Ending without a
+  claim is not: the task is then not marked complete.
 - Never try to read eval definitions, hidden data, or anything under private/.
 - Work only from your own clone and what the tools return. Never try to reach
   another agent's sandbox, clone or files; another worker's claims come to you
