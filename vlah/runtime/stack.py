@@ -53,16 +53,28 @@ KIND_NODE = f"{KIND_CLUSTER}-control-plane"
 CALICO_MANIFEST_URL = "https://raw.githubusercontent.com/projectcalico/calico/v3.29.1/manifests/calico.yaml"
 CALICO_POD_SUBNET = "192.168.0.0/16"
 KIND_WAIT = "180s"
+NODE_GATEWAY_FORMAT = "{{range .NetworkSettings.Networks}}{{.Gateway}} {{end}}"
+PROBE_POD = "vlah-stack-probe"
+PROBE_WAIT = "120s"
+# Always exits 0, so the pod reaches Succeeded and its log carries the answer.
 HOST_PROBE = (
     "import socket, sys, urllib.error, urllib.request\n"
-    "address = socket.gethostbyname(sys.argv[1])\n"
-    "print('resolved', address)\n"
+    "try:\n"
+    "    address = socket.gethostbyname(sys.argv[1])\n"
+    "except OSError as error:\n"
+    "    print('lookup failed:', error)\n"
+    "    sys.exit(0)\n"
+    "else:\n"
+    "    print('resolved', address)\n"
     "if len(sys.argv) > 2:\n"
     "    try:\n"
     f"        urllib.request.urlopen(sys.argv[2], timeout={PROBE_TIMEOUT_SECONDS}).read()\n"
     "    except urllib.error.HTTPError:\n"
-    "        pass\n"
-    "    print('reached')\n"
+    "        print('reached')\n"
+    "    except OSError as error:\n"
+    "        print('request failed:', error)\n"
+    "    else:\n"
+    "        print('reached')\n"
     "else:\n"
     "    pass\n"
 )
@@ -365,7 +377,8 @@ def kubectl(run: RunCommand, *arguments: str) -> CommandResult:
 
 
 def kind_up(run: RunCommand, stream: TextIO, home: str, image: str) -> int:
-    """Create the cluster if it is missing, install Calico, wait, load the worker image."""
+    """Create the cluster if it is missing, make this machine's name resolve on the
+    node, install Calico, wait, load the worker image."""
     clusters = run(("kind", "get", "clusters"))
     if KIND_CLUSTER in clusters.stdout.split():
         print(f"kind cluster {KIND_CLUSTER} exists", file=stream)
@@ -379,6 +392,42 @@ def kind_up(run: RunCommand, stream: TextIO, home: str, image: str) -> int:
             return 1
         else:
             print(f"kind cluster {KIND_CLUSTER} created", file=stream)
+    # Docker Desktop resolves the name for every container; Docker Engine on Linux
+    # does not, and pods on the node's network read the node's hosts file.
+    resolved = run(("docker", "exec", KIND_NODE, "getent", "ahostsv4", CONTAINER_HOST))
+    if resolved.passed:
+        pass
+    else:
+        gateway = run(("docker", "inspect", "--format", NODE_GATEWAY_FORMAT, KIND_NODE))
+        gateway_addresses = gateway.stdout.split()
+        if not gateway.passed or not gateway_addresses:
+            print(
+                f"could not find the gateway of {KIND_NODE}: {gateway.detail}",
+                file=stream,
+            )
+            return 1
+        else:
+            pass
+        hosts_line = f"{gateway_addresses[0]} {CONTAINER_HOST}"
+        added = run(
+            (
+                "docker",
+                "exec",
+                KIND_NODE,
+                "sh",
+                "-c",
+                f"echo '{hosts_line}' >> /etc/hosts",
+            )
+        )
+        if not added.passed:
+            print(
+                f"could not add {CONTAINER_HOST} to the hosts file of {KIND_NODE}: "
+                f"{added.detail}",
+                file=stream,
+            )
+            return 1
+        else:
+            print(f"{KIND_NODE} now resolves {hosts_line}", file=stream)
     calico = kubectl(run, "apply", "-f", CALICO_MANIFEST_URL)
     if not calico.passed:
         print(f"Calico did not apply: {calico.detail}", file=stream)
@@ -501,12 +550,11 @@ def check_kind(
         )
     )
     probe_arguments = [CONTAINER_HOST] + ([gateway_url] if gateway_url else [])
-    probe = kubectl(
+    kubectl(run, "delete", "pod", PROBE_POD, "--ignore-not-found", "--wait=true")
+    started = kubectl(
         run,
         "run",
-        "vlah-stack-probe",
-        "--rm",
-        "-i",
+        PROBE_POD,
         "--restart=Never",
         f"--image={image}",
         "--image-pull-policy=IfNotPresent",
@@ -518,16 +566,34 @@ def check_kind(
         HOST_PROBE,
         *probe_arguments,
     )
+    # kubectl run --attach loses the output of a pod that ends before it attaches.
+    finished = kubectl(
+        run,
+        "wait",
+        "--for=jsonpath={.status.phase}=Succeeded",
+        f"pod/{PROBE_POD}",
+        f"--timeout={PROBE_WAIT}",
+    )
+    probe = kubectl(run, "logs", PROBE_POD)
+    kubectl(run, "delete", "pod", PROBE_POD, "--wait=false")
+    probe_failure = (
+        probe.detail
+        or (finished.detail if not finished.passed else "")
+        or (started.detail if not started.passed else "")
+        or "the probe pod printed nothing"
+    )
     checks.append(
         Check(
             name="host from the node",
-            # The probe exits non-zero when the gateway fails; the name still resolved.
             passed="resolved" in probe.stdout,
             detail=(
                 f"{CONTAINER_HOST} resolves on the node"
                 + (" and the gateway answers" if "reached" in probe.stdout else "")
                 if "resolved" in probe.stdout
-                else f"{CONTAINER_HOST} does not resolve on the node: {probe.detail}"
+                else (
+                    f"{CONTAINER_HOST} does not resolve on the node; run vlah stack "
+                    f"--kind up ({probe_failure})"
+                )
             ),
         )
     )

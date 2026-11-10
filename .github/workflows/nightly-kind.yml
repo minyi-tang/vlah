@@ -19,7 +19,7 @@ jobs:
         run: docker build -t vlah-worker:dev -f deploy/worker/Dockerfile .
       - name: Install kind
         run: |
-          curl -Lo ./kind https://kind.sigs.k8s.io/dl/v0.33.0/kind-linux-amd64
+          curl --fail --location --retry 5 --retry-all-errors --output ./kind https://kind.sigs.k8s.io/dl/v0.33.0/kind-linux-amd64
           chmod +x ./kind && sudo mv ./kind /usr/local/bin/kind
       - name: Bring the kind cluster up with Calico and the worker image
         run: uv run vlah stack --kind up
